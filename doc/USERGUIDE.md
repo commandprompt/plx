@@ -2,9 +2,9 @@
 
 This guide shows how to write functions in the plx dialects. Each example is
 taken from the PL/pgSQL chapter of the PostgreSQL documentation and is shown in
-three forms: the plpgsql from the manual, the plxruby version, and the plxphp
-version. Because plx transpiles to plpgsql, the plpgsql column is also what the
-plx versions produce and run.
+four forms: the plpgsql from the manual, the plxruby version, the plxphp version,
+and the plxjs version. Because plx transpiles to plpgsql, the plpgsql form is
+also what the plx versions produce and run.
 
 Install the extension first:
 
@@ -39,6 +39,14 @@ plxphp:
 ```sql
 CREATE FUNCTION sales_tax(subtotal real) RETURNS real LANGUAGE plxphp AS $$
 return $subtotal * 0.06;
+$$;
+```
+
+plxjs:
+
+```sql
+CREATE FUNCTION sales_tax(subtotal real) RETURNS real LANGUAGE plxjs AS $$
+return subtotal * 0.06;
 $$;
 ```
 
@@ -98,6 +106,19 @@ return $result;
 $$;
 ```
 
+plxjs:
+
+```sql
+CREATE FUNCTION classify(number int) RETURNS text LANGUAGE plxjs AS $$
+let result /*:: text */;
+if (number == 0) { result = "zero"; }
+else if (number > 0) { result = "positive"; }
+else if (number < 0) { result = "negative"; }
+else { result = "NULL"; }
+return result;
+$$;
+```
+
 Note: `==` lowers to SQL `=`. A comparison with a NULL argument is unknown, so
 none of the branches match and the `else` branch runs.
 
@@ -145,6 +166,18 @@ return $total;
 $$;
 ```
 
+plxjs:
+
+```sql
+CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxjs AS $$
+let total = 0 /*:: bigint */;
+for (const r of query(`SELECT amount FROM orders WHERE grp = ${g}`)) {
+  total = total + r.amount;
+}
+return total;
+$$;
+```
+
 ## An integer FOR loop
 
 PL/pgSQL manual, "FOR (integer variant)".
@@ -188,6 +221,18 @@ return $total;
 $$;
 ```
 
+plxjs:
+
+```sql
+CREATE FUNCTION sum_to(n int) RETURNS bigint LANGUAGE plxjs AS $$
+let total = 0 /*:: bigint */;
+for (let i = 1; i <= n; i++) {
+  total = total + i;
+}
+return total;
+$$;
+```
+
 ## A set-returning function
 
 PL/pgSQL manual, "RETURN NEXT and RETURN QUERY".
@@ -222,6 +267,17 @@ plxphp:
 CREATE FUNCTION squares(n int) RETURNS SETOF int LANGUAGE plxphp AS $$
 for ($i = 1; $i <= $n; $i++) {
   return_next($i * $i);
+}
+return;
+$$;
+```
+
+plxjs:
+
+```sql
+CREATE FUNCTION squares(n int) RETURNS SETOF int LANGUAGE plxjs AS $$
+for (let i = 1; i <= n; i++) {
+  return_next(i * i);
 }
 return;
 $$;
@@ -271,6 +327,19 @@ try {
 $$;
 ```
 
+plxjs:
+
+```sql
+CREATE FUNCTION safe_divide(a int, b int) RETURNS int LANGUAGE plxjs AS $$
+try {
+  return a / b;
+} catch (e) {
+  raise("notice", `caught: ${e.message}`);
+  return -1;
+}
+$$;
+```
+
 ## Raising errors
 
 PL/pgSQL manual, "Errors and messages".
@@ -293,6 +362,12 @@ plxphp:
 throw new Exception("Nonexistent ID --> {$user_id}");
 ```
 
+plxjs:
+
+```sql
+throw new Error(`Nonexistent ID --> ${user_id}`);
+```
+
 ## Anonymous code blocks
 
 plxruby:
@@ -310,6 +385,14 @@ plxphp:
 ```sql
 DO LANGUAGE plxphp $$
 for ($i = 1; $i <= 3; $i++) { raise('notice', "row {$i}"); }
+$$;
+```
+
+plxjs:
+
+```sql
+DO LANGUAGE plxjs $$
+for (let i = 1; i <= 3; i++) { raise("notice", `row ${i}`); }
 $$;
 ```
 

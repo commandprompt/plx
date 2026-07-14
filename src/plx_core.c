@@ -33,6 +33,7 @@ PG_MODULE_MAGIC;
 /* Built-in dialects registered at module load */
 extern const PlxDialect plx_ruby_dialect;
 extern const PlxDialect plx_php_dialect;
+extern const PlxDialect plx_js_dialect;
 
 /* ---- dialect registry ------------------------------------------------- */
 
@@ -197,4 +198,5 @@ _PG_init(void)
 	/* Register built-in dialects. */
 	plx_register_dialect(&plx_ruby_dialect);
 	plx_register_dialect(&plx_php_dialect);
+	plx_register_dialect(&plx_js_dialect);
 }

@@ -43,6 +43,7 @@ typedef struct
 	int			len;
 	int			line;
 	bool		sq;				/* single-quoted string */
+	char		quote;			/* opening quote char: ' " or ` */
 	const char *ann;			/* TYPEANN: type text start */
 	int			annlen;
 } Tok;
@@ -316,7 +317,7 @@ lex(Ctx *cx)
 			PUSH(isflt ? T_FLOAT : T_INT);
 			continue;
 		}
-		if (*p == '\'' || *p == '"')
+		if (*p == '\'' || *p == '"' || *p == '`')
 		{
 			char		q = *p;
 
@@ -331,6 +332,7 @@ lex(Ctx *cx)
 				p++;			/* closing quote */
 			PUSH(T_STRING);
 			t[n - 1].sq = (q == '\'');
+			t[n - 1].quote = q;
 			continue;
 		}
 		switch (*p)
@@ -497,6 +499,28 @@ interp_at(const PlxSurface *surf, const char *s, const char *e,
 		*next = (q < e) ? q + 1 : q;
 		return true;
 	}
+	if (surf->interp_dollarbrace && s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${expr} (JS) */
+	{
+		int			depth = 1;
+		const char *x = s + 2, *q = x;
+
+		while (q < e && depth > 0)
+		{
+			if (*q == '{')
+				depth++;
+			else if (*q == '}')
+			{
+				depth--;
+				if (!depth)
+					break;
+			}
+			q++;
+		}
+		*exs = x;
+		*exl = (int) (q - x);
+		*next = (q < e) ? q + 1 : q;
+		return true;
+	}
 	if (surf->interp_dollar)
 	{
 		if (s + 1 < e && s[0] == '{' && s[1] == '$')	/* {$expr} */
@@ -554,7 +578,7 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 		const char *exs, *nx;
 		int			exl;
 
-		if (!tk->sq && interp_at(cx->surf, s, e, &exs, &exl, &nx))
+		if (tk->quote == cx->surf->interp_quote && interp_at(cx->surf, s, e, &exs, &exl, &nx))
 		{
 			char	   *rw;
 
@@ -766,7 +790,7 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 				i++;
 			continue;
 		}
-		if (c == '\'' || c == '"')
+		if (c == '\'' || c == '"' || c == '`')
 		{
 			/* build a synthetic token to reuse emit_string_value */
 			Tok			st;
@@ -785,6 +809,7 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 			st.s = s + i;
 			st.len = j - i;
 			st.sq = (c == '\'');
+			st.quote = c;
 			emit_string_value(cx, &st, &out);
 			i = j;
 			continue;
@@ -834,7 +859,8 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 			}
 
 			if ((wl == 3 && strncmp(s + i, "nil", 3) == 0) ||
-				(wl == 4 && strncmp(s + i, "null", 4) == 0))
+				(wl == 4 && strncmp(s + i, "null", 4) == 0) ||
+				(wl == 9 && strncmp(s + i, "undefined", 9) == 0))
 				appendStringInfoString(&out, "NULL");
 			else if (wl == 4 && strncmp(s + i, "true", 4) == 0)
 				appendStringInfoString(&out, "true");
@@ -1122,7 +1148,7 @@ emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		const char *exs, *nx;
 		int			exl;
 
-		if (!tk->sq && interp_at(cx->surf, s, e, &exs, &exl, &nx))
+		if (tk->quote == cx->surf->interp_quote && interp_at(cx->surf, s, e, &exs, &exl, &nx))
 		{
 			appendStringInfoString(out, rewrite_expr(cx, exs, exl, false));
 			s = nx;
@@ -1491,6 +1517,13 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 {
 	StringInfo	o = &cx->out;
 	Tok		   *t0 = &cx->t[a];
+
+	/* JS/PHP variable declaration keyword (let/const/var): strip and continue */
+	if (t0->kind == T_KW && t0->kw == KW_LET && a + 1 < b)
+	{
+		a++;
+		t0 = &cx->t[a];
+	}
 
 	/* statement-level intrinsics */
 	if (t0->kind == T_IDENT && a + 1 < b && cx->t[a + 1].kind == T_LPAREN)
@@ -2397,23 +2430,74 @@ parse_while_brace(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
-/* for ($v = LO; $v < or <= HI; $v++ | $v += K) -> integer FOR */
+/* emit `FOR <var> IN <query(...)> LOOP <body> END LOOP;` for a query receiver */
+static void
+brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
+{
+	StringInfo	o = &cx->out;
+	int			sa[16], se[16], after, n;
+	int			savedpos = cx->pos;
+
+	if (!(cx->t[ra].kind == T_IDENT && name_eq(&cx->t[ra], "query") &&
+		  ra + 1 < rb && cx->t[ra + 1].kind == T_LPAREN))
+		plx_err(cx, var->line, "loop source must be query(...)");
+	cx->pos = ra;
+	n = parse_args(cx, ra, sa, se, 16, &after);
+	cx->pos = savedpos;
+	if (!is_param(cx, var->s, var->len))
+	{
+		PlxLocal2  *l = local_find(cx, var->s, var->len);
+
+		if (!l)
+			l = local_add(cx, var->s, var->len);
+		l->is_record = true;
+	}
+	indent(o, ind);
+	if (n == 1 && arg_is_string_literal(cx, sa[0], se[0]))
+	{
+		appendStringInfo(o, "FOR %.*s IN ", var->len, var->s);
+		emit_string_as_sql(cx, &cx->t[sa[0]], o);
+		appendStringInfoString(o, " LOOP\n");
+	}
+	else
+	{
+		char	   *sqlv = rw_range(cx, sa[0], se[0], false);
+		char	   *binds = binds_text(cx, sa, se, n);
+
+		if (binds)
+			appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
+							 var->len, var->s, sqlv, binds);
+		else
+			appendStringInfo(o, "FOR %.*s IN EXECUTE %s LOOP\n",
+							 var->len, var->s, sqlv);
+	}
+	cx->loopdepth++;
+	parse_brace_block(cx, ind + 1);
+	cx->loopdepth--;
+	indent(o, ind);
+	appendStringInfoString(o, "END LOOP;\n");
+}
+
+/* C-style counting for, or JS `for (v of query(...))` */
 static void
 parse_for_brace(Ctx *cx, int ind)
 {
 	StringInfo	o = &cx->out;
 	int			ca, cb;
-	int			s1 = -1, s2 = -1, i, depth = 0;
+	int			s1 = -1, s2 = -1, of_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
 
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
-	/* split at the two top-level ';' */
+	/* strip a leading let/const/var declaration keyword */
+	if (cx->t[ca].kind == T_KW && cx->t[ca].kw == KW_LET)
+		ca++;
+	/* scan for top-level ';' (C-for) and KW_OF (for-of) */
 	for (i = ca; i < cb; i++)
 	{
-		if (cx->t[i].kind == T_LPAREN)
+		if (cx->t[i].kind == T_LPAREN || cx->t[i].kind == T_LBRACKET)
 			depth++;
-		else if (cx->t[i].kind == T_RPAREN)
+		else if (cx->t[i].kind == T_RPAREN || cx->t[i].kind == T_RBRACKET)
 			depth--;
 		else if (depth == 0 && cx->t[i].kind == T_SEMI)
 		{
@@ -2422,9 +2506,18 @@ parse_for_brace(Ctx *cx, int ind)
 			else
 				s2 = i;
 		}
+		else if (depth == 0 && cx->t[i].kind == T_KW && cx->t[i].kw == KW_OF)
+			of_at = i;
+	}
+	if (of_at >= 0)
+	{
+		if (cx->t[ca].kind != T_IDENT)
+			plx_err(cx, line, "for-of requires a loop variable");
+		brace_query_loop(cx, &cx->t[ca], of_at + 1, cb, ind);
+		return;
 	}
 	if (s1 < 0 || s2 < 0)
-		plx_err(cx, line, "for-loop must be a counting loop: for (v = LO; v < HI; v++)");
+		plx_err(cx, line, "for must be a counting loop 'for (v = LO; v < HI; v++)' or 'for (v of query(...))'");
 	/* init: IDENT = LO ; cond: IDENT </<= HI ; incr: IDENT ++ | += K */
 	{
 		int			ia = ca, ib = s1, cca = s1 + 1, ccb = s2, xa = s2 + 1, xb = cb;
@@ -2464,11 +2557,10 @@ parse_for_brace(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
-/* foreach (query(...) as $row) { ... } -> FOR row IN <sql> LOOP */
+/* foreach (query(...) as row) { ... } -> FOR row IN <sql> LOOP */
 static void
 parse_foreach_brace(Ctx *cx, int ind)
 {
-	StringInfo	o = &cx->out;
 	int			ca, cb, as_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
 	int			rv;
@@ -2489,55 +2581,13 @@ parse_foreach_brace(Ctx *cx, int ind)
 	}
 	if (as_at < 0)
 		plx_err(cx, line, "foreach requires 'as'");
-	/* row var: last IDENT before ')' (skip '$k =>' key form -> take value var) */
+	/* row var: last IDENT before ')' (skip a key form -> take value var) */
 	rv = cb - 1;
 	while (rv > as_at && cx->t[rv].kind != T_IDENT)
 		rv--;
 	if (rv <= as_at)
 		plx_err(cx, line, "foreach requires a row variable");
-	if (!(cx->t[ca].kind == T_IDENT && name_eq(&cx->t[ca], "query") &&
-		  cx->t[ca + 1].kind == T_LPAREN))
-		plx_err(cx, line, "foreach currently supports 'foreach (query(...) as $row)'");
-	{
-		int			sa[16], se[16], after, n;
-		int			savedpos = cx->pos;
-
-		cx->pos = ca;			/* parse_args reads from the query token */
-		n = parse_args(cx, ca, sa, se, 16, &after);
-		cx->pos = savedpos;
-		if (!is_param(cx, cx->t[rv].s, cx->t[rv].len))
-		{
-			PlxLocal2  *l = local_find(cx, cx->t[rv].s, cx->t[rv].len);
-
-			if (!l)
-				l = local_add(cx, cx->t[rv].s, cx->t[rv].len);
-			l->is_record = true;
-		}
-		indent(o, ind);
-		if (n == 1 && arg_is_string_literal(cx, sa[0], se[0]))
-		{
-			appendStringInfo(o, "FOR %.*s IN ", cx->t[rv].len, cx->t[rv].s);
-			emit_string_as_sql(cx, &cx->t[sa[0]], o);
-			appendStringInfoString(o, " LOOP\n");
-		}
-		else
-		{
-			char	   *sqlv = rw_range(cx, sa[0], se[0], false);
-			char	   *binds = binds_text(cx, sa, se, n);
-
-			if (binds)
-				appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
-								 cx->t[rv].len, cx->t[rv].s, sqlv, binds);
-			else
-				appendStringInfo(o, "FOR %.*s IN EXECUTE %s LOOP\n",
-								 cx->t[rv].len, cx->t[rv].s, sqlv);
-		}
-	}
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_query_loop(cx, &cx->t[rv], ca, as_at, ind);
 }
 
 /* try { } catch (Class $e) { } [catch...] [finally { }] */

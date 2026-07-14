@@ -5,8 +5,15 @@ stored in `pg_proc.prosrc`. Execution is performed by the standard plpgsql
 interpreter. Constructs that have no plpgsql lowering are rejected at
 `CREATE FUNCTION` time with an error and a source line number.
 
-Status: `plxruby` passes the 33-case corpus. `plxphp` passes the smoke suite in
-`test/sql/php_smoke.sql`. Both run on PostgreSQL 18.4.
+Status: three dialects are implemented and covered by the pg_regress suite
+(`test/sql/plxruby.sql`, `test/sql/plxphp.sql`, `test/sql/plxjs.sql`, plus
+`test/sql/plx_errors.sql`): `plxruby` (Ruby), `plxphp` (PHP), and `plxjs`
+(JavaScript). All run on PostgreSQL 18.4.
+
+The constructs in the table below are supported in all three dialects, each with
+its own syntax. The Ruby and PHP columns are shown; the plxjs equivalents follow
+JavaScript syntax (brace blocks, `let`/`const`/`var`, template literals) and are
+described in the per-dialect notes.
 
 ## Supported constructs
 
@@ -86,6 +93,18 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - `try/catch/finally` maps to `BEGIN/EXCEPTION/END`. `catch (\Exception $e)` maps to `WHEN OTHERS`. `$e->message` and `$e->sqlstate` map to `SQLERRM` and `SQLSTATE`.
 - `throw new Exception("msg")` maps to `RAISE EXCEPTION`.
 - `raise('notice'|'warning'|'info'|'log'|'debug'|'exception', message)` emits a `RAISE` at that level; `raise(message)` raises an exception. This call form is also accepted in plxruby (in addition to the `raise notice: "..."` keyword form).
+
+### plxjs
+- Blocks are brace-delimited. Declarations use `let`, `const`, or `var`, which are stripped in the generated plpgsql.
+- Type annotation is a `/*:: type */` block comment placed before the `;`.
+- Interpolation uses template literals: `` `text ${expr} text` ``. Plain `"..."` and `'...'` strings do not interpolate. Use template literals for string building; `+` remains numeric addition.
+- Loops: C-style `for (let i = LO; i < HI; i++)`, `while`, and `for (const row of query(...))` for row iteration.
+- `try/catch/finally` maps to `BEGIN/EXCEPTION/END`. `catch (e)` maps to `WHEN OTHERS`; `e.message` and `e.sqlstate` map to `SQLERRM` and `SQLSTATE`. `throw new Error("msg")` maps to `RAISE EXCEPTION`.
+- `raise('notice'|'warning'|..., message)` emits a `RAISE` at that level.
+- `===`/`!==` and `==`/`!=` all lower to `=`/`<>`; `null` and `undefined` lower to `NULL`.
+
+## Other dialects
+- `plxpython3` (Python) is planned. Python is indentation-based and requires an INDENT/DEDENT block mode in the shared framework.
 
 ## References
 - `ARCHITECTURE.md`: design and the verified plpgsql symbol table.

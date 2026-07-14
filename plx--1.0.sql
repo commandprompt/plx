@@ -48,3 +48,21 @@ CREATE TRUSTED LANGUAGE plxphp
 	VALIDATOR plx_php_validator;
 
 COMMENT ON LANGUAGE plxphp IS 'plx PHP dialect (transpiles to plpgsql)';
+
+/* JavaScript dialect */
+CREATE FUNCTION plx_js_validator(oid)
+	RETURNS void
+	AS '$libdir/plx', 'plx_js_validator'
+	LANGUAGE C STRICT;
+
+CREATE FUNCTION plx_js_inline_handler(internal)
+	RETURNS void
+	AS '$libdir/plx', 'plx_js_inline_handler'
+	LANGUAGE C;
+
+CREATE TRUSTED LANGUAGE plxjs
+	HANDLER plx_call_handler
+	INLINE plx_js_inline_handler
+	VALIDATOR plx_js_validator;
+
+COMMENT ON LANGUAGE plxjs IS 'plx JavaScript dialect (transpiles to plpgsql)';

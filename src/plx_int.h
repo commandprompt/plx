@@ -20,9 +20,9 @@
 typedef enum
 {
 	KW_NONE, KW_IF, KW_UNLESS, KW_ELSIF, KW_ELSE, KW_THEN, KW_END, KW_WHILE,
-	KW_UNTIL, KW_FOR, KW_FOREACH, KW_IN, KW_AS, KW_DO, KW_BEGIN, KW_RESCUE,
+	KW_UNTIL, KW_FOR, KW_FOREACH, KW_IN, KW_AS, KW_OF, KW_DO, KW_BEGIN, KW_RESCUE,
 	KW_ENSURE, KW_CASE, KW_WHEN, KW_RETURN, KW_NEXT, KW_BREAK, KW_RAISE,
-	KW_AND, KW_OR, KW_NOT, KW_EMIT, KW_RETURN_NEXT, KW_LOOP, KW_DEF,
+	KW_AND, KW_OR, KW_NOT, KW_EMIT, KW_RETURN_NEXT, KW_LOOP, KW_DEF, KW_LET,
 	KW_NIL, KW_TRUE, KW_FALSE
 } Kw;
 
@@ -46,8 +46,10 @@ typedef struct PlxSurface
 	bool		cmt_slash;			/* '//' line comment */
 	bool		cmt_block;			/* C-style block comment */
 	const char *type_ann;			/* type annotation lead, e.g. "#::" or "::" */
-	bool		interp_hashbrace;	/* "...#{expr}..." interpolation */
-	bool		interp_dollar;		/* "...$var..." / "...{$expr}..." interpolation */
+	char		interp_quote;		/* the quote char that interpolates ('"' or '`') */
+	bool		interp_hashbrace;	/* "...#{expr}..." interpolation (Ruby) */
+	bool		interp_dollar;		/* "...$var..." / "...{$expr}..." interpolation (PHP) */
+	bool		interp_dollarbrace;	/* "...${expr}..." interpolation (JS template) */
 	char		concat_op;			/* string concat operator char ('.' PHP), 0=none */
 	const PlxKwSpell *kws;
 	int			nkws;

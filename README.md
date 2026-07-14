@@ -6,12 +6,13 @@ plpgsql and stores the plpgsql in `pg_proc.prosrc`. At run time the function is
 executed by the standard plpgsql interpreter. There is no separate language
 runtime loaded into the backend.
 
-The front end is dialect-pluggable. Two dialects are implemented:
+The front end is dialect-pluggable. Three dialects are implemented:
 
-- `plxruby`: a Ruby dialect. Passes a 33-case corpus.
+- `plxruby`: a Ruby dialect.
 - `plxphp`: a PHP dialect.
+- `plxjs`: a JavaScript dialect.
 
-Two more are planned: `plxpython3` and `plxjs`.
+One more is planned: `plxpython3`.
 
 The language names are prefixed with `plx` so the extension coexists with the
 native PL/Ruby and PL/PHP languages in the same database.
@@ -84,6 +85,18 @@ CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxphp AS $$
   elseif ($score >= 80) { $grade = "B"; }
   else { $grade = "F"; }
   return $grade;
+$$;
+```
+
+And in `plxjs`:
+
+```sql
+CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxjs AS $$
+  let grade = "F";
+  if (score >= 90) { grade = "A"; }
+  else if (score >= 80) { grade = "B"; }
+  else { grade = "F"; }
+  return grade;
 $$;
 ```
 
