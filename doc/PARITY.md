@@ -4,7 +4,7 @@ Target: every plpgsql capability is expressible in each plx dialect (plxruby,
 plxphp, plxjs, plxpython3). The reference is the plpgsql statement set in
 `src/pl/plpgsql/src/plpgsql.h` (`PLpgSQL_stmt_*`) plus its declaration forms.
 
-Legend: done / partial / todo. All three dialects track the same status unless
+Legend: done / partial / todo. All four dialects track the same status unless
 noted.
 
 | plpgsql construct | plx status | dialect syntax |

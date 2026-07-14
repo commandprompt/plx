@@ -1,6 +1,20 @@
-# plexcellent — Ruby Dialect Transpiler: Final Buildable Specification & C Implementation Blueprint (M3)
+# plx Transpiler: Design Specification
 
-This is the authoritative spec for the Ruby surface of plexcellent. It supersedes the component digests and folds in every adversarial finding. The transpiler runs at `CREATE FUNCTION` time inside `plx_generic_validator`, rewrites `pg_proc.prosrc` from the Ruby dialect to canonical plpgsql text, and leaves `pg_language.lanplcallfoid` pointing at stock `plpgsql_call_handler`. Runtime is 100% stock plpgsql.
+> This is the original design specification for the Ruby transpiler, written
+> before implementation. It documents the approach and the reasoning behind it.
+> The extension as built follows this design, with these differences: the
+> product name is plx (not "plexcellent"); the transpiler was generalized to a
+> `PlxSurface` so that PHP, JavaScript, and Python reuse the shared framework
+> (see [ARCHITECTURE.md](ARCHITECTURE.md)); and everything links into a single
+> `plx.so` rather than separate per-dialect modules. For the as-built
+> architecture and the per-dialect behavior, see ARCHITECTURE.md and the dialect
+> chapters. This file is kept as a design reference.
+
+This is the specification for the Ruby surface. The transpiler runs at
+`CREATE FUNCTION` time inside `plx_generic_validator`, rewrites `pg_proc.prosrc`
+from the Ruby dialect to canonical plpgsql text, and leaves
+`pg_language.lanplcallfoid` pointing at plpgsql's `plpgsql_call_handler`, so
+run time is plpgsql.
 
 ---
 
