@@ -2,82 +2,103 @@
 
 ## Method
 
-Two workloads were measured on PostgreSQL 18.4 in the development container
+Five workloads were measured on PostgreSQL 18.4 in the development container
 (8 vCPU, 8 GiB, Ubuntu 26.04):
 
-- Arithmetic: a function that accumulates the integers 1..2,000,000 in a loop.
-  This is bound by loop dispatch and integer arithmetic in the language runtime.
-- Iteration: a function that sums a `bigint` column over a 1,000,000-row table.
-  This is bound by the row-retrieval path (SPI) and per-row marshalling.
+- arith: accumulate the integers 1 to 2,000,000 in a loop (loop dispatch and
+  integer arithmetic).
+- strbuild: build a 200,000-character string one character at a time in a loop
+  (text handling with the natural in-language idiom for each language).
+- iter: sum a `bigint` column over a 1,000,000-row table (SPI and per-row
+  marshalling).
+- branch: a four-way conditional per element over 2,000,000 elements (branch
+  dispatch).
+- call: 500,000 calls to a small function (call and return overhead). For plperl
+  and plpython3u this uses 50,000 iterations, because each call goes through SPI
+  and is far slower; those two cells are scaled to the smaller count.
 
-Each function was written idiomatically in each language, checked for a correct
+Each function is written idiomatically in each language, checked for a correct
 result, and called five times; the minimum wall-clock time (`psql \timing`) is
 reported. The harness is `bench/run_bench.py`. All languages run in one database;
-plx uses plx-prefixed language names (plxruby, plxphp), so it coexists with the
-native plruby and plphp.
+plx uses plx-prefixed language names, so it coexists with the native plruby,
+plphp, plperl, and plpython3u.
 
-plxruby and plxphp transpile to plpgsql at `CREATE FUNCTION` time, so at run time
-they execute as plpgsql. The native CommandPrompt PL/Ruby and PL/PHP, plperl, and
-plpython3u each run an embedded interpreter and retrieve rows through SPI.
+plxruby, plxphp, plxjs, and plxpython3 transpile to plpgsql at `CREATE FUNCTION`
+time, so at run time they execute as plpgsql. plperl and plpython3u run their own
+embedded interpreters and retrieve rows through SPI.
 
 ## Results
 
-| language        | arithmetic (2M loop) | iteration (1M rows) |
-|-----------------|----------------------|---------------------|
-| plpgsql         | 48.0 ms (1.00x)      | 92.0 ms (1.00x)     |
-| plxruby         | 50.8 ms (1.06x)      | 92.6 ms (1.01x)     |
-| plxphp          | 51.0 ms (1.06x)      | 93.8 ms (1.02x)     |
-| plruby (native) | 94.0 ms (1.96x)      | 373.4 ms (4.06x)    |
-| plphp (native)  | 49.3 ms (1.03x)      | 245.0 ms (2.66x)    |
-| plperl          | 43.3 ms (0.90x)      | 499.2 ms (5.42x)    |
-| plpython3u      | 69.2 ms (1.44x)      | 342.2 ms (3.72x)    |
+Times are milliseconds; the multiplier is relative to plpgsql (lower is faster).
 
-The multiplier is relative to plpgsql; lower is faster.
+| language   | arith        | strbuild     | iter          | branch        | call          |
+|------------|--------------|--------------|---------------|---------------|---------------|
+| plpgsql    | 53 (1.00x)   | 1710 (1.00x) | 95 (1.00x)    | 158 (1.00x)   | 166 (1.00x)   |
+| plxruby    | 56 (1.06x)   | 1725 (1.01x) | 95 (1.00x)    | 156 (0.99x)   | 157 (0.95x)   |
+| plxphp     | 54 (1.02x)   | 1741 (1.02x) | 99 (1.04x)    | 161 (1.02x)   | 160 (0.97x)   |
+| plxjs      | 54 (1.03x)   | 1783 (1.04x) | 99 (1.04x)    | 171 (1.08x)   | 173 (1.04x)   |
+| plxpython3 | 59 (1.11x)   | 1729 (1.01x) | 99 (1.05x)    | 157 (1.00x)   | 163 (0.98x)   |
+| plperl     | 46 (0.86x)   | 12 (0.01x)   | 535 (5.63x)   | 159 (1.01x)   | 301 (1.82x)   |
+| plpython3u | 73 (1.39x)   | 16 (0.01x)   | 351 (3.69x)   | 113 (0.72x)   | 181 (1.09x)   |
 
 ## Analysis
 
-- plxruby and plxphp match plpgsql within measurement noise on both workloads,
+- The four plx dialects match plpgsql within about 11 percent on every workload,
   because the stored function body is plpgsql. There is no run-time translation
-  cost; the translation happens once at `CREATE FUNCTION`.
-- On iteration, plxruby and plxphp are faster than the native PL/Ruby and PL/PHP
-  by 4.0x and 2.6x. plpgsql streams rows through a cursor and reads columns
-  directly, while the embedded interpreters copy each row into their own data
-  structures. plperl and plpython3u show the same pattern (5.4x and 3.7x slower
-  than plpgsql).
-- On arithmetic, the embedded interpreters vary: plperl is fastest (native
-  integer arithmetic), plphp and plpgsql/plx are close, and native plruby and
-  plpython3u are slower. plxruby and plxphp track plpgsql.
+  cost; the translation happens once at `CREATE FUNCTION`. The small spread among
+  the dialects is measurement noise.
 
-The transpile-to-plpgsql approach gives plx dialects the performance profile of
-plpgsql: strong on set-oriented and SQL-bound work, competitive on procedural
-arithmetic, with no additional language runtime loaded into the backend.
+- Row iteration (iter): plpgsql, and therefore the plx dialects, are 3.7x to 5.6x
+  faster than plperl and plpython3u. plpgsql streams rows through a cursor and
+  reads columns directly, while the embedded interpreters copy each row into
+  their own data structures.
+
+- String building (strbuild): this is a plpgsql weakness that plx inherits.
+  Concatenating onto a text variable in a loop (`s := s || 'x'`) is quadratic,
+  because each step rebuilds the whole string; plpgsql has no in-language string
+  builder. plperl and plpython3u use an efficient append or list-join and are
+  about 100x faster here. For text assembly over many pieces, build the string in
+  SQL instead (for example `string_agg` over a set) rather than character by
+  character in a loop.
+
+- Arithmetic (arith): the embedded interpreters vary. plperl is fastest (native
+  integer arithmetic), plpython3u is slowest, and plpgsql with the plx dialects
+  sits between.
+
+- Branching (branch): plpython3u is faster on this pure-CPU integer workload
+  (0.72x); plperl and plpgsql with the plx dialects are close to each other.
+
+- Call overhead (call): plpgsql and the plx dialects are fastest. plperl and
+  plpython3u pay an SPI round trip per call and are slower even at one tenth the
+  iteration count.
+
+The transpile-to-plpgsql approach gives the plx dialects the performance profile
+of plpgsql: strong on set-oriented and SQL-bound work, competitive on procedural
+arithmetic and branching, weak on naive in-loop string building, and with no
+additional language runtime loaded into the backend.
 
 ## Native PL/Ruby and PL/PHP build notes
 
-Both native languages are the current CommandPrompt versions
+The comparison against the third-party native PL/Ruby and PL/PHP is documented in
+the build scripts. Both are the current CommandPrompt versions
 (https://github.com/commandprompt/plruby, https://github.com/commandprompt/PL-php;
-plruby 2.5, plphp 2.6). They build against PostgreSQL 18 with the following:
+plruby 2.5, plphp 2.6). They build against PostgreSQL 18 with:
 
-- PL/Ruby: built with `make PG_CONFIG=<pgconfig>`. On GCC 15 (Ubuntu 26.04),
-  the older `RUBY_METHOD_FUNC` casts trip `-Werror=incompatible-pointer-types`,
-  which is a default error in GCC 14 and later. Passing
-  `COPT="-Wno-error=incompatible-pointer-types"` demotes it to a warning; the
-  casts are valid at run time. Built against Ruby 3.3.
-- PL/PHP: built with `make PG_CONFIG=<pgconfig>`. It links against the PHP embed
-  SAPI library, which is provided by the `libphp8.5-embed` package on this system.
-  Built against PHP 8.5.
-
-The build scripts are `bench/build_native_pls.sh` (in-tree PL/Perl and
-PL/Python3) and `bench/try_native_ruby_php.sh` (native PL/Ruby and PL/PHP).
+- PL/Ruby: `make PG_CONFIG=<pgconfig>`. On GCC 15 (Ubuntu 26.04) pass
+  `COPT="-Wno-error=incompatible-pointer-types"` to demote the older
+  `RUBY_METHOD_FUNC` cast warnings, which are valid at run time. Built against
+  Ruby 3.3.
+- PL/PHP: `make PG_CONFIG=<pgconfig>`. Links against the PHP embed SAPI, provided
+  by the `libphp8.5-embed` package. Built against PHP 8.5.
 
 ## Reproducing
 
 In the container:
 
 ```
-python3 /root/plxsrc/bench/run_bench.py
+PGHOST=/tmp PGPORT=5432 python3 bench/run_bench.py
 ```
 
 Requires the `plx` extension and the comparison languages installed: PL/Perl and
-PL/Python3 (`bench/build_native_pls.sh`), and native PL/Ruby and PL/PHP
-(`bench/try_native_ruby_php.sh`).
+PL/Python3 (`bench/build_native_pls.sh`), and optionally native PL/Ruby and
+PL/PHP (`bench/try_native_ruby_php.sh`).

@@ -1,14 +1,16 @@
-plx benchmark  (PostgreSQL 18.4, 8 vCPU / 8 GiB, Ubuntu 26.04)
-arithmetic: accumulate 1..2000000    iteration: sum 1000000 rows    min of 5 runs
+plx benchmark  (PostgreSQL 18.4, min of 5 runs)
 
-language         | arithmetic         | iteration          | ok
-----------------------------------------------------------------
-plpgsql          | 48.0 ms (1.00x)    | 92.0 ms (1.00x)    | ok
-plxruby          | 50.8 ms (1.06x)    | 92.6 ms (1.01x)    | ok
-plxphp           | 51.0 ms (1.06x)    | 93.8 ms (1.02x)    | ok
-plruby (native)  | 94.0 ms (1.96x)    | 373.4 ms (4.06x)   | ok
-plphp (native)   | 49.3 ms (1.03x)    | 245.0 ms (2.66x)   | ok
-plperl           | 43.3 ms (0.90x)    | 499.2 ms (5.42x)   | ok
-plpython3u       | 69.2 ms (1.44x)    | 342.2 ms (3.72x)   | ok
+workload sizes: arith=2000000  strbuild=200000  iter=1000000 rows  branch=2000000  call=500000 (perl/py call=50000)
 
-x = relative to plpgsql (lower is faster). plxruby/plxphp transpile to plpgsql.
+language      arith           strbuild        iter            branch          call          
+------------------------------------------------------------------------------------------
+plpgsql       53 ms (1.00x)   1710 ms (1.00x)  95 ms (1.00x)   158 ms (1.00x)  166 ms (1.00x)
+plxruby       56 ms (1.06x)   1725 ms (1.01x)  95 ms (1.00x)   156 ms (0.99x)  157 ms (0.95x)
+plxphp        54 ms (1.02x)   1741 ms (1.02x)  99 ms (1.04x)   161 ms (1.02x)  160 ms (0.97x)
+plxjs         54 ms (1.03x)   1783 ms (1.04x)  99 ms (1.04x)   171 ms (1.08x)  173 ms (1.04x)
+plxpython3    59 ms (1.11x)   1729 ms (1.01x)  99 ms (1.05x)   157 ms (1.00x)  163 ms (0.98x)
+plperl        46 ms (0.86x)   12 ms (0.01x)   535 ms (5.63x)  159 ms (1.01x)  301 ms (1.82x)
+plpython3u    73 ms (1.39x)   16 ms (0.01x)   351 ms (3.69x)  113 ms (0.72x)  181 ms (1.09x)
+
+x = relative to plpgsql (lower is faster). plx dialects transpile to plpgsql.
+Note: perl/python 'call' uses 1/10 the iterations (per-call SPI is far slower).

@@ -117,11 +117,15 @@ $$;
   each dialect next to the plpgsql they produce.
 - [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) and
   [doc/TRANSPILER.md](doc/TRANSPILER.md): design and transpiler specification.
+- [bench/BENCHMARKS.md](bench/BENCHMARKS.md): performance across five workloads.
 
 ## Performance
 
-Because functions execute as plpgsql, plxruby and plxphp match plpgsql and are
-faster than the native embedded-interpreter PLs on row-iteration workloads. See
+Because functions execute as plpgsql, all four plx dialects match plpgsql
+(within about 11 percent across five workloads) and inherit its performance
+profile: 3.7x to 5.6x faster than the embedded-interpreter PLs on row iteration,
+competitive on arithmetic and branching, and weak on naive in-loop string
+building (a plpgsql limitation). Full results and method are in
 [bench/BENCHMARKS.md](bench/BENCHMARKS.md).
 
 ## Layout
