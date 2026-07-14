@@ -85,6 +85,7 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Only counting `for` loops and `foreach (query(...) as $row)` are supported.
 - `try/catch/finally` maps to `BEGIN/EXCEPTION/END`. `catch (\Exception $e)` maps to `WHEN OTHERS`. `$e->message` and `$e->sqlstate` map to `SQLERRM` and `SQLSTATE`.
 - `throw new Exception("msg")` maps to `RAISE EXCEPTION`.
+- `raise('notice'|'warning'|'info'|'log'|'debug'|'exception', message)` emits a `RAISE` at that level; `raise(message)` raises an exception. This call form is also accepted in plxruby (in addition to the `raise notice: "..."` keyword form).
 
 ## References
 - `ARCHITECTURE.md`: design and the verified plpgsql symbol table.

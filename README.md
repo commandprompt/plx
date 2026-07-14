@@ -87,6 +87,9 @@ CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxphp AS $$
 $$;
 ```
 
+More examples, including ones taken from the PL/pgSQL manual shown side by side
+with the plpgsql they produce, are in [doc/USERGUIDE.md](doc/USERGUIDE.md).
+
 ## Supported constructs and limitations
 
 See [doc/LIMITATIONS.md](doc/LIMITATIONS.md) for the supported constructs per

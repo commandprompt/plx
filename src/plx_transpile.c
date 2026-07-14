@@ -798,28 +798,38 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 				j++;
 			wl = j - i;
 
-			/* exception accessor: e.message -> SQLERRM, e.sqlstate/.code -> SQLSTATE */
+			/* exception accessor via "." (Ruby) or "->" (PHP):
+			 * e.message / $e->message -> SQLERRM ; .sqlstate/.code -> SQLSTATE */
 			if (cx->exc_var && wl == cx->exc_varlen &&
-				strncmp(s + i, cx->exc_var, wl) == 0 && j < len && s[j] == '.')
+				strncmp(s + i, cx->exc_var, wl) == 0)
 			{
-				int			f = j + 1;
-				int			fl;
+				int			sep = 0;
 
-				while (f < len && is_ident(s[f]))
-					f++;
-				fl = f - (j + 1);
-				if (fl == 7 && strncmp(s + j + 1, "message", 7) == 0)
+				if (j < len && s[j] == '.')
+					sep = 1;
+				else if (j + 1 < len && s[j] == '-' && s[j + 1] == '>')
+					sep = 2;
+				if (sep)
 				{
-					appendStringInfoString(&out, "SQLERRM");
-					i = f;
-					continue;
-				}
-				if ((fl == 8 && strncmp(s + j + 1, "sqlstate", 8) == 0) ||
-					(fl == 4 && strncmp(s + j + 1, "code", 4) == 0))
-				{
-					appendStringInfoString(&out, "SQLSTATE");
-					i = f;
-					continue;
+					const char *fld = s + j + sep;
+					int			f = j + sep, fl;
+
+					while (f < len && is_ident(s[f]))
+						f++;
+					fl = f - (j + sep);
+					if (fl == 7 && strncmp(fld, "message", 7) == 0)
+					{
+						appendStringInfoString(&out, "SQLERRM");
+						i = f;
+						continue;
+					}
+					if ((fl == 8 && strncmp(fld, "sqlstate", 8) == 0) ||
+						(fl == 4 && strncmp(fld, "code", 4) == 0))
+					{
+						appendStringInfoString(&out, "SQLSTATE");
+						i = f;
+						continue;
+					}
 				}
 			}
 
@@ -1328,6 +1338,41 @@ map_raise_option(const char *s, int len)
 	return NULL;
 }
 
+/* raise(msg) / raise("level", msg) call form (used where raise is not a keyword) */
+static void
+emit_raise_call(Ctx *cx, int a, int ind)
+{
+	int			as[8], ae[8], after, n, mi = 0;
+	const char *level = "EXCEPTION";
+	char	   *mt, *msg;
+
+	n = parse_args(cx, a, as, ae, 8, &after);
+	if (n < 1)
+		plx_err(cx, cx->t[a].line, "raise requires a message");
+	if (n >= 2 && arg_is_string_literal(cx, as[0], ae[0]))
+	{
+		static const struct { const char *w; const char *lv; } lv[] = {
+			{"notice", "NOTICE"}, {"warning", "WARNING"}, {"info", "INFO"},
+			{"log", "LOG"}, {"debug", "DEBUG"}, {"exception", "EXCEPTION"},
+		};
+		Tok		   *st = &cx->t[as[0]];
+		const char *c = st->s + 1;
+		int			cl = st->len - 2, k;
+
+		for (k = 0; k < (int) (sizeof(lv) / sizeof(lv[0])); k++)
+			if ((int) strlen(lv[k].w) == cl && pg_strncasecmp(lv[k].w, c, cl) == 0)
+			{
+				level = lv[k].lv;
+				mi = 1;
+				break;
+			}
+	}
+	mt = span_text(cx, as[mi], ae[mi]);
+	msg = rewrite_expr(cx, mt, (int) strlen(mt), false);
+	indent(&cx->out, ind);
+	appendStringInfo(&cx->out, "RAISE %s '%%', %s;\n", level, msg);
+}
+
 /* emit a raise statement from token range [a,b) */
 static void
 emit_raise(Ctx *cx, int a, int b, int ind)
@@ -1463,6 +1508,11 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		if (name_eq(t0, "return_query"))
 		{
 			emit_return_query(cx, a, ind);
+			return;
+		}
+		if (name_eq(t0, "raise"))	/* raise(msg) / raise("level", msg) call form */
+		{
+			emit_raise_call(cx, a, ind);
 			return;
 		}
 	}
