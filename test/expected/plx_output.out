@@ -73,12 +73,12 @@ CREATE FUNCTION o_rb_expr(n int) RETURNS text LANGUAGE plxruby AS $$
 return n >= 0 ? "it's #{n}\n" : "neg"
 $$;
 SELECT _src('o_rb_expr');
-                                     _src                                      
--------------------------------------------------------------------------------
- /*plx:v1:plxruby*/                                                           +
- BEGIN                                                                        +
-   RETURN CASE WHEN n >= 0 THEN 'it''s ' || (n)::text || E'\n' ELSE 'neg' END;+
- END;                                                                         +
+                                            _src                                             
+---------------------------------------------------------------------------------------------
+ /*plx:v1:plxruby*/                                                                         +
+ BEGIN                                                                                      +
+   RETURN CASE WHEN n >= 0 THEN 'it''s ' || COALESCE((n)::text, '') || E'\n' ELSE 'neg' END;+
+ END;                                                                                       +
  
 (1 row)
 
@@ -130,19 +130,19 @@ raise exception: "done #{t}", errcode: "22023"
 return t
 $$;
 SELECT _src('o_rb_data');
-                                 _src                                 
-----------------------------------------------------------------------
- /*plx:v1:plxruby*/                                                  +
- DECLARE                                                             +
-   t bigint := 0;                                                    +
-   row RECORD;                                                       +
- BEGIN                                                               +
-   FOR row IN SELECT amt FROM x WHERE g = g LOOP                     +
-     t := t + row.amt;                                               +
-   END LOOP;                                                         +
-   RAISE EXCEPTION '%', 'done ' || (t)::text USING ERRCODE = '22023';+
-   RETURN t;                                                         +
- END;                                                                +
+                                        _src                                        
+------------------------------------------------------------------------------------
+ /*plx:v1:plxruby*/                                                                +
+ DECLARE                                                                           +
+   t bigint := 0;                                                                  +
+   row RECORD;                                                                     +
+ BEGIN                                                                             +
+   FOR row IN SELECT amt FROM x WHERE g = g LOOP                                   +
+     t := t + row.amt;                                                             +
+   END LOOP;                                                                       +
+   RAISE EXCEPTION '%', 'done ' || COALESCE((t)::text, '') USING ERRCODE = '22023';+
+   RETURN t;                                                                       +
+ END;                                                                              +
  
 (1 row)
 
@@ -154,17 +154,17 @@ switch ($n) {
 }
 $$;
 SELECT _src('o_php_switch');
-              _src               
----------------------------------
- /*plx:v1:plxphp*/              +
- BEGIN                          +
-   CASE n                       +
-     WHEN 1 THEN                +
-       RETURN 'a'  ||  'b';     +
-     ELSE                       +
-       RETURN 'z ' || (n)::text;+
-   END CASE;                    +
- END;                           +
+                     _src                      
+-----------------------------------------------
+ /*plx:v1:plxphp*/                            +
+ BEGIN                                        +
+   CASE n                                     +
+     WHEN 1 THEN                              +
+       RETURN 'a'  ||  'b';                   +
+     ELSE                                     +
+       RETURN 'z ' || COALESCE((n)::text, '');+
+   END CASE;                                  +
+ END;                                         +
  
 (1 row)
 
@@ -227,20 +227,20 @@ if t == 0:
 return f"sum {t}"
 $$;
 SELECT _src('o_py');
-             _src              
--------------------------------
- /*plx:v1:plxpython3*/        +
- DECLARE                      +
-   t integer := 0;            +
- BEGIN                        +
-   FOR i IN 0..(n - 1) LOOP   +
-     t := t + i;              +
-   END LOOP;                  +
-   IF t  =  0 THEN            +
-     RETURN 'zero';           +
-   END IF;                    +
-   RETURN 'sum ' || (t)::text;+
- END;                         +
+                    _src                     
+---------------------------------------------
+ /*plx:v1:plxpython3*/                      +
+ DECLARE                                    +
+   t integer := 0;                          +
+ BEGIN                                      +
+   FOR i IN 0..(n - 1) LOOP                 +
+     t := t + i;                            +
+   END LOOP;                                +
+   IF t  =  0 THEN                          +
+     RETURN 'zero';                         +
+   END IF;                                  +
+   RETURN 'sum ' || COALESCE((t)::text, '');+
+ END;                                       +
  
 (1 row)
 
@@ -255,21 +255,118 @@ except Exception as e:
 return "ok"
 $$;
 SELECT _src('o_py_try');
-                  _src                   
------------------------------------------
- /*plx:v1:plxpython3*/                  +
- BEGIN                                  +
-   IF x is NULL THEN                    +
-     RETURN 'null';                     +
-   END IF;                              +
-   BEGIN                                +
-     INSERT INTO x VALUES (1);          +
-   EXCEPTION                            +
-     WHEN OTHERS THEN                   +
-       RETURN 'err ' || (SQLERRM)::text;+
-   END;                                 +
-   RETURN 'ok';                         +
- END;                                   +
+                         _src                          
+-------------------------------------------------------
+ /*plx:v1:plxpython3*/                                +
+ BEGIN                                                +
+   IF x is NULL THEN                                  +
+     RETURN 'null';                                   +
+   END IF;                                            +
+   BEGIN                                              +
+     INSERT INTO x VALUES (1);                        +
+   EXCEPTION                                          +
+     WHEN OTHERS THEN                                 +
+       RETURN 'err ' || COALESCE((SQLERRM)::text, '');+
+   END;                                               +
+   RETURN 'ok';                                       +
+ END;                                                 +
+ 
+(1 row)
+
+-- interpolation of a NULL value must render as empty string, not annihilate the
+-- whole string (COALESCE guard)
+CREATE FUNCTION o_interp_null(x int) RETURNS text LANGUAGE plxruby AS $$
+return "val=#{x} end"
+$$;
+SELECT _src('o_interp_null');
+                         _src                          
+-------------------------------------------------------
+ /*plx:v1:plxruby*/                                   +
+ BEGIN                                                +
+   RETURN 'val=' || COALESCE((x)::text, '') || ' end';+
+ END;                                                 +
+ 
+(1 row)
+
+-- literal nil/null/None comparison becomes IS NULL; a value comparison stays =
+CREATE FUNCTION o_cmp_null(x int) RETURNS text LANGUAGE plxruby AS $$
+if x == nil
+  return "a"
+end
+if x != nil
+  return "b"
+end
+return "c"
+$$;
+SELECT _src('o_cmp_null');
+           _src           
+--------------------------
+ /*plx:v1:plxruby*/      +
+ BEGIN                   +
+   IF x  IS NULL THEN    +
+     RETURN 'a';         +
+   END IF;               +
+   IF x  IS NOT NULL THEN+
+     RETURN 'b';         +
+   END IF;               +
+   RETURN 'c';           +
+ END;                    +
+ 
+(1 row)
+
+-- python: both `is None` and `== None` lower to IS NULL
+CREATE FUNCTION o_py_none(x int) RETURNS boolean LANGUAGE plxpython3 AS $$
+return x == None
+$$;
+SELECT _src('o_py_none');
+         _src          
+-----------------------
+ /*plx:v1:plxpython3*/+
+ BEGIN                +
+   RETURN x  IS NULL; +
+ END;                 +
+ 
+(1 row)
+
+-- js: === and !== map to plain = / <> (not type-strict)
+CREATE FUNCTION o_js_strict(a int, b int) RETURNS boolean LANGUAGE plxjs AS $$
+return a === b;
+$$;
+SELECT _src('o_js_strict');
+       _src        
+-------------------
+ /*plx:v1:plxjs*/ +
+ BEGIN            +
+   RETURN a  =  b;+
+ END;             +
+ 
+(1 row)
+
+-- integer division and modulo pass through to SQL operators
+CREATE FUNCTION o_intdiv(a int, b int) RETURNS text LANGUAGE plxruby AS $$
+return "#{a / b}:#{a % b}"
+$$;
+SELECT _src('o_intdiv');
+                                    _src                                     
+-----------------------------------------------------------------------------
+ /*plx:v1:plxruby*/                                                         +
+ BEGIN                                                                      +
+   RETURN COALESCE((a / b)::text, '') || ':' || COALESCE((a % b)::text, '');+
+ END;                                                                       +
+ 
+(1 row)
+
+-- a SQL escape-string literal passed through is not re-quoted
+CREATE FUNCTION o_estring() RETURNS text LANGUAGE plxruby AS $$
+return E'tab\there'
+$$;
+SELECT _src('o_estring');
+          _src          
+------------------------
+ /*plx:v1:plxruby*/    +
+ BEGIN                 +
+   RETURN E'tab\there';+
+ END;                  +
  
 (1 row)
 

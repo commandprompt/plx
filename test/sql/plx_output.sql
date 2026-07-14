@@ -122,3 +122,46 @@ except Exception as e:
 return "ok"
 $$;
 SELECT _src('o_py_try');
+
+-- interpolation of a NULL value must render as empty string, not annihilate the
+-- whole string (COALESCE guard)
+CREATE FUNCTION o_interp_null(x int) RETURNS text LANGUAGE plxruby AS $$
+return "val=#{x} end"
+$$;
+SELECT _src('o_interp_null');
+
+-- literal nil/null/None comparison becomes IS NULL; a value comparison stays =
+CREATE FUNCTION o_cmp_null(x int) RETURNS text LANGUAGE plxruby AS $$
+if x == nil
+  return "a"
+end
+if x != nil
+  return "b"
+end
+return "c"
+$$;
+SELECT _src('o_cmp_null');
+
+-- python: both `is None` and `== None` lower to IS NULL
+CREATE FUNCTION o_py_none(x int) RETURNS boolean LANGUAGE plxpython3 AS $$
+return x == None
+$$;
+SELECT _src('o_py_none');
+
+-- js: === and !== map to plain = / <> (not type-strict)
+CREATE FUNCTION o_js_strict(a int, b int) RETURNS boolean LANGUAGE plxjs AS $$
+return a === b;
+$$;
+SELECT _src('o_js_strict');
+
+-- integer division and modulo pass through to SQL operators
+CREATE FUNCTION o_intdiv(a int, b int) RETURNS text LANGUAGE plxruby AS $$
+return "#{a / b}:#{a % b}"
+$$;
+SELECT _src('o_intdiv');
+
+-- a SQL escape-string literal passed through is not re-quoted
+CREATE FUNCTION o_estring() RETURNS text LANGUAGE plxruby AS $$
+return E'tab\there'
+$$;
+SELECT _src('o_estring');

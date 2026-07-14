@@ -802,7 +802,13 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			s = nx;
 			if (nparts++)
 				appendStringInfoString(out, " || ");
-			appendStringInfo(out, "(%s)::text", rw);
+			/*
+			 * COALESCE to '' so an interpolated NULL renders as an empty string
+			 * rather than propagating NULL through || and annihilating the whole
+			 * string. This matches how the source languages render nil/null in
+			 * interpolation (a value, never the absence of the whole string).
+			 */
+			appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
 			continue;
 		}
 		if (s[0] == '\\' && s + 1 < e)

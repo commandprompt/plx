@@ -90,3 +90,12 @@ DO LANGUAGE plxjs $$ raise("notice", `js do ${2 * 3}`); $$;
 DO LANGUAGE plxpython3 $$
 raise('notice', f'py do {2 * 3}')
 $$;
+
+-- interpolating a NULL value renders an empty string in every dialect
+CREATE FUNCTION f_interp_rb(x int) RETURNS text LANGUAGE plxruby AS $$ return "[#{x}]" $$;
+CREATE FUNCTION f_interp_php(x int) RETURNS text LANGUAGE plxphp AS $$ return "[{$x}]"; $$;
+CREATE FUNCTION f_interp_js(x int) RETURNS text LANGUAGE plxjs AS $$ return `[${x}]`; $$;
+CREATE FUNCTION f_interp_py(x int) RETURNS text LANGUAGE plxpython3 AS $$ return f"[{x}]" $$;
+SELECT f_interp_rb(NULL) AS rb, f_interp_php(NULL) AS php,
+       f_interp_js(NULL) AS js, f_interp_py(NULL) AS py;
+SELECT f_interp_rb(7) AS rb7;
