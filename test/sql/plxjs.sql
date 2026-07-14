@@ -114,3 +114,12 @@ assert(n > 0, "must be positive");
 return n;
 $$;
 SELECT js_assert(5);
+
+-- FOREACH over an array (for..of)
+CREATE FUNCTION js_sumarr(a int[]) RETURNS int LANGUAGE plxjs AS $$
+let total = 0 /*:: int */;
+let v /*:: int */;
+for (const v of a) { total = total + v; }
+return total;
+$$;
+SELECT js_sumarr(ARRAY[1,2,3,4]);

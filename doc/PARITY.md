@@ -29,10 +29,10 @@ noted.
 | `GET STACKED DIAGNOSTICS` | partial | `e.message`, `e.sqlstate` (detail/hint/constraint: todo) |
 | `CALL` procedure | done | `call("proc", args)` |
 | `COMMIT` / `ROLLBACK` | done | `commit()` / `rollback()` |
-| `FOREACH` over array | todo | |
+| `FOREACH` over array | done | `arr.each` / `foreach($a as $v)` / `for (v of arr)` (v annotated) |
 | cursors: `OPEN`/`FETCH`/`MOVE`/`CLOSE` + cursor `FOR` | todo | |
-| declarations: `CONSTANT` | todo | |
-| declarations: `%TYPE` / `%ROWTYPE` | todo | (planned via annotation) |
+| declarations: `CONSTANT` | done | annotation suffix `const` (e.g. `x = 5 #:: int const`) |
+| declarations: `%TYPE` / `%ROWTYPE` | done | annotation type text (e.g. `e #:: tbl%ROWTYPE`) |
 | nested block with local `DECLARE` | partial | begin/rescue reuses one flat scope |
 | block labels `<<l>>` on EXIT/CONTINUE | todo | |
 

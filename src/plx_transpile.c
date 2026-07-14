@@ -55,6 +55,7 @@ typedef struct PlxLocal2
 	char	   *name;			/* lower-cased key */
 	char	   *typ;			/* plpgsql type text, or NULL if RECORD */
 	bool		is_record;
+	bool		is_const;		/* CONSTANT declaration */
 	char	   *init;			/* folded initializer text, or NULL */
 	struct PlxLocal2 *next;
 } PlxLocal2;
@@ -1730,6 +1731,7 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		int			rhs_b = b;
 		const char *anntyp = NULL;
 		int			annlen = 0;
+		bool		wantconst = false;
 
 		/* lhs = fetch_one[!](...) -> SELECT ... INTO */
 		if (tok_is(op, "=") && a + 2 < b && cx->t[a + 2].kind == T_IDENT &&
@@ -1768,12 +1770,29 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		else
 			plx_err(cx, t0->line, "unsupported operator in statement");
 
-		/* trailing annotation */
+		/* trailing annotation (may carry a trailing 'const'/'constant' marker) */
 		if (rhs_b > rhs_a && cx->t[rhs_b - 1].kind == T_TYPEANN)
 		{
 			anntyp = cx->t[rhs_b - 1].ann;
 			annlen = cx->t[rhs_b - 1].annlen;
 			rhs_b--;
+			/* strip a trailing const/constant word -> mark CONSTANT */
+			{
+				int			k = annlen;
+
+				while (k > 0 && (anntyp[k - 1] == ' ' || anntyp[k - 1] == '\t'))
+					k--;
+				if ((k >= 8 && pg_strncasecmp(anntyp + k - 8, "constant", 8) == 0 &&
+					 (k == 8 || anntyp[k - 9] == ' ')) ||
+					(k >= 5 && pg_strncasecmp(anntyp + k - 5, "const", 5) == 0 &&
+					 (k == 5 || anntyp[k - 6] == ' ')))
+				{
+					wantconst = true;
+					annlen = (k >= 8 && pg_strncasecmp(anntyp + k - 8, "constant", 8) == 0) ? k - 8 : k - 5;
+					while (annlen > 0 && (anntyp[annlen - 1] == ' ' || anntyp[annlen - 1] == '\t'))
+						annlen--;
+				}
+			}
 		}
 		if (rhs_a >= rhs_b)
 			plx_err(cx, t0->line, "assignment requires a value on the right-hand side");
@@ -1800,6 +1819,24 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				l = local_add(cx, t0->s, t0->len);
 			if (anntyp && !l->typ)
 				l->typ = pnstrdup(anntyp, annlen);
+
+			/* CONSTANT: initializer lives in the DECLARE; no runtime assignment */
+			if (wantconst)
+			{
+				char	   *rhs = span_text(cx, rhs_a, rhs_b);
+
+				if (!firstseen)
+					plx_err(cx, t0->line, "cannot reassign constant \"%.*s\"", t0->len, t0->s);
+				if (compound)
+					plx_err(cx, t0->line, "constant cannot use a compound assignment");
+				if (!l->typ && littyp)
+					l->typ = pstrdup(littyp);
+				if (!l->typ)
+					plx_err(cx, t0->line, "constant \"%.*s\" requires a type annotation", t0->len, t0->s);
+				l->is_const = true;
+				l->init = rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+				return;
+			}
 
 			/* fold: top-level, first assignment, constant literal RHS */
 			if (toplevel && firstseen && !compound && littyp && !l->is_record)
@@ -2211,7 +2248,28 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		cx->loopdepth--;
 	}
 	else
-		plx_err(cx, cx->t[a].line, "unsupported .each receiver (use query(...) or (LO..HI))");
+	{
+		/* FOREACH over an array expression: arr.each do |v| ... end */
+		char	   *arr = span_text(cx, a, recv_end);
+		char	   *arrx = rewrite_expr(cx, arr, (int) strlen(arr), false);
+		PlxLocal2  *lv;
+
+		if (is_param(cx, cx->t[var1_a].s, cx->t[var1_a].len))
+			plx_err(cx, cx->t[a].line, "foreach-array loop variable must be a local, not a parameter");
+		lv = local_find(cx, cx->t[var1_a].s, cx->t[var1_a].len);
+		if (!lv || !lv->typ)
+			plx_err(cx, cx->t[a].line,
+					"foreach over an array requires the loop variable to be annotated with its element type before the loop, e.g. \"%.*s #:: int\"",
+					cx->t[var1_a].len, cx->t[var1_a].s);
+		indent(o, ind);
+		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
+						 cx->t[var1_a].len, cx->t[var1_a].s,
+						 arrx[0] == '[' ? "ARRAY" : "", arrx);
+		cx->pos = e;
+		cx->loopdepth++;
+		parse_block(cx, ind + 1);
+		cx->loopdepth--;
+	}
 
 	skip_seps(cx);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
@@ -2656,9 +2714,29 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 	int			sa[16], se[16], after, n;
 	int			savedpos = cx->pos;
 
+	/* array receiver (not query(...)) -> FOREACH v IN ARRAY expr LOOP */
 	if (!(cx->t[ra].kind == T_IDENT && name_eq(&cx->t[ra], "query") &&
 		  ra + 1 < rb && cx->t[ra + 1].kind == T_LPAREN))
-		plx_err(cx, var->line, "loop source must be query(...)");
+	{
+		char	   *arrx = rw_range(cx, ra, rb, false);
+		PlxLocal2  *lv;
+
+		if (is_param(cx, var->s, var->len))
+			plx_err(cx, var->line, "foreach-array loop variable must be a local, not a parameter");
+		lv = local_find(cx, var->s, var->len);
+		if (!lv || !lv->typ)
+			plx_err(cx, var->line,
+					"foreach over an array requires the loop variable to be annotated with its element type before the loop");
+		indent(o, ind);
+		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
+						 var->len, var->s, arrx[0] == '[' ? "ARRAY" : "", arrx);
+		cx->loopdepth++;
+		parse_brace_block(cx, ind + 1);
+		cx->loopdepth--;
+		indent(o, ind);
+		appendStringInfoString(o, "END LOOP;\n");
+		return;
+	}
 	cx->pos = ra;
 	n = parse_args(cx, ra, sa, se, 16, &after);
 	cx->pos = savedpos;
@@ -3253,6 +3331,8 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 						 errmsg("%s: cannot infer a PostgreSQL type for local variable \"%s\"",
 								surf->lanname, l->name),
 						 errhint("add an explicit type annotation for \"%s\"", l->name)));
+			else if (l->is_const)
+				appendStringInfo(&asm_, "  %s CONSTANT %s := %s;\n", l->name, l->typ, l->init);
 			else if (l->init)
 				appendStringInfo(&asm_, "  %s %s := %s;\n", l->name, l->typ, l->init);
 			else

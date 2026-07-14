@@ -196,3 +196,29 @@ perform("SELECT 1 WHERE false")
 return found?
 $$;
 SELECT rb_found();
+
+-- FOREACH over an array, and %ROWTYPE, and CONSTANT
+CREATE FUNCTION rb_sumarr(a int[]) RETURNS int LANGUAGE plxruby AS $$
+total = 0 #:: int
+v #:: int
+a.each do |v|
+  total = total + v
+end
+return total
+$$;
+SELECT rb_sumarr(ARRAY[10,20,30]);
+
+CREATE TABLE rb_emp(id int, name text);
+INSERT INTO rb_emp VALUES (1,'Alice'),(2,'Bob');
+CREATE FUNCTION rb_rowtype(eid int) RETURNS text LANGUAGE plxruby AS $$
+e #:: rb_emp%ROWTYPE
+e = fetch_one("SELECT * FROM rb_emp WHERE id = #{eid}")
+return e.name
+$$;
+SELECT rb_rowtype(2);
+
+CREATE FUNCTION rb_const(r numeric) RETURNS numeric LANGUAGE plxruby AS $$
+pi = 3.14159 #:: numeric const
+return pi * r * r
+$$;
+SELECT rb_const(2);

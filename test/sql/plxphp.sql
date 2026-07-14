@@ -98,3 +98,12 @@ assert($n > 0, "must be positive");
 return $n;
 $$;
 SELECT php_assert(5);
+
+-- FOREACH over an array
+CREATE FUNCTION php_sumarr(a int[]) RETURNS int LANGUAGE plxphp AS $$
+$total = 0 /*:: int */;
+$v /*:: int */;
+foreach ($a as $v) { $total = $total + $v; }
+return $total;
+$$;
+SELECT php_sumarr(ARRAY[5,5,5]);
