@@ -412,8 +412,10 @@ reasons:
 Two points to keep in mind:
 
 - The transpiler is C code that parses the function body at `CREATE FUNCTION`
-  time. The security model is trusted; for a hostile multi-tenant deployment the
-  parser should be fuzzed for memory safety before it is relied upon.
+  time. It has a recursion-depth limit and has been fuzzed with mutation and
+  pathological inputs across all dialects (see `test/fuzz.py`) with no crashes or
+  hangs. Continued fuzzing is recommended before relying on it in a hostile
+  multi-tenant deployment.
 - `query`, `perform`, `execute`, and `fetch_one` with interpolated values carry
   the same SQL-injection responsibility as plpgsql `EXECUTE ... || value`. Use
   bind parameters (`execute(sql, a, b)`) for untrusted input.

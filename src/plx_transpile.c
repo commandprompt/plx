@@ -69,6 +69,7 @@ typedef struct
 	StringInfoData out;			/* emitted BEGIN..END body */
 	PlxLocal2  *locals, *ltail;
 	int			loopdepth;
+	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */
 	int			subq;			/* __plx_fo_N / __plx_p_N counter */
 	const char *exc_var;		/* current rescue exception var name */
@@ -78,9 +79,14 @@ typedef struct
 } Ctx;
 
 /* forward decls */
+#define PLX_MAX_DEPTH 500		/* recursion cap (parsers + expression rewriter) */
+
 static pg_noreturn void plx_err(Ctx *cx, int line, const char *fmt,...) pg_attribute_printf(3, 4);
 static char *rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx);
+static char *rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx);
 static void parse_stmt(Ctx *cx, int indent, bool toplevel);
+static void parse_stmt_inner(Ctx *cx, int indent, bool toplevel);
+static void parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel);
 static void parse_block(Ctx *cx, int indent);
 static void parse_iter(Ctx *cx, int a, int do_pos, int e, int ind);
 static void parse_begin(Ctx *cx, int ind);
@@ -104,6 +110,38 @@ plx_err(Ctx *cx, int line, const char *fmt,...)
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("%s: %s", cx->surf->lanname, buf),
 			 errdetail_internal("at %s source line %d", cx->surf->lanname, line)));
+}
+
+/* recursion-guarded wrappers: cap total parser/rewriter depth to avoid stack
+ * overflow on hostile deeply-nested input. */
+static char *
+rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
+{
+	char	   *r;
+
+	if (++cx->depth > PLX_MAX_DEPTH)
+		plx_err(cx, 0, "expression nested too deeply");
+	r = rewrite_expr_inner(cx, s, len, boolctx);
+	cx->depth--;
+	return r;
+}
+
+static void
+parse_stmt(Ctx *cx, int indent, bool toplevel)
+{
+	if (++cx->depth > PLX_MAX_DEPTH)
+		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
+	parse_stmt_inner(cx, indent, toplevel);
+	cx->depth--;
+}
+
+static void
+parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
+{
+	if (++cx->depth > PLX_MAX_DEPTH)
+		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
+	parse_brace_stmt_inner(cx, ind, toplevel);
+	cx->depth--;
 }
 
 /* ---------------------------------------------------------------- lexer */
@@ -726,7 +764,7 @@ find_ternary_colon(const char *s, int len, int q)
  * re-scans its own output. boolctx selects OR vs || and negation handling.
  */
 static char *
-rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
+rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 {
 	const PlxSurface *surf = cx->surf;
 	StringInfoData out;
@@ -1009,13 +1047,18 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	return out.data;
 }
 
-/* source text spanning tokens [a, b) */
+/* source text spanning tokens [a, b); empty (b <= a) yields "" */
 static char *
 span_text(Ctx *cx, int a, int b)
 {
-	const char *st = cx->t[a].s;
-	const char *en = cx->t[b - 1].s + cx->t[b - 1].len;
+	const char *st, *en;
 
+	if (b <= a)
+		return pstrdup("");
+	st = cx->t[a].s;
+	en = cx->t[b - 1].s + cx->t[b - 1].len;
+	if (en < st)
+		return pstrdup("");
 	return pnstrdup(st, (int) (en - st));
 }
 
@@ -1658,6 +1701,8 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			annlen = cx->t[rhs_b - 1].annlen;
 			rhs_b--;
 		}
+		if (rhs_a >= rhs_b)
+			plx_err(cx, t0->line, "assignment requires a value on the right-hand side");
 		if (is_param(cx, t0->s, t0->len))
 		{
 			/* assigning to an OUT/param: plain := (never hoist) */
@@ -2239,7 +2284,7 @@ parse_block(Ctx *cx, int ind)
 }
 
 static void
-parse_stmt(Ctx *cx, int ind, bool toplevel)
+parse_stmt_inner(Ctx *cx, int ind, bool toplevel)
 {
 	Tok		   *tk;
 
@@ -2749,7 +2794,7 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 }
 
 static void
-parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
+parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 {
 	Tok		   *tk;
 
