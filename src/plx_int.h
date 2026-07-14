@@ -23,7 +23,7 @@ typedef enum
 	KW_UNTIL, KW_FOR, KW_FOREACH, KW_IN, KW_AS, KW_OF, KW_DO, KW_BEGIN, KW_RESCUE,
 	KW_ENSURE, KW_CASE, KW_WHEN, KW_RETURN, KW_NEXT, KW_BREAK, KW_RAISE,
 	KW_AND, KW_OR, KW_NOT, KW_EMIT, KW_RETURN_NEXT, KW_LOOP, KW_DEF, KW_LET,
-	KW_NIL, KW_TRUE, KW_FALSE
+	KW_PASS, KW_NIL, KW_TRUE, KW_FALSE
 } Kw;
 
 typedef struct { const char *w; Kw k; } PlxKwSpell;
@@ -50,6 +50,7 @@ typedef struct PlxSurface
 	bool		interp_hashbrace;	/* "...#{expr}..." interpolation (Ruby) */
 	bool		interp_dollar;		/* "...$var..." / "...{$expr}..." interpolation (PHP) */
 	bool		interp_dollarbrace;	/* "...${expr}..." interpolation (JS template) */
+	bool		fstrings;			/* Python f"...{expr}..." interpolation */
 	char		concat_op;			/* string concat operator char ('.' PHP), 0=none */
 	const PlxKwSpell *kws;
 	int			nkws;

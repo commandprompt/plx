@@ -1,0 +1,189 @@
+-- plxpython3 regression tests
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = warning;
+-- scalar return
+CREATE FUNCTION py_add(a int, b int) RETURNS int LANGUAGE plxpython3 AS $$
+return a + b * 2
+$$;
+SELECT py_add(3, 4);
+ py_add 
+--------
+     11
+(1 row)
+
+-- if / elif / else
+CREATE FUNCTION py_grade(score int) RETURNS text LANGUAGE plxpython3 AS $$
+if score >= 90:
+    grade = "A"
+elif score >= 80:
+    grade = "B"
+else:
+    grade = "F"
+return grade
+$$;
+SELECT py_grade(95), py_grade(85), py_grade(70);
+ py_grade | py_grade | py_grade 
+----------+----------+----------
+ A        | B        | F
+(1 row)
+
+-- for over range
+CREATE FUNCTION py_sum(n int) RETURNS int LANGUAGE plxpython3 AS $$
+total = 0
+for i in range(1, n + 1):
+    total = total + i
+return total
+$$;
+SELECT py_sum(10);
+ py_sum 
+--------
+     55
+(1 row)
+
+-- range with a single argument (0-based)
+CREATE FUNCTION py_sum0(n int) RETURNS int LANGUAGE plxpython3 AS $$
+total = 0
+for i in range(n):
+    total = total + i
+return total
+$$;
+SELECT py_sum0(5);
+ py_sum0 
+---------
+      10
+(1 row)
+
+-- while, nested if, break
+CREATE FUNCTION py_countdown(n int) RETURNS int LANGUAGE plxpython3 AS $$
+c = 0
+while n > 0:
+    c = c + n
+    n = n - 1
+return c
+$$;
+SELECT py_countdown(5);
+ py_countdown 
+--------------
+           15
+(1 row)
+
+-- f-string interpolation
+CREATE FUNCTION py_greet(nm text, n int) RETURNS text LANGUAGE plxpython3 AS $$
+return f"user {nm} has {n} items"
+$$;
+SELECT py_greet('bob', 3);
+       py_greet       
+----------------------
+ user bob has 3 items
+(1 row)
+
+-- foreach over an array
+CREATE FUNCTION py_arr(a int[]) RETURNS int LANGUAGE plxpython3 AS $$
+total = 0
+v #:: int
+for v in a:
+    total = total + v
+return total
+$$;
+SELECT py_arr(ARRAY[3,4,5]);
+ py_arr 
+--------
+     12
+(1 row)
+
+-- query iteration with an f-string
+CREATE TABLE py_orders(grp int, amount bigint);
+INSERT INTO py_orders VALUES (1,10),(1,20),(1,30),(2,5);
+CREATE FUNCTION py_grp_total(want int) RETURNS bigint LANGUAGE plxpython3 AS $$
+total = 0 #:: bigint
+for row in query(f"SELECT amount FROM py_orders WHERE grp = {want}"):
+    total = total + row.amount
+return total
+$$;
+SELECT py_grp_total(1);
+ py_grp_total 
+--------------
+           60
+(1 row)
+
+-- fetch_one
+CREATE TABLE py_users(id int, name text);
+INSERT INTO py_users VALUES (1,'Alice'),(2,'Bob');
+CREATE FUNCTION py_name(uid int) RETURNS text LANGUAGE plxpython3 AS $$
+u = fetch_one(f"SELECT id, name FROM py_users WHERE id = {uid}")
+return u.name
+$$;
+SELECT py_name(2);
+ py_name 
+---------
+ Bob
+(1 row)
+
+-- set-returning
+CREATE FUNCTION py_squares(n int) RETURNS SETOF int LANGUAGE plxpython3 AS $$
+for i in range(1, n + 1):
+    return_next(i * i)
+return
+$$;
+SELECT * FROM py_squares(3);
+ py_squares 
+------------
+          1
+          4
+          9
+(3 rows)
+
+-- assert (statement form)
+CREATE FUNCTION py_assert(n int) RETURNS int LANGUAGE plxpython3 AS $$
+assert n > 0, "must be positive"
+return n
+$$;
+SELECT py_assert(5);
+ py_assert 
+-----------
+         5
+(1 row)
+
+-- try / except / finally with a raise
+CREATE FUNCTION py_safediv(d int) RETURNS int LANGUAGE plxpython3 AS $$
+try:
+    return 100 / d
+except Exception as e:
+    return -1
+$$;
+SELECT py_safediv(4), py_safediv(0);
+ py_safediv | py_safediv 
+------------+------------
+         25 |         -1
+(1 row)
+
+-- pass
+CREATE FUNCTION py_pass(n int) RETURNS int LANGUAGE plxpython3 AS $$
+if n > 0:
+    pass
+else:
+    n = 0
+return n
+$$;
+SELECT py_pass(5), py_pass(-3);
+ py_pass | py_pass 
+---------+---------
+       5 |       0
+(1 row)
+
+-- labeled loop
+CREATE FUNCTION py_label(n int) RETURNS int LANGUAGE plxpython3 AS $$
+count = 0
+outer: for i in range(1, n + 1):
+    for j in range(1, n + 1):
+        count = count + 1
+        break outer
+return count
+$$;
+SELECT py_label(5);
+ py_label 
+----------
+        1
+(1 row)
+

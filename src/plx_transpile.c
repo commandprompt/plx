@@ -30,7 +30,7 @@ typedef enum
 {
 	T_EOF, T_NEWLINE, T_SEMI, T_IDENT, T_KW, T_INT, T_FLOAT, T_STRING,
 	T_OP, T_LPAREN, T_RPAREN, T_LBRACKET, T_RBRACKET, T_LBRACE, T_RBRACE,
-	T_PIPE, T_COMMA, T_DOT, T_TYPEANN, T_ERROR
+	T_PIPE, T_COMMA, T_DOT, T_TYPEANN, T_INDENT, T_DEDENT, T_ERROR
 } TokKind;
 
 /* Kw enum now lives in plx_int.h (shared with dialect surfaces). */
@@ -43,6 +43,7 @@ typedef struct
 	int			len;
 	int			line;
 	bool		sq;				/* single-quoted string */
+	bool		fstr;			/* Python f-string (interpolating) */
 	char		quote;			/* opening quote char: ' " or ` */
 	const char *ann;			/* TYPEANN: type text start */
 	int			annlen;
@@ -108,6 +109,9 @@ static void emit_core(Ctx *cx, int a, int b, int ind, bool toplevel);
 static void parse_brace_program(Ctx *cx);
 static void parse_brace_block(Ctx *cx, int ind);
 static void parse_switch_brace(Ctx *cx, int ind);
+static void parse_py_program(Ctx *cx);
+static void parse_py_block(Ctx *cx, int ind);
+static void parse_py_stmt(Ctx *cx, int ind, bool toplevel);
 static void parse_brace_stmt(Ctx *cx, int ind, bool toplevel);
 
 /* ---------------------------------------------------------------- errors */
@@ -221,6 +225,9 @@ lex(Ctx *cx)
 	int			paren = 0;
 	int			cap = 256, n = 0;
 	Tok		   *t = palloc(sizeof(Tok) * cap);
+	bool		indent_mode = (surf->block_style == PLX_BLK_INDENT);
+	int			indent_stack[128];
+	int			indent_sp = 0;
 
 #define PUSH(k) do { \
 		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(Tok) * cap); } \
@@ -228,6 +235,41 @@ lex(Ctx *cx)
 		t[n].kind = (k); t[n].line = line; t[n].s = tokstart; \
 		t[n].len = (int) (p - tokstart); n++; \
 	} while (0)
+#define PUSH0(k) do { \
+		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(Tok) * cap); } \
+		memset(&t[n], 0, sizeof(Tok)); \
+		t[n].kind = (k); t[n].line = line; t[n].s = p; t[n].len = 0; n++; \
+	} while (0)
+
+	/* Python: set the base indentation from the first non-blank line. */
+	if (indent_mode)
+	{
+		const char *q = p;
+		int			col = 0;
+
+		for (;;)
+		{
+			col = 0;
+			while (*q == ' ' || *q == '\t')
+			{
+				col += (*q == '\t') ? 8 : 1;
+				q++;
+			}
+			if (*q == '\n')
+			{
+				q++;
+				continue;
+			}
+			if (*q == '#')
+			{
+				while (*q && *q != '\n')
+					q++;
+				continue;
+			}
+			break;
+		}
+		indent_stack[0] = col;
+	}
 
 	while (p < end)
 	{
@@ -241,15 +283,57 @@ lex(Ctx *cx)
 		if (*p == '\n')
 		{
 			p++;
-			if (!suppress_newline(t, n))
-			{
-				tokstart = p - 1;
-				if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(Tok) * cap); }
-				memset(&t[n], 0, sizeof(Tok));
-				t[n].kind = T_NEWLINE; t[n].line = line; t[n].s = tokstart; t[n].len = 1;
-				n++;
-			}
 			line++;
+			/* In Python only brackets continue a line; elsewhere a trailing
+			 * operator (Ruby) continues it. */
+			if (paren > 0 || (!indent_mode && suppress_newline(t, n)))
+				continue;
+			PUSH0(T_NEWLINE);
+			if (indent_mode)
+			{
+				/* find the next real line's indentation, skipping blanks/comments */
+				const char *q = p;
+				int			col = 0;
+
+				for (;;)
+				{
+					col = 0;
+					while (*q == ' ' || *q == '\t')
+					{
+						col += (*q == '\t') ? 8 : 1;
+						q++;
+					}
+					if (q < end && *q == '\n')
+					{
+						q++;
+						line++;
+						continue;
+					}
+					if (q < end && *q == '#')
+					{
+						while (q < end && *q != '\n')
+							q++;
+						continue;
+					}
+					break;		/* real line, or EOF */
+				}
+				if (q >= end)
+					continue;	/* trailing dedents handled at EOF */
+				if (col > indent_stack[indent_sp])
+				{
+					if (indent_sp < 126)
+						indent_stack[++indent_sp] = col;
+					PUSH0(T_INDENT);
+				}
+				else
+				{
+					while (indent_sp > 0 && col < indent_stack[indent_sp])
+					{
+						indent_sp--;
+						PUSH0(T_DEDENT);
+					}
+				}
+			}
 			continue;
 		}
 		/* type annotation via a line lead, e.g. Ruby "#::" */
@@ -325,6 +409,27 @@ lex(Ctx *cx)
 			while (p < end && is_ident(*p))
 				p++;
 			PUSH(T_IDENT);
+			continue;
+		}
+		/* Python f-string: f"..." / f'...' (interpolating) */
+		if (surf->fstrings && (*p == 'f' || *p == 'F') &&
+			(p[1] == '"' || p[1] == '\''))
+		{
+			char		q = p[1];
+
+			p += 2;
+			while (p < end && *p != q)
+			{
+				if (*p == '\\' && p + 1 < end)
+					p++;
+				p++;
+			}
+			if (p < end)
+				p++;
+			PUSH(T_STRING);		/* token spans f"..."; consumers skip the 'f' */
+			t[n - 1].sq = (q == '\'');
+			t[n - 1].quote = q;
+			t[n - 1].fstr = true;
 			continue;
 		}
 		if (is_ident_start(*p))
@@ -435,13 +540,18 @@ lex(Ctx *cx)
 		p++;
 		PUSH(T_ERROR);
 	}
-	/* trailing newline + EOF */
+	/* trailing newline, closing dedents, EOF */
 	{
 		const char *tokstart = p;
 
 		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(Tok) * cap); }
 		memset(&t[n], 0, sizeof(Tok));
 		t[n].kind = T_NEWLINE; t[n].line = line; t[n].s = tokstart; n++;
+		while (indent_mode && indent_sp > 0)
+		{
+			indent_sp--;
+			PUSH0(T_DEDENT);
+		}
 		memset(&t[n], 0, sizeof(Tok));
 		t[n].kind = T_EOF; t[n].line = line; t[n].s = tokstart; n++;
 	}
@@ -527,9 +637,31 @@ local_add(Ctx *cx, const char *name, int len)
  *   Ruby: #{expr}   PHP: {$expr} and $var
  */
 static bool
-interp_at(const PlxSurface *surf, const char *s, const char *e,
+interp_at(const PlxSurface *surf, bool fstr, const char *s, const char *e,
 		  const char **exs, int *exl, const char **next)
 {
+	if (fstr && s < e && s[0] == '{' && !(s + 1 < e && s[1] == '{'))	/* f-string {expr} */
+	{
+		int			depth = 1;
+		const char *x = s + 1, *q = x;
+
+		while (q < e && depth > 0)
+		{
+			if (*q == '{')
+				depth++;
+			else if (*q == '}')
+			{
+				depth--;
+				if (!depth)
+					break;
+			}
+			q++;
+		}
+		*exs = x;
+		*exl = (int) (q - x);
+		*next = (q < e) ? q + 1 : q;
+		return true;
+	}
 	if (surf->interp_hashbrace && s + 1 < e && s[0] == '#' && s[1] == '{')
 	{
 		int			depth = 1;
@@ -617,7 +749,7 @@ interp_at(const PlxSurface *surf, const char *s, const char *e,
 static void
 emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 {
-	const char *s = tk->s + 1;	/* skip opening quote */
+	const char *s = tk->s + (tk->fstr ? 2 : 1);	/* skip [f]"opening quote */
 	const char *e = tk->s + tk->len - 1;	/* before closing quote */
 	StringInfoData lit;
 	bool		need_e = false;
@@ -630,8 +762,18 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 	{
 		const char *exs, *nx;
 		int			exl;
+		bool		can_interp = tk->fstr ||
+			(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
 
-		if (tk->quote == cx->surf->interp_quote && interp_at(cx->surf, s, e, &exs, &exl, &nx))
+		/* f-string brace escapes: {{ -> {  and }} -> } */
+		if (tk->fstr && ((s[0] == '{' && s + 1 < e && s[1] == '{') ||
+						 (s[0] == '}' && s + 1 < e && s[1] == '}')))
+		{
+			appendStringInfoChar(&lit, s[0]);
+			s += 2;
+			continue;
+		}
+		if (can_interp && interp_at(cx->surf, tk->fstr, s, e, &exs, &exl, &nx))
 		{
 			char	   *rw;
 
@@ -863,6 +1005,33 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			st.len = j - i;
 			st.sq = (c == '\'');
 			st.quote = c;
+			emit_string_value(cx, &st, &out);
+			i = j;
+			continue;
+		}
+		/* Python f-string in expression position: f"...{expr}..." */
+		if (surf->fstrings && (c == 'f' || c == 'F') && i + 1 < len &&
+			(s[i + 1] == '"' || s[i + 1] == '\''))
+		{
+			Tok			st;
+			char		q = s[i + 1];
+			int			j = i + 2;
+
+			while (j < len && s[j] != q)
+			{
+				if (s[j] == '\\')
+					j++;
+				j++;
+			}
+			if (j < len)
+				j++;
+			memset(&st, 0, sizeof(st));
+			st.kind = T_STRING;
+			st.s = s + i;
+			st.len = j - i;
+			st.sq = (q == '\'');
+			st.quote = q;
+			st.fstr = true;
 			emit_string_value(cx, &st, &out);
 			i = j;
 			continue;
@@ -1241,15 +1410,25 @@ parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after)
 static void
 emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 {
-	const char *s = tk->s + 1;
+	const char *s = tk->s + (tk->fstr ? 2 : 1);
 	const char *e = tk->s + tk->len - 1;
+
+	bool		can_interp = tk->fstr ||
+		(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
 
 	while (s < e)
 	{
 		const char *exs, *nx;
 		int			exl;
 
-		if (tk->quote == cx->surf->interp_quote && interp_at(cx->surf, s, e, &exs, &exl, &nx))
+		if (tk->fstr && ((s[0] == '{' && s + 1 < e && s[1] == '{') ||
+						 (s[0] == '}' && s + 1 < e && s[1] == '}')))
+		{
+			appendStringInfoChar(out, s[0]);
+			s += 2;
+			continue;
+		}
+		if (can_interp && interp_at(cx->surf, tk->fstr, s, e, &exs, &exl, &nx))
 		{
 			appendStringInfoString(out, rewrite_expr(cx, exs, exl, false));
 			s = nx;
@@ -3465,6 +3644,497 @@ parse_brace_block(Ctx *cx, int ind)
 	}
 }
 
+/* ---------------------------------------------------------------- python (indent) parser */
+
+/* index of the ':' that ends a compound-statement header (bracket depth 0) */
+static int
+py_header_colon(Ctx *cx, int from)
+{
+	int			i = from, depth = 0;
+
+	while (cx->t[i].kind != T_EOF && cx->t[i].kind != T_NEWLINE)
+	{
+		TokKind		k = cx->t[i].kind;
+
+		if (k == T_LPAREN || k == T_LBRACKET || k == T_LBRACE)
+			depth++;
+		else if (k == T_RPAREN || k == T_RBRACKET || k == T_RBRACE)
+			depth--;
+		else if (depth == 0 && tok_is(&cx->t[i], ":"))
+			return i;
+		i++;
+	}
+	return -1;
+}
+
+/* consume NEWLINE INDENT <statements> DEDENT */
+static void
+parse_py_block(Ctx *cx, int ind)
+{
+	skip_seps(cx);
+	if (cx->t[cx->pos].kind != T_INDENT)
+		plx_err(cx, cx->t[cx->pos].line, "expected an indented block");
+	cx->pos++;
+	for (;;)
+	{
+		skip_seps(cx);
+		if (cx->t[cx->pos].kind == T_DEDENT)
+		{
+			cx->pos++;
+			return;
+		}
+		if (cx->t[cx->pos].kind == T_EOF)
+			return;
+		parse_py_stmt(cx, ind, false);
+	}
+}
+
+static void
+parse_py_if(Ctx *cx, int ind)
+{
+	StringInfo	o = &cx->out;
+	int			hd = cx->t[cx->pos].line;
+	int			colon;
+
+	colon = py_header_colon(cx, cx->pos + 1);
+	if (colon < 0)
+		plx_err(cx, hd, "if header requires ':'");
+	indent(o, ind);
+	appendStringInfo(o, "IF %s THEN\n", rw_range(cx, cx->pos + 1, colon, true));
+	cx->pos = colon + 1;
+	parse_py_block(cx, ind + 1);
+	while (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ELSIF)	/* elif */
+	{
+		colon = py_header_colon(cx, cx->pos + 1);
+		if (colon < 0)
+			plx_err(cx, cx->t[cx->pos].line, "elif header requires ':'");
+		indent(o, ind);
+		appendStringInfo(o, "ELSIF %s THEN\n", rw_range(cx, cx->pos + 1, colon, true));
+		cx->pos = colon + 1;
+		parse_py_block(cx, ind + 1);
+	}
+	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ELSE)
+	{
+		colon = py_header_colon(cx, cx->pos + 1);
+		if (colon < 0)
+			plx_err(cx, cx->t[cx->pos].line, "else header requires ':'");
+		indent(o, ind);
+		appendStringInfoString(o, "ELSE\n");
+		cx->pos = colon + 1;
+		parse_py_block(cx, ind + 1);
+	}
+	indent(o, ind);
+	appendStringInfoString(o, "END IF;\n");
+}
+
+static void
+parse_py_while(Ctx *cx, int ind)
+{
+	StringInfo	o = &cx->out;
+	int			hd = cx->t[cx->pos].line;
+	int			colon = py_header_colon(cx, cx->pos + 1);
+
+	if (colon < 0)
+		plx_err(cx, hd, "while header requires ':'");
+	indent(o, ind);
+	appendStringInfo(o, "WHILE %s LOOP\n", rw_range(cx, cx->pos + 1, colon, true));
+	cx->pos = colon + 1;
+	cx->loopdepth++;
+	parse_py_block(cx, ind + 1);
+	cx->loopdepth--;
+	indent(o, ind);
+	appendStringInfoString(o, "END LOOP;\n");
+}
+
+/* for VAR in <range(...)|query(...)|array>: */
+static void
+parse_py_for(Ctx *cx, int ind)
+{
+	StringInfo	o = &cx->out;
+	int			hd = cx->t[cx->pos].line;
+	int			colon = py_header_colon(cx, cx->pos + 1);
+	int			var, in_at, ia, ib;
+
+	if (colon < 0)
+		plx_err(cx, hd, "for header requires ':'");
+	var = cx->pos + 1;
+	if (cx->t[var].kind != T_IDENT)
+		plx_err(cx, hd, "for requires a loop variable");
+	in_at = var + 1;
+	if (!(cx->t[in_at].kind == T_KW && cx->t[in_at].kw == KW_IN))
+		plx_err(cx, hd, "for requires 'in'");
+	ia = in_at + 1;
+	ib = colon;
+
+	if (cx->t[ia].kind == T_IDENT && name_eq(&cx->t[ia], "range") &&
+		cx->t[ia + 1].kind == T_LPAREN)
+	{
+		int			as[8], ae[8], after, n;
+		char	   *lo, *hi, *step = NULL;
+
+		n = parse_args(cx, ia, as, ae, 8, &after);
+		if (n == 1)
+		{
+			lo = pstrdup("0");
+			hi = rw_range(cx, as[0], ae[0], false);
+		}
+		else if (n >= 2)
+		{
+			lo = rw_range(cx, as[0], ae[0], false);
+			hi = rw_range(cx, as[1], ae[1], false);
+			if (n >= 3)
+				step = rw_range(cx, as[2], ae[2], false);
+		}
+		else
+			plx_err(cx, hd, "range requires 1 to 3 arguments");
+		indent(o, ind);
+		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
+						 cx->t[var].len, cx->t[var].s, lo, hi,
+						 step ? " BY " : "", step ? step : "");
+		cx->pos = colon + 1;
+		cx->loopdepth++;
+		parse_py_block(cx, ind + 1);
+		cx->loopdepth--;
+	}
+	else if (cx->t[ia].kind == T_IDENT && name_eq(&cx->t[ia], "query") &&
+			 cx->t[ia + 1].kind == T_LPAREN)
+	{
+		int			as[16], ae[16], after, n;
+
+		n = parse_args(cx, ia, as, ae, 16, &after);
+		if (!is_param(cx, cx->t[var].s, cx->t[var].len))
+		{
+			PlxLocal2  *l = local_find(cx, cx->t[var].s, cx->t[var].len);
+
+			if (!l)
+				l = local_add(cx, cx->t[var].s, cx->t[var].len);
+			l->is_record = true;
+		}
+		indent(o, ind);
+		if (n == 1 && arg_is_string_literal(cx, as[0], ae[0]))
+		{
+			appendStringInfo(o, "FOR %.*s IN ", cx->t[var].len, cx->t[var].s);
+			emit_string_as_sql(cx, &cx->t[as[0]], o);
+			appendStringInfoString(o, " LOOP\n");
+		}
+		else
+		{
+			char	   *sqlv = rw_range(cx, as[0], ae[0], false);
+			char	   *binds = binds_text(cx, as, ae, n);
+
+			if (binds)
+				appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
+								 cx->t[var].len, cx->t[var].s, sqlv, binds);
+			else
+				appendStringInfo(o, "FOR %.*s IN EXECUTE %s LOOP\n",
+								 cx->t[var].len, cx->t[var].s, sqlv);
+		}
+		cx->pos = colon + 1;
+		cx->loopdepth++;
+		parse_py_block(cx, ind + 1);
+		cx->loopdepth--;
+	}
+	else
+	{
+		/* FOREACH over an array */
+		char	   *arrx = rw_range(cx, ia, ib, false);
+		PlxLocal2  *lv;
+
+		if (is_param(cx, cx->t[var].s, cx->t[var].len))
+			plx_err(cx, hd, "foreach-array loop variable must be a local, not a parameter");
+		lv = local_find(cx, cx->t[var].s, cx->t[var].len);
+		if (!lv || !lv->typ)
+			plx_err(cx, hd, "iterating an array requires the loop variable to be annotated with its element type before the loop");
+		indent(o, ind);
+		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
+						 cx->t[var].len, cx->t[var].s, arrx[0] == '[' ? "ARRAY" : "", arrx);
+		cx->pos = colon + 1;
+		cx->loopdepth++;
+		parse_py_block(cx, ind + 1);
+		cx->loopdepth--;
+	}
+	indent(o, ind);
+	appendStringInfoString(o, "END LOOP;\n");
+}
+
+/* try: <body> except [Class as e]: <handler> ... [finally: <body>] */
+static void
+parse_py_try(Ctx *cx, int ind)
+{
+	StringInfo	o = &cx->out;
+	int			hd = cx->t[cx->pos].line;
+	int			colon;
+	char	   *body;
+	StringInfoData saved,
+				arms;
+	int			nrescue = 0;
+	char	   *ensure_body = NULL;
+
+	colon = py_header_colon(cx, cx->pos + 1);
+	if (colon < 0)
+		plx_err(cx, hd, "try requires ':'");
+	cx->pos = colon + 1;
+	saved = cx->out;
+	initStringInfo(&cx->out);
+	parse_py_block(cx, ind + 1);
+	body = cx->out.data;
+	cx->out = saved;
+
+	initStringInfo(&arms);
+	while (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_RESCUE)	/* except */
+	{
+		int			es = cx->pos;
+		const char *cond = "OTHERS";
+		int			ev_a = -1,
+					as_at = -1,
+					i;
+		const char *save_ev = cx->exc_var;
+		int			save_evl = cx->exc_varlen;
+		int			save_diag;
+		char	   *hb,
+				   *pfx;
+
+		colon = py_header_colon(cx, es + 1);
+		if (colon < 0)
+			plx_err(cx, cx->t[es].line, "except requires ':'");
+		/* except Class as e:  or  except Class:  or  except: */
+		for (i = es + 1; i < colon; i++)
+			if (cx->t[i].kind == T_KW && cx->t[i].kw == KW_AS)
+			{
+				as_at = i;
+				break;
+			}
+		if (as_at >= 0 && as_at + 1 < colon && cx->t[as_at + 1].kind == T_IDENT)
+			ev_a = as_at + 1;
+		{
+			int			cls_b = (as_at >= 0) ? as_at : colon;
+
+			if (cls_b > es + 1)
+			{
+				char	   *cls = span_text(cx, es + 1, cls_b);
+				const char *c = exc_class_to_condition(cls, (int) strlen(cls));
+
+				if (c)
+					cond = c;
+			}
+		}
+		cx->pos = colon + 1;
+		if (ev_a >= 0)
+		{
+			cx->exc_var = cx->t[ev_a].s;
+			cx->exc_varlen = cx->t[ev_a].len;
+		}
+		save_diag = cx->diag_mask;
+		cx->diag_mask = 0;
+		cx->handlerdepth++;
+		saved = cx->out;
+		initStringInfo(&cx->out);
+		parse_py_block(cx, ind + 2);
+		hb = cx->out.data;
+		cx->out = saved;
+		cx->handlerdepth--;
+		pfx = diag_prefix(cx->diag_mask, ind + 2);
+		cx->diag_mask = save_diag;
+		cx->exc_var = save_ev;
+		cx->exc_varlen = save_evl;
+
+		appendStringInfoSpaces(&arms, (ind + 1) * 2);
+		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
+		appendStringInfoString(&arms, pfx);
+		appendStringInfoString(&arms, hb);
+		nrescue++;
+	}
+	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)	/* finally */
+	{
+		colon = py_header_colon(cx, cx->pos + 1);
+		if (colon < 0)
+			plx_err(cx, cx->t[cx->pos].line, "finally requires ':'");
+		cx->pos = colon + 1;
+		saved = cx->out;
+		initStringInfo(&cx->out);
+		parse_py_block(cx, ind + 1);
+		ensure_body = cx->out.data;
+		cx->out = saved;
+	}
+
+	if (!ensure_body)
+	{
+		indent(o, ind);
+		appendStringInfoString(o, "BEGIN\n");
+		appendStringInfoString(o, body);
+		if (nrescue)
+		{
+			indent(o, ind);
+			appendStringInfoString(o, "EXCEPTION\n");
+			appendStringInfoString(o, arms.data);
+		}
+		indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+	}
+	else
+	{
+		indent(o, ind);
+		appendStringInfoString(o, "BEGIN\n");
+		indent(o, ind + 1);
+		appendStringInfoString(o, "BEGIN\n");
+		appendStringInfoString(o, body);
+		if (nrescue)
+		{
+			indent(o, ind + 1);
+			appendStringInfoString(o, "EXCEPTION\n");
+			appendStringInfoString(o, arms.data);
+		}
+		indent(o, ind + 1);
+		appendStringInfoString(o, "END;\n");
+		appendStringInfoString(o, ensure_body);
+		indent(o, ind);
+		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
+		appendStringInfoString(o, ensure_body);
+		indent(o, ind + 1);
+		appendStringInfoString(o, "RAISE;\n");
+		indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+	}
+}
+
+/* raise / raise Class("msg") */
+static void
+emit_py_raise(Ctx *cx, int a, int b, int ind)
+{
+	int			call = -1, i;
+
+	if (a + 1 >= b)				/* bare raise (re-raise) */
+	{
+		if (cx->handlerdepth == 0)
+			plx_err(cx, cx->t[a].line, "bare 'raise' is only valid inside an except handler");
+		indent(&cx->out, ind);
+		appendStringInfoString(&cx->out, "RAISE;\n");
+		return;
+	}
+	for (i = a + 1; i < b; i++)
+		if (cx->t[i].kind == T_LPAREN)
+		{
+			call = i - 1;
+			break;
+		}
+	if (call < 0)
+		plx_err(cx, cx->t[a].line, "raise requires an exception, e.g. raise ValueError(\"msg\")");
+	{
+		int			sa[8], se[8], after, n;
+
+		n = parse_args(cx, call, sa, se, 8, &after);
+		indent(&cx->out, ind);
+		if (n >= 1)
+			appendStringInfo(&cx->out, "RAISE EXCEPTION '%%', %s;\n",
+							 rw_range(cx, sa[0], se[0], false));
+		else
+			appendStringInfoString(&cx->out, "RAISE EXCEPTION 'exception';\n");
+	}
+}
+
+static void
+parse_py_stmt(Ctx *cx, int ind, bool toplevel)
+{
+	Tok		   *tk;
+
+	skip_seps(cx);
+	tk = &cx->t[cx->pos];
+	if (tk->kind == T_EOF || tk->kind == T_DEDENT)
+		return;
+	/* loop label:  name: for ... / name: while ... */
+	if (tk->kind == T_IDENT && tok_is(&cx->t[cx->pos + 1], ":") &&
+		cx->t[cx->pos + 2].kind == T_KW &&
+		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
+	{
+		indent(&cx->out, ind);
+		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		cx->pos += 2;
+		tk = &cx->t[cx->pos];
+	}
+	if (tk->kind == T_KW)
+	{
+		switch (tk->kw)
+		{
+			case KW_IF:
+				parse_py_if(cx, ind);
+				return;
+			case KW_WHILE:
+				parse_py_while(cx, ind);
+				return;
+			case KW_FOR:
+				parse_py_for(cx, ind);
+				return;
+			case KW_BEGIN:		/* try */
+				parse_py_try(cx, ind);
+				return;
+			case KW_PASS:
+				cx->pos = stmt_end(cx, cx->pos);
+				return;
+			case KW_DEF:
+				plx_err(cx, tk->line, "def is not supported");
+				return;
+			case KW_CASE:
+				plx_err(cx, tk->line, "match/case is not supported (use if/elif)");
+				return;
+			default:
+				break;
+		}
+	}
+	/* leaf statement (ends at NEWLINE) */
+	{
+		int			a = cx->pos;
+		int			b = stmt_end(cx, a);
+
+		if (tk->kind == T_KW && tk->kw == KW_RAISE)
+			emit_py_raise(cx, a, b, ind);
+		else if (tk->kind == T_IDENT && name_eq(tk, "assert") &&
+				 !(cx->t[a + 1].kind == T_LPAREN))
+		{
+			/* Python statement form: assert cond[, msg] */
+			int			i, depth = 0, comma = -1;
+
+			for (i = a + 1; i < b; i++)
+			{
+				if (cx->t[i].kind == T_LPAREN || cx->t[i].kind == T_LBRACKET)
+					depth++;
+				else if (cx->t[i].kind == T_RPAREN || cx->t[i].kind == T_RBRACKET)
+					depth--;
+				else if (depth == 0 && cx->t[i].kind == T_COMMA)
+				{
+					comma = i;
+					break;
+				}
+			}
+			indent(&cx->out, ind);
+			if (comma >= 0)
+				appendStringInfo(&cx->out, "ASSERT %s, %s;\n",
+								 rw_range(cx, a + 1, comma, true), rw_range(cx, comma + 1, b, false));
+			else
+				appendStringInfo(&cx->out, "ASSERT %s;\n", rw_range(cx, a + 1, b, true));
+		}
+		else
+			emit_core(cx, a, b, ind, toplevel);
+		cx->pos = b;
+	}
+}
+
+static void
+parse_py_program(Ctx *cx)
+{
+	for (;;)
+	{
+		skip_seps(cx);
+		if (cx->t[cx->pos].kind == T_EOF)
+			break;
+		if (cx->t[cx->pos].kind == T_INDENT || cx->t[cx->pos].kind == T_DEDENT)
+		{
+			cx->pos++;			/* stray indentation token at top level */
+			continue;
+		}
+		parse_py_stmt(cx, 1, true);
+	}
+}
+
 /* ---------------------------------------------------------------- assemble */
 
 static char *
@@ -3519,6 +4189,8 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 
 	if (surf->block_style == PLX_BLK_BRACE)
 		parse_brace_program(&cx);
+	else if (surf->block_style == PLX_BLK_INDENT)
+		parse_py_program(&cx);
 	else
 	{
 		/* keyword-end (Ruby) top-level walk */
