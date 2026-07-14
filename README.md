@@ -32,7 +32,10 @@ and [doc/TRANSPILER.md](doc/TRANSPILER.md).
 
 ## Requirements
 
-- PostgreSQL 18.
+- PostgreSQL 13 to 18.
+
+plx is tested against PostgreSQL 13, 14, 15, 16, 17, and 18. The full regression
+suite passes on each. See [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md).
 
 ## Build and install
 
@@ -109,6 +112,7 @@ $$;
   [plxjs](doc/plxjs.md). Each covers the full syntax, supported constructs with
   examples, semantic differences, and what is rejected.
 - [doc/PARITY.md](doc/PARITY.md): the plpgsql construct parity matrix.
+- [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md): supported PostgreSQL versions.
 - [doc/USERGUIDE.md](doc/USERGUIDE.md): examples from the PL/pgSQL manual shown in
   each dialect next to the plpgsql they produce.
 - [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) and
