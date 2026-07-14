@@ -2208,6 +2208,41 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			return;
 		}
 	}
+
+	/*
+	 * Qualified / subscripted lvalue assignment: NEW.field = e, r.col = e,
+	 * arr[i] = e. Find a top-level single '=' and emit lhs := rhs. This enables
+	 * trigger functions (assigning to NEW/OLD fields) and element assignment.
+	 */
+	{
+		int			i, depth = 0, eq = -1;
+
+		for (i = a; i < b; i++)
+		{
+			TokKind		k = cx->t[i].kind;
+
+			if (k == T_LPAREN || k == T_LBRACKET || k == T_LBRACE)
+				depth++;
+			else if (k == T_RPAREN || k == T_RBRACKET || k == T_RBRACE)
+				depth--;
+			else if (depth == 0 && tok_is(&cx->t[i], "="))
+			{
+				eq = i;
+				break;
+			}
+		}
+		if (eq > a && eq + 1 < b && t0->kind == T_IDENT &&
+			(cx->t[a + 1].kind == T_DOT || cx->t[a + 1].kind == T_LBRACKET))
+		{
+			char	   *lhs = rw_range(cx, a, eq, false);
+			char	   *rhs = rw_range(cx, eq + 1, b, false);
+
+			indent(o, ind);
+			appendStringInfo(o, "%s := %s;\n", lhs, rhs);
+			return;
+		}
+	}
+
 	plx_err(cx, t0->line, "unsupported statement");
 }
 
@@ -4022,6 +4057,12 @@ emit_py_raise(Ctx *cx, int a, int b, int ind)
 			plx_err(cx, cx->t[a].line, "bare 'raise' is only valid inside an except handler");
 		indent(&cx->out, ind);
 		appendStringInfoString(&cx->out, "RAISE;\n");
+		return;
+	}
+	/* raise(msg) / raise("level", msg): the call form emits a leveled RAISE */
+	if (cx->t[a + 1].kind == T_LPAREN)
+	{
+		emit_raise_call(cx, a, ind);
 		return;
 	}
 	for (i = a + 1; i < b; i++)

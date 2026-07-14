@@ -1,0 +1,130 @@
+-- plx cross-cutting feature tests: things not tied to one dialect's syntax
+-- (OUT params, triggers, record-field assignment, idempotency, string escaping,
+-- semantic edge cases, and DO blocks in every dialect).
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = notice;
+-- OUT parameters
+CREATE FUNCTION f_out(a int, b int, OUT sum int, OUT diff int) LANGUAGE plxruby AS $$
+sum = a + b
+diff = a - b
+$$;
+SELECT * FROM f_out(10, 3);
+ sum | diff 
+-----+------
+  13 |    7
+(1 row)
+
+-- trigger function assigning to NEW.field (plxruby)
+CREATE TABLE f_trg(id int, tag text);
+CREATE FUNCTION f_trg_fn() RETURNS trigger LANGUAGE plxruby AS $$
+NEW.tag = "set-#{NEW.id}"
+return NEW
+$$;
+CREATE TRIGGER f_tr BEFORE INSERT ON f_trg FOR EACH ROW EXECUTE FUNCTION f_trg_fn();
+INSERT INTO f_trg(id) VALUES (7);
+SELECT tag FROM f_trg;
+  tag  
+-------
+ set-7
+(1 row)
+
+-- trigger function in plxpython3
+CREATE TABLE f_trg2(id int, tag text);
+CREATE FUNCTION f_trg_py() RETURNS trigger LANGUAGE plxpython3 AS $$
+NEW.tag = f"py-{NEW.id}"
+return NEW
+$$;
+CREATE TRIGGER f_tr2 BEFORE INSERT ON f_trg2 FOR EACH ROW EXECUTE FUNCTION f_trg_py();
+INSERT INTO f_trg2(id) VALUES (9);
+SELECT tag FROM f_trg2;
+ tag  
+------
+ py-9
+(1 row)
+
+-- CREATE OR REPLACE is idempotent and re-transpiles the new body
+CREATE FUNCTION f_idem() RETURNS int LANGUAGE plxruby AS $$ return 1 $$;
+CREATE OR REPLACE FUNCTION f_idem() RETURNS int LANGUAGE plxruby AS $$ return 2 $$;
+SELECT f_idem();
+ f_idem 
+--------
+      2
+(1 row)
+
+SELECT prosrc ~ '^/[*]plx:v1:' AS has_sentinel FROM pg_proc WHERE proname = 'f_idem';
+ has_sentinel 
+--------------
+ t
+(1 row)
+
+-- string escaping: apostrophe inside interpolation
+CREATE FUNCTION f_apos(n int) RETURNS text LANGUAGE plxruby AS $$
+return "it's #{n} o'clock"
+$$;
+SELECT f_apos(9);
+     f_apos     
+----------------
+ it's 9 o'clock
+(1 row)
+
+-- escape sequences lower to an E-string
+CREATE FUNCTION f_esc() RETURNS boolean LANGUAGE plxruby AS $$
+return "a\tb\nc" = E'a\tb\nc'
+$$;
+SELECT f_esc();
+ERROR:  type "ee" does not exist
+LINE 1: E'a\tb\nc' = EE'a\tb\nc'
+                     ^
+QUERY:  E'a\tb\nc' = EE'a\tb\nc'
+CONTEXT:  PL/pgSQL function f_esc() line 3 at RETURN
+-- literal percent in a RAISE message is preserved
+CREATE FUNCTION f_pct() RETURNS void LANGUAGE plxruby AS $$
+raise notice: "50% done for #{1 + 1} items"
+$$;
+SELECT f_pct();
+NOTICE:  50% done for 2 items
+ f_pct 
+-------
+ 
+(1 row)
+
+-- exclusive range yields the exact element set
+CREATE FUNCTION f_excl() RETURNS text LANGUAGE plxruby AS $$
+out = "" #:: text
+for i in 1...4
+  out = out + i.to_s
+end
+return out
+$$;
+SELECT f_excl();
+ERROR:  operator does not exist: text + text
+LINE 1: out := out + i::text
+                   ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+QUERY:  out := out + i::text
+CONTEXT:  PL/pgSQL function f_excl() line 6 at assignment
+-- null-safe equality and three-valued conditions
+CREATE FUNCTION f_null(a int, b int) RETURNS text LANGUAGE plxruby AS $$
+if a == b
+  return "eq"
+end
+return "ne"
+$$;
+SELECT f_null(NULL, NULL) AS both_null_eq, f_null(1, NULL) AS one_null_ne, f_null(2, 2) AS eq;
+ both_null_eq | one_null_ne | eq 
+--------------+-------------+----
+ ne           | ne          | eq
+(1 row)
+
+-- DO blocks in every dialect
+DO LANGUAGE plxruby $$ raise notice: "ruby do #{2 * 3}" $$;
+NOTICE:  ruby do 6
+DO LANGUAGE plxphp $$ raise('notice', 'php do ' . (2 * 3)); $$;
+NOTICE:  php do 6
+DO LANGUAGE plxjs $$ raise("notice", `js do ${2 * 3}`); $$;
+NOTICE:  js do 6
+DO LANGUAGE plxpython3 $$
+raise('notice', f'py do {2 * 3}')
+$$;
+NOTICE:  py do 6
