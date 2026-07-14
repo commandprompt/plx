@@ -18,11 +18,19 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
-#include "common/base64.h"
 #include "utils/builtins.h"
 
 #include "plx.h"
 #include "plx_int.h"
+
+/*
+ * Cross-version shims. pg_noreturn is a PG18 prefix specifier; older releases
+ * use a suffix attribute. Define it as the GCC/clang attribute (usable as a
+ * prefix) when the server headers do not provide it.
+ */
+#ifndef pg_noreturn
+#define pg_noreturn __attribute__((noreturn))
+#endif
 
 /* ---------------------------------------------------------------- tokens */
 
@@ -4142,17 +4150,48 @@ parse_py_program(Ctx *cx)
 
 /* ---------------------------------------------------------------- assemble */
 
+/* Self-contained base64 encoder (the server pg_b64_encode signature differs
+ * across major versions; this keeps plx source-compatible from PG13 up). */
 static char *
 b64_encode_body(const char *body)
 {
+	static const char b64[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const unsigned char *src = (const unsigned char *) body;
 	int			srclen = (int) strlen(body);
-	int			dstlen = pg_b64_enc_len(srclen);
-	char	   *dst = palloc(dstlen + 1);
-	int			r = pg_b64_encode((const uint8 *) body, srclen, dst, dstlen);
+	char	   *dst = palloc((size_t) (srclen + 2) / 3 * 4 + 1);
+	char	   *o = dst;
+	int			i = 0;
 
-	if (r < 0)
-		elog(ERROR, "plx: base64 encode failed");
-	dst[r] = '\0';
+	while (i + 3 <= srclen)
+	{
+		unsigned int v = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
+
+		*o++ = b64[(v >> 18) & 0x3f];
+		*o++ = b64[(v >> 12) & 0x3f];
+		*o++ = b64[(v >> 6) & 0x3f];
+		*o++ = b64[v & 0x3f];
+		i += 3;
+	}
+	if (srclen - i == 1)
+	{
+		unsigned int v = src[i] << 16;
+
+		*o++ = b64[(v >> 18) & 0x3f];
+		*o++ = b64[(v >> 12) & 0x3f];
+		*o++ = '=';
+		*o++ = '=';
+	}
+	else if (srclen - i == 2)
+	{
+		unsigned int v = (src[i] << 16) | (src[i + 1] << 8);
+
+		*o++ = b64[(v >> 18) & 0x3f];
+		*o++ = b64[(v >> 12) & 0x3f];
+		*o++ = b64[(v >> 6) & 0x3f];
+		*o++ = '=';
+	}
+	*o = '\0';
 	return dst;
 }
 
