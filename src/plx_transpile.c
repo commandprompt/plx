@@ -75,12 +75,22 @@ typedef struct
 	int			subq;			/* __plx_fo_N / __plx_p_N counter */
 	const char *exc_var;		/* current rescue exception var name */
 	int			exc_varlen;
+	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		retset;
 	MemoryContext mcx;
 } Ctx;
 
 /* forward decls */
 #define PLX_MAX_DEPTH 500		/* recursion cap (parsers + expression rewriter) */
+
+/* stacked-diagnostics field bits (e.detail, e.hint, ...) */
+#define PLX_DIAG_DETAIL     0x01
+#define PLX_DIAG_HINT       0x02
+#define PLX_DIAG_CONSTRAINT 0x04
+#define PLX_DIAG_COLUMN     0x08
+#define PLX_DIAG_TABLE      0x10
+#define PLX_DIAG_SCHEMA     0x20
+#define PLX_DIAG_DATATYPE   0x40
 
 static pg_noreturn void plx_err(Ctx *cx, int line, const char *fmt,...) pg_attribute_printf(3, 4);
 static char *rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx);
@@ -897,6 +907,40 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 						appendStringInfoString(&out, "SQLSTATE");
 						i = f;
 						continue;
+					}
+					/* stacked-diagnostics fields -> a temp filled by GET STACKED
+					 * DIAGNOSTICS at the handler top (see parse_begin/parse_try) */
+					{
+						static const struct { const char *fld; int bit; } dtab[] = {
+							{"detail", PLX_DIAG_DETAIL}, {"hint", PLX_DIAG_HINT},
+							{"constraint", PLX_DIAG_CONSTRAINT}, {"column", PLX_DIAG_COLUMN},
+							{"table", PLX_DIAG_TABLE}, {"schema", PLX_DIAG_SCHEMA},
+							{"datatype", PLX_DIAG_DATATYPE},
+						};
+						int			k;
+						bool		matched = false;
+
+						for (k = 0; k < (int) (sizeof(dtab) / sizeof(dtab[0])); k++)
+							if ((int) strlen(dtab[k].fld) == fl &&
+								strncmp(fld, dtab[k].fld, fl) == 0)
+							{
+								char		tmp[64];
+
+								cx->diag_mask |= dtab[k].bit;
+								snprintf(tmp, sizeof(tmp), "__plx_%s", dtab[k].fld);
+								if (!local_find(cx, tmp, (int) strlen(tmp)))
+								{
+									PlxLocal2  *tl = local_add(cx, tmp, (int) strlen(tmp));
+
+									tl->typ = pstrdup("text");
+								}
+								appendStringInfoString(&out, tmp);
+								i = f;
+								matched = true;
+								break;
+							}
+						if (matched)
+							continue;
 					}
 				}
 			}
@@ -1780,13 +1824,18 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		}
 		return;
 	}
-	/* next / break */
+	/* next / break, optionally with a loop label */
 	if (t0->kind == T_KW && (t0->kw == KW_NEXT || t0->kw == KW_BREAK))
 	{
+		const char *kw = (t0->kw == KW_NEXT) ? "CONTINUE" : "EXIT";
+
 		if (cx->loopdepth == 0)
 			plx_err(cx, t0->line, "%s outside a loop", t0->kw == KW_NEXT ? "next" : "break");
 		indent(o, ind);
-		appendStringInfoString(o, t0->kw == KW_NEXT ? "CONTINUE;\n" : "EXIT;\n");
+		if (a + 1 < b && cx->t[a + 1].kind == T_IDENT)
+			appendStringInfo(o, "%s %.*s;\n", kw, cx->t[a + 1].len, cx->t[a + 1].s);
+		else
+			appendStringInfo(o, "%s;\n", kw);
 		return;
 	}
 	/* raise */
@@ -1989,14 +2038,18 @@ emit_leaf(Ctx *cx, int a, int b, int ind, bool toplevel)
 										(int) strlen(span_text(cx, m + 1, b)), true);
 		bool		neg = (mk == KW_UNLESS || mk == KW_UNTIL);
 
-		/* next/break modifiers -> WHEN */
+		/* next/break modifiers -> WHEN (optionally with a loop label) */
 		if (t0->kind == T_KW && (t0->kw == KW_NEXT || t0->kw == KW_BREAK))
 		{
+			char		lbl[NAMEDATALEN + 1] = "";
+
 			if (cx->loopdepth == 0)
 				plx_err(cx, t0->line, "%s outside a loop", t0->kw == KW_NEXT ? "next" : "break");
+			if (a + 1 < m && cx->t[a + 1].kind == T_IDENT)
+				snprintf(lbl, sizeof(lbl), " %.*s", cx->t[a + 1].len, cx->t[a + 1].s);
 			indent(o, ind);
-			appendStringInfo(o, "%s WHEN %s%s%s;\n",
-							 t0->kw == KW_NEXT ? "CONTINUE" : "EXIT",
+			appendStringInfo(o, "%s%s WHEN %s%s%s;\n",
+							 t0->kw == KW_NEXT ? "CONTINUE" : "EXIT", lbl,
 							 neg ? "NOT (" : "", cond, neg ? ")" : "");
 			return;
 		}
@@ -2382,6 +2435,34 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/* GET STACKED DIAGNOSTICS lines for the fields used in a handler (see diag_mask) */
+static char *
+diag_prefix(int mask, int ind)
+{
+	static const struct { int bit; const char *fld; const char *item; } t[] = {
+		{PLX_DIAG_DETAIL, "detail", "PG_EXCEPTION_DETAIL"},
+		{PLX_DIAG_HINT, "hint", "PG_EXCEPTION_HINT"},
+		{PLX_DIAG_CONSTRAINT, "constraint", "CONSTRAINT_NAME"},
+		{PLX_DIAG_COLUMN, "column", "COLUMN_NAME"},
+		{PLX_DIAG_TABLE, "table", "TABLE_NAME"},
+		{PLX_DIAG_SCHEMA, "schema", "SCHEMA_NAME"},
+		{PLX_DIAG_DATATYPE, "datatype", "PG_DATATYPE_NAME"},
+	};
+	StringInfoData p;
+	int			i;
+
+	if (!mask)
+		return pstrdup("");
+	initStringInfo(&p);
+	for (i = 0; i < (int) (sizeof(t) / sizeof(t[0])); i++)
+		if (mask & t[i].bit)
+		{
+			appendStringInfoSpaces(&p, ind * 2);
+			appendStringInfo(&p, "GET STACKED DIAGNOSTICS __plx_%s = %s;\n", t[i].fld, t[i].item);
+		}
+	return p.data;
+}
+
 /* begin [body] [rescue [Class] [=> e] handler]* [ensure body] end */
 static void
 parse_begin(Ctx *cx, int ind)
@@ -2434,15 +2515,24 @@ parse_begin(Ctx *cx, int ind)
 			cx->exc_var = cx->t[ev_a].s;
 			cx->exc_varlen = cx->t[ev_a].len;
 		}
-		cx->handlerdepth++;
-		hb = capture_block(cx, ind + 2);
-		cx->handlerdepth--;
-		cx->exc_var = save_ev;
-		cx->exc_varlen = save_evl;
+		{
+			int			save_diag = cx->diag_mask;
+			char	   *pfx;
 
-		appendStringInfoSpaces(&arms, (ind + 1) * 2);
-		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
-		appendStringInfoString(&arms, hb);
+			cx->diag_mask = 0;
+			cx->handlerdepth++;
+			hb = capture_block(cx, ind + 2);
+			cx->handlerdepth--;
+			pfx = diag_prefix(cx->diag_mask, ind + 2);
+			cx->diag_mask = save_diag;
+			cx->exc_var = save_ev;
+			cx->exc_varlen = save_evl;
+
+			appendStringInfoSpaces(&arms, (ind + 1) * 2);
+			appendStringInfo(&arms, "WHEN %s THEN\n", cond);
+			appendStringInfoString(&arms, pfx);
+			appendStringInfoString(&arms, hb);
+		}
 		nrescue++;
 	}
 
@@ -2625,6 +2715,17 @@ parse_stmt_inner(Ctx *cx, int ind, bool toplevel)
 	tk = &cx->t[cx->pos];
 	if (tk->kind == T_EOF)
 		return;
+	/* loop label:  name: for i in ... / name: while ... / name: loop do */
+	if (tk->kind == T_IDENT && tok_is(&cx->t[cx->pos + 1], ":") &&
+		cx->t[cx->pos + 2].kind == T_KW &&
+		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE ||
+		 cx->t[cx->pos + 2].kw == KW_UNTIL || cx->t[cx->pos + 2].kw == KW_LOOP))
+	{
+		indent(&cx->out, ind);
+		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		cx->pos += 2;
+		tk = &cx->t[cx->pos];
+	}
 	if (tk->kind == T_KW)
 	{
 		switch (tk->kw)
@@ -3046,19 +3147,28 @@ parse_try_brace(Ctx *cx, int ind)
 			cx->exc_var = cx->t[ev_a].s;
 			cx->exc_varlen = cx->t[ev_a].len;
 		}
-		cx->handlerdepth++;
-		saved = cx->out;
-		initStringInfo(&cx->out);
-		parse_brace_block(cx, ind + 2);
-		hb = cx->out.data;
-		cx->out = saved;
-		cx->handlerdepth--;
-		cx->exc_var = save_ev;
-		cx->exc_varlen = save_evl;
+		{
+			int			save_diag = cx->diag_mask;
+			char	   *pfx;
 
-		appendStringInfoSpaces(&arms, (ind + 1) * 2);
-		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
-		appendStringInfoString(&arms, hb);
+			cx->diag_mask = 0;
+			cx->handlerdepth++;
+			saved = cx->out;
+			initStringInfo(&cx->out);
+			parse_brace_block(cx, ind + 2);
+			hb = cx->out.data;
+			cx->out = saved;
+			cx->handlerdepth--;
+			pfx = diag_prefix(cx->diag_mask, ind + 2);
+			cx->diag_mask = save_diag;
+			cx->exc_var = save_ev;
+			cx->exc_varlen = save_evl;
+
+			appendStringInfoSpaces(&arms, (ind + 1) * 2);
+			appendStringInfo(&arms, "WHEN %s THEN\n", cond);
+			appendStringInfoString(&arms, pfx);
+			appendStringInfoString(&arms, hb);
+		}
 		nrescue++;
 		skip_seps(cx);
 	}
@@ -3269,6 +3379,16 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 	tk = &cx->t[cx->pos];
 	if (tk->kind == T_EOF || tk->kind == T_RBRACE)
 		return;
+	/* loop label:  name: for (...) {...}  /  name: while (...) {...} */
+	if (tk->kind == T_IDENT && tok_is(&cx->t[cx->pos + 1], ":") &&
+		cx->t[cx->pos + 2].kind == T_KW &&
+		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
+	{
+		indent(&cx->out, ind);
+		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		cx->pos += 2;			/* consume name and ':' */
+		tk = &cx->t[cx->pos];
+	}
 	if (tk->kind == T_KW)
 	{
 		switch (tk->kw)

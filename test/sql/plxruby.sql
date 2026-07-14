@@ -238,3 +238,28 @@ close_cursor(c)
 return total
 $$;
 SELECT rb_cursor_sum();
+
+-- labeled loop (break outer) and stacked diagnostics
+CREATE FUNCTION rb_labeled(n int) RETURNS int LANGUAGE plxruby AS $$
+count = 0 #:: int
+outer: for i in 1..n
+  for j in 1..n
+    count = count + 1
+    break outer if i + j >= 4
+  end
+end
+return count
+$$;
+SELECT rb_labeled(5);
+
+CREATE TABLE rb_uq(id int PRIMARY KEY);
+INSERT INTO rb_uq VALUES (1);
+CREATE FUNCTION rb_diag(k int) RETURNS text LANGUAGE plxruby AS $$
+begin
+  execute("INSERT INTO rb_uq(id) VALUES ($1)", k)
+  return "inserted"
+rescue PG::UniqueViolation => e
+  return "constraint=#{e.constraint} detail=#{e.detail}"
+end
+$$;
+SELECT rb_diag(1);

@@ -17,7 +17,7 @@ noted.
 | `FOR` integer | done | `for i in 1..n` / C-for |
 | `FOR` over query | done | `query(sql).each` / `foreach`/`for..of` |
 | `FOR` over dynamic query | done | same, non-literal SQL or binds |
-| `EXIT` / `CONTINUE` | done (no labels) | next/break (+ `WHEN`) |
+| `EXIT` / `CONTINUE` (+ labels) | done | next/break (+ `WHEN`); `label: <loop>` and `break label` |
 | `RETURN` / `RETURN NEXT` / `RETURN QUERY` | done | return / emit / return_query |
 | `RAISE` | done | raise / throw |
 | `ASSERT` | done | `assert(cond[, msg])` |
@@ -26,14 +26,24 @@ noted.
 | SQL statement / `SELECT INTO` | done | `fetch_one` / perform / execute |
 | `GET DIAGNOSTICS` (ROW_COUNT) | done | `x = row_count()` |
 | `FOUND` | done | `found()` / `found?` |
-| `GET STACKED DIAGNOSTICS` | partial | `e.message`, `e.sqlstate` (detail/hint/constraint: todo) |
+| `GET STACKED DIAGNOSTICS` | done | `e.message`, `e.sqlstate`, `e.detail`, `e.hint`, `e.constraint`, `e.column`, `e.table`, `e.schema`, `e.datatype` |
 | `CALL` procedure | done | `call("proc", args)` |
 | `COMMIT` / `ROLLBACK` | done | `commit()` / `rollback()` |
 | `FOREACH` over array | done | `arr.each` / `foreach($a as $v)` / `for (v of arr)` (v annotated) |
 | cursors: `OPEN`/`FETCH`/`MOVE`/`CLOSE` | done | `open_cursor(sql)`, `fetch_from(c)`, `move_cursor(c[,n])`, `close_cursor(c)` |
 | declarations: `CONSTANT` | done | annotation suffix `const` (e.g. `x = 5 #:: int const`) |
 | declarations: `%TYPE` / `%ROWTYPE` | done | annotation type text (e.g. `e #:: tbl%ROWTYPE`) |
-| nested block with local `DECLARE` | partial | begin/rescue reuses one flat scope |
-| block labels `<<l>>` on EXIT/CONTINUE | todo | |
+| nested block with local `DECLARE` | by design | locals are function-scoped (matches Ruby method / JS var / PHP function scope); `begin/rescue` provides a nested BEGIN/EXCEPTION block sharing that scope |
 
 This file is updated as constructs land.
+
+## Notes
+
+- Variable scope: plx locals are function-scoped, which matches the natural
+  scoping of the source languages (Ruby method locals, JavaScript `var`, PHP
+  function scope). plpgsql's per-block `DECLARE` is not exposed as a separate
+  construct; a `begin/rescue` (`try/catch`) block gives the nested
+  `BEGIN/EXCEPTION/END` structure and shares the function scope.
+- Labels: `label: <loop>` before a loop and `break label` / `next label` lower
+  to plpgsql `<<label>>` and `EXIT label` / `CONTINUE label`. The `label:` prefix
+  is native in JavaScript and is accepted as a plx extension in Ruby and PHP.

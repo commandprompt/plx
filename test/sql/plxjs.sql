@@ -139,3 +139,16 @@ close_cursor(c);
 return total;
 $$;
 SELECT js_cursor_sum();
+
+-- labeled loop
+CREATE FUNCTION js_labeled(n int) RETURNS int LANGUAGE plxjs AS $$
+let count = 0 /*:: int */;
+outer: for (let i = 1; i <= n; i++) {
+  for (let j = 1; j <= n; j++) {
+    count = count + 1;
+    if (i + j >= 4) { break outer; }
+  }
+}
+return count;
+$$;
+SELECT js_labeled(5);
