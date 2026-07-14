@@ -4138,6 +4138,23 @@ parse_py_stmt(Ctx *cx, int ind, bool toplevel)
 	{
 		int			a = cx->pos;
 		int			b = stmt_end(cx, a);
+		int			i, depth = 0;
+
+		/* a top-level if/else inside a leaf is a conditional expression
+		 * (a if c else b), which has no plpgsql lowering */
+		for (i = a; i < b; i++)
+		{
+			TokKind		k = cx->t[i].kind;
+
+			if (k == T_LPAREN || k == T_LBRACKET || k == T_LBRACE)
+				depth++;
+			else if (k == T_RPAREN || k == T_RBRACKET || k == T_RBRACE)
+				depth--;
+			else if (depth == 0 && cx->t[i].kind == T_KW &&
+					 (cx->t[i].kw == KW_IF || cx->t[i].kw == KW_ELSE))
+				plx_err(cx, cx->t[i].line,
+						"the conditional expression \"a if c else b\" is not supported; use an if statement");
+		}
 
 		if (tk->kind == T_KW && tk->kw == KW_RAISE)
 			emit_py_raise(cx, a, b, ind);

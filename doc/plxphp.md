@@ -247,6 +247,8 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Decimal literals infer `numeric`, not a floating-point type.
 - Comparisons use SQL three-valued logic. `==` and `!=` are null-aware; a
   positive `if`/`while` condition treats NULL as false.
+- PHP truthiness is not emulated. A condition must be a boolean expression. A
+  non-boolean condition is an error reported by plpgsql when the function runs.
 - Locals are function-scoped, matching PHP function scope.
 
 ## Not supported
@@ -256,7 +258,6 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Function or class definitions, namespaces, `use`, includes.
 - Closures and anonymous functions.
 - Array and object literals as general values.
-- Non-boolean conditions (PHP truthiness is not emulated).
 - Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and
   `for (...; $v += K)` are supported.
 - `foreach` over an array key/value pair (only value iteration).

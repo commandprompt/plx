@@ -273,6 +273,9 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   positive `if`/`while` condition treats NULL as false.
 - `String#+` remains SQL numeric `+`. Use interpolation for concatenation.
 - Locals are function-scoped, matching Ruby method scope.
+- Ruby truthiness is not emulated. A condition must be a boolean expression;
+  write `x != 0` or `!x.nil?` rather than a bare `x`. A non-boolean condition is
+  an error reported by plpgsql when the function runs, not at CREATE time.
 
 ## Not supported
 
@@ -281,7 +284,6 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Method or class definitions (`def`, classes, modules), gems.
 - Blocks and lambdas beyond the recognized `.each` forms.
 - Hash and array literals as general values.
-- Ruby truthiness: a condition must be boolean. Write `x != 0` or `!x.nil?`.
 - `||=`, `&&=`, and `and`/`or` in value position.
 - `redo`, `retry`.
 - Per-block local `DECLARE` (locals are function-scoped by design).

@@ -51,3 +51,54 @@ switch (n) {
   default: return "b";
 }
 $$;
+
+-- plxruby: ||= has no faithful lowering
+CREATE FUNCTION e_rb_orassign() RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x ||= 5
+return x
+$$;
+
+-- plxruby: emit outside a set-returning function
+CREATE FUNCTION e_rb_emit() RETURNS int LANGUAGE plxruby AS $$
+emit
+return 1
+$$;
+
+-- plxruby: bare raise outside a handler
+CREATE FUNCTION e_rb_reraise() RETURNS int LANGUAGE plxruby AS $$
+raise
+$$;
+
+-- plxpython3: def is not supported
+CREATE FUNCTION e_py_def() RETURNS int LANGUAGE plxpython3 AS $$
+def helper():
+    return 1
+return helper()
+$$;
+
+-- plxpython3: class is not supported
+CREATE FUNCTION e_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+class C:
+    pass
+return 1
+$$;
+
+-- plxpython3: match/case is not supported
+CREATE FUNCTION e_py_match(n int) RETURNS int LANGUAGE plxpython3 AS $$
+match n:
+    case 1:
+        return 1
+return 0
+$$;
+
+-- plxpython3: conditional expression a if c else b
+CREATE FUNCTION e_py_ternary(x int) RETURNS int LANGUAGE plxpython3 AS $$
+return 1 if x > 0 else 2
+$$;
+
+-- plxjs: nested function definition
+CREATE FUNCTION e_js_fn() RETURNS int LANGUAGE plxjs AS $$
+function helper() { return 1; }
+return 1;
+$$;

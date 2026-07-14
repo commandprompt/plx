@@ -231,6 +231,8 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Comparisons use SQL three-valued logic. `==` and `!=` are null-aware; a
   positive `if`/`while` condition treats NULL as false.
 - Integer division follows SQL rules, not Python's `/` (float) and `//` (floor).
+- Python truthiness is not emulated. A condition must be a boolean expression. A
+  non-boolean condition is an error reported by plpgsql when the function runs.
 - Locals are function-scoped, matching Python function scope.
 
 ## Not supported
@@ -240,7 +242,6 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - `def`, `class`, `lambda`, decorators, comprehensions, generators.
 - `import`, modules, and the Python standard library.
 - Tuples, lists, dicts, and sets as general values.
-- Non-boolean conditions (Python truthiness is not emulated).
 - `match`/`case`.
 - The conditional expression `a if c else b`.
 - Per-block local scope (locals are function-scoped by design).

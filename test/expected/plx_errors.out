@@ -59,3 +59,62 @@ switch (n) {
 $$;
 ERROR:  plxjs: switch fall-through is not supported; end each case with 'break' or 'return'
 DETAIL:  at plxjs source line 4
+-- plxruby: ||= has no faithful lowering
+CREATE FUNCTION e_rb_orassign() RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x ||= 5
+return x
+$$;
+ERROR:  plxruby: unsupported operator in statement
+DETAIL:  at plxruby source line 3
+-- plxruby: emit outside a set-returning function
+CREATE FUNCTION e_rb_emit() RETURNS int LANGUAGE plxruby AS $$
+emit
+return 1
+$$;
+ERROR:  plxruby: emit/return_next is only valid in a set-returning function
+DETAIL:  at plxruby source line 2
+-- plxruby: bare raise outside a handler
+CREATE FUNCTION e_rb_reraise() RETURNS int LANGUAGE plxruby AS $$
+raise
+$$;
+ERROR:  plxruby: bare 'raise' (re-raise) is only valid inside a rescue handler
+DETAIL:  at plxruby source line 2
+-- plxpython3: def is not supported
+CREATE FUNCTION e_py_def() RETURNS int LANGUAGE plxpython3 AS $$
+def helper():
+    return 1
+return helper()
+$$;
+ERROR:  plxpython3: def is not supported
+DETAIL:  at plxpython3 source line 2
+-- plxpython3: class is not supported
+CREATE FUNCTION e_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+class C:
+    pass
+return 1
+$$;
+ERROR:  plxpython3: def is not supported
+DETAIL:  at plxpython3 source line 2
+-- plxpython3: match/case is not supported
+CREATE FUNCTION e_py_match(n int) RETURNS int LANGUAGE plxpython3 AS $$
+match n:
+    case 1:
+        return 1
+return 0
+$$;
+ERROR:  plxpython3: match/case is not supported (use if/elif)
+DETAIL:  at plxpython3 source line 2
+-- plxpython3: conditional expression a if c else b
+CREATE FUNCTION e_py_ternary(x int) RETURNS int LANGUAGE plxpython3 AS $$
+return 1 if x > 0 else 2
+$$;
+ERROR:  plxpython3: the conditional expression "a if c else b" is not supported; use an if statement
+DETAIL:  at plxpython3 source line 2
+-- plxjs: nested function definition
+CREATE FUNCTION e_js_fn() RETURNS int LANGUAGE plxjs AS $$
+function helper() { return 1; }
+return 1;
+$$;
+ERROR:  plxjs: nested function definitions are not supported
+DETAIL:  at plxjs source line 2

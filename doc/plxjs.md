@@ -245,6 +245,9 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Comparisons use SQL three-valued logic. `==` and `===` are null-aware; a
   positive `if`/`while` condition treats NULL as false.
 - `+` is numeric addition; use template literals for string building.
+- JavaScript truthiness is not emulated. A condition must be a boolean
+  expression. A non-boolean condition is an error reported by plpgsql when the
+  function runs.
 - Locals are function-scoped, matching JavaScript `var` scope.
 
 ## Not supported
@@ -253,7 +256,6 @@ Rejected at `CREATE FUNCTION` time with a line number:
 
 - Function definitions, arrow functions, classes, `import`.
 - Object and array literals as general values.
-- Non-boolean conditions (JavaScript truthiness is not emulated).
 - `for...in`, and `for...of` over anything other than `query(...)` or an array.
 - `switch` fall-through (end each case with `break` or `return`).
 - Per-block local `DECLARE` (locals are function-scoped by design).
