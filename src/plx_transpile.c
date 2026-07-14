@@ -1310,6 +1310,67 @@ emit_execute(Ctx *cx, int a, int ind)
 		appendStringInfo(&cx->out, "EXECUTE %s;\n", sqlv);
 }
 
+/* lhs = open_cursor(SQL[, binds]) -> declare lhs refcursor; OPEN lhs FOR ...; */
+static void
+emit_open_cursor(Ctx *cx, Tok *lhs, int a, int ind)
+{
+	int			as[16], ae[16], after, n;
+
+	if (!is_param(cx, lhs->s, lhs->len))
+	{
+		PlxLocal2  *l = local_find(cx, lhs->s, lhs->len);
+
+		if (!l)
+			l = local_add(cx, lhs->s, lhs->len);
+		if (!l->typ)
+			l->typ = pstrdup("refcursor");
+	}
+	n = parse_args(cx, a, as, ae, 16, &after);
+	if (n < 1)
+		plx_err(cx, cx->t[a].line, "open_cursor requires a SQL argument");
+	indent(&cx->out, ind);
+	if (n == 1 && arg_is_string_literal(cx, as[0], ae[0]))
+	{
+		appendStringInfo(&cx->out, "OPEN %.*s FOR ", lhs->len, lhs->s);
+		emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
+		appendStringInfoString(&cx->out, ";\n");
+	}
+	else
+	{
+		char	   *sqlv = rw_range(cx, as[0], ae[0], false);
+		char	   *binds = binds_text(cx, as, ae, n);
+
+		if (binds)
+			appendStringInfo(&cx->out, "OPEN %.*s FOR EXECUTE %s USING %s;\n",
+							 lhs->len, lhs->s, sqlv, binds);
+		else
+			appendStringInfo(&cx->out, "OPEN %.*s FOR EXECUTE %s;\n",
+							 lhs->len, lhs->s, sqlv);
+	}
+}
+
+/* lhs = fetch_from(cursor) -> declare lhs RECORD; FETCH FROM cursor INTO lhs; */
+static void
+emit_fetch_from(Ctx *cx, Tok *lhs, int a, int ind)
+{
+	int			as[4], ae[4], after, n;
+
+	if (!is_param(cx, lhs->s, lhs->len))
+	{
+		PlxLocal2  *l = local_find(cx, lhs->s, lhs->len);
+
+		if (!l)
+			l = local_add(cx, lhs->s, lhs->len);
+		l->is_record = true;
+	}
+	n = parse_args(cx, a, as, ae, 4, &after);
+	if (n < 1)
+		plx_err(cx, cx->t[a].line, "fetch_from requires a cursor");
+	indent(&cx->out, ind);
+	appendStringInfo(&cx->out, "FETCH FROM %s INTO %.*s;\n",
+					 rw_range(cx, as[0], ae[0], false), lhs->len, lhs->s);
+}
+
 /* perform(SQL) -> DML verbatim, or PERFORM * FROM (SQL) __plx_p_N; */
 static void
 emit_perform(Ctx *cx, int a, int ind)
@@ -1648,6 +1709,32 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			appendStringInfo(o, "%s;\n", name_eq(t0, "commit") ? "COMMIT" : "ROLLBACK");
 			return;
 		}
+		if (name_eq(t0, "close_cursor"))	/* close_cursor(c) -> CLOSE c; */
+		{
+			int			as[4], ae[4], after, n;
+
+			n = parse_args(cx, a, as, ae, 4, &after);
+			if (n < 1)
+				plx_err(cx, t0->line, "close_cursor requires a cursor");
+			indent(o, ind);
+			appendStringInfo(o, "CLOSE %s;\n", rw_range(cx, as[0], ae[0], false));
+			return;
+		}
+		if (name_eq(t0, "move_cursor"))	/* move_cursor(c[, n]) -> MOVE [FORWARD n] FROM c; */
+		{
+			int			as[4], ae[4], after, n;
+
+			n = parse_args(cx, a, as, ae, 4, &after);
+			if (n < 1)
+				plx_err(cx, t0->line, "move_cursor requires a cursor");
+			indent(o, ind);
+			if (n >= 2)
+				appendStringInfo(o, "MOVE FORWARD %s FROM %s;\n",
+								 rw_range(cx, as[1], ae[1], false), rw_range(cx, as[0], ae[0], false));
+			else
+				appendStringInfo(o, "MOVE FROM %s;\n", rw_range(cx, as[0], ae[0], false));
+			return;
+		}
 	}
 
 	/* return */
@@ -1739,6 +1826,21 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			a + 3 < b && cx->t[a + 3].kind == T_LPAREN)
 		{
 			emit_fetch(cx, t0, a + 2, ind, name_eq(&cx->t[a + 2], "fetch_one!"));
+			return;
+		}
+		/* lhs = open_cursor(...) / fetch_from(...) */
+		if (tok_is(op, "=") && a + 2 < b && cx->t[a + 2].kind == T_IDENT &&
+			name_eq(&cx->t[a + 2], "open_cursor") &&
+			a + 3 < b && cx->t[a + 3].kind == T_LPAREN)
+		{
+			emit_open_cursor(cx, t0, a + 2, ind);
+			return;
+		}
+		if (tok_is(op, "=") && a + 2 < b && cx->t[a + 2].kind == T_IDENT &&
+			name_eq(&cx->t[a + 2], "fetch_from") &&
+			a + 3 < b && cx->t[a + 3].kind == T_LPAREN)
+		{
+			emit_fetch_from(cx, t0, a + 2, ind);
 			return;
 		}
 		/* lhs = row_count() -> GET DIAGNOSTICS lhs = ROW_COUNT; */

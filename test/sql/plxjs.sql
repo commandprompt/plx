@@ -123,3 +123,19 @@ for (const v of a) { total = total + v; }
 return total;
 $$;
 SELECT js_sumarr(ARRAY[1,2,3,4]);
+
+-- cursors
+CREATE TABLE js_nums(v int);
+INSERT INTO js_nums SELECT generate_series(1,4);
+CREATE FUNCTION js_cursor_sum() RETURNS int LANGUAGE plxjs AS $$
+let total = 0 /*:: int */;
+let c = open_cursor(`SELECT v FROM js_nums ORDER BY v`);
+let row = fetch_from(c);
+while (found()) {
+  total = total + row.v;
+  row = fetch_from(c);
+}
+close_cursor(c);
+return total;
+$$;
+SELECT js_cursor_sum();

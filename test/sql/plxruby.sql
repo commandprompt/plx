@@ -222,3 +222,19 @@ pi = 3.14159 #:: numeric const
 return pi * r * r
 $$;
 SELECT rb_const(2);
+
+-- cursors: open_cursor / fetch_from / found? / close_cursor
+CREATE TABLE rb_nums(v int);
+INSERT INTO rb_nums SELECT generate_series(1,5);
+CREATE FUNCTION rb_cursor_sum() RETURNS int LANGUAGE plxruby AS $$
+total = 0 #:: int
+c = open_cursor("SELECT v FROM rb_nums ORDER BY v")
+row = fetch_from(c)
+while found?
+  total = total + row.v
+  row = fetch_from(c)
+end
+close_cursor(c)
+return total
+$$;
+SELECT rb_cursor_sum();

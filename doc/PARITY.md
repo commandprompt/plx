@@ -30,7 +30,7 @@ noted.
 | `CALL` procedure | done | `call("proc", args)` |
 | `COMMIT` / `ROLLBACK` | done | `commit()` / `rollback()` |
 | `FOREACH` over array | done | `arr.each` / `foreach($a as $v)` / `for (v of arr)` (v annotated) |
-| cursors: `OPEN`/`FETCH`/`MOVE`/`CLOSE` + cursor `FOR` | todo | |
+| cursors: `OPEN`/`FETCH`/`MOVE`/`CLOSE` | done | `open_cursor(sql)`, `fetch_from(c)`, `move_cursor(c[,n])`, `close_cursor(c)` |
 | declarations: `CONSTANT` | done | annotation suffix `const` (e.g. `x = 5 #:: int const`) |
 | declarations: `%TYPE` / `%ROWTYPE` | done | annotation type text (e.g. `e #:: tbl%ROWTYPE`) |
 | nested block with local `DECLARE` | partial | begin/rescue reuses one flat scope |
