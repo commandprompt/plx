@@ -1,0 +1,52 @@
+-- plx rejection tests: each CREATE FUNCTION must fail at CREATE time with a
+-- precise error and source line number.
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = warning;
+-- plxruby: nested def
+CREATE FUNCTION e_rb_def() RETURNS int LANGUAGE plxruby AS $$
+def helper
+  1
+end
+return helper
+$$;
+ERROR:  plxruby: nested 'def' is not supported
+DETAIL:  at plxruby source line 2
+-- plxruby: case/when
+CREATE FUNCTION e_rb_case(n int) RETURNS text LANGUAGE plxruby AS $$
+case n
+when 1
+  return "one"
+end
+return "other"
+$$;
+ERROR:  plxruby: case/when is not supported (write if/elsif or a CASE expression)
+DETAIL:  at plxruby source line 2
+-- plxruby: unresolvable local type
+CREATE FUNCTION e_rb_type() RETURNS int LANGUAGE plxruby AS $$
+x = some_call()
+return x
+$$;
+ERROR:  plxruby: cannot infer a PostgreSQL type for local variable "x"
+HINT:  add an explicit type annotation for "x"
+-- plxruby: next outside a loop
+CREATE FUNCTION e_rb_next() RETURNS int LANGUAGE plxruby AS $$
+next
+return 1
+$$;
+ERROR:  plxruby: next outside a loop
+DETAIL:  at plxruby source line 2
+-- plxphp: nested function definition
+CREATE FUNCTION e_php_fn() RETURNS int LANGUAGE plxphp AS $$
+function helper() { return 1; }
+return 1;
+$$;
+ERROR:  plxphp: nested function definitions are not supported
+DETAIL:  at plxphp source line 2
+-- plxphp: switch/case
+CREATE FUNCTION e_php_switch(n int) RETURNS text LANGUAGE plxphp AS $$
+switch ($n) { case 1: return "one"; }
+return "other";
+$$;
+ERROR:  plxphp: switch/case is not supported (use if/elseif)
+DETAIL:  at plxphp source line 2

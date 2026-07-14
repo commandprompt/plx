@@ -113,9 +113,12 @@ bench/                      benchmark harness and results
 ## Tests
 
 ```
-python3 test/run_corpus.py            # Ruby corpus (run against an installed plx)
-psql -f test/sql/php_smoke.sql        # PHP smoke test
+make installcheck            # pg_regress suite: plxruby, plxphp, plx_errors
+python3 test/run_corpus.py   # additional 33-case Ruby corpus runner
 ```
+
+`make installcheck` runs against an installed plx on a running server. The
+expected output is in `test/expected/`.
 
 ## License
 

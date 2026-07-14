@@ -1,4 +1,4 @@
--- plxphp smoke test
+-- plxphp regression tests
 CREATE EXTENSION IF NOT EXISTS plx;
 SET client_min_messages = WARNING;
 
