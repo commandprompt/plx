@@ -225,6 +225,21 @@ assert($n > 0, "must be positive");
 - Ternary: `$c ? $a : $b` becomes `CASE WHEN $c THEN $a ELSE $b END`.
 - `null` becomes `NULL`.
 
+## Trigger functions
+
+A function returning `trigger` can be used as a trigger. Assign to `$NEW` fields
+and return `$NEW`:
+
+```sql
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxphp AS $$
+$NEW->tag = "row {$NEW->id}";
+return $NEW;
+$$;
+```
+
+`$NEW`, `$OLD`, and the `TG_` variables are available. Assigning to a record
+field (`$NEW->col = e`) or an array element is supported.
+
 ## Semantic differences
 
 These are intentional. plx pins semantics to SQL and plpgsql.

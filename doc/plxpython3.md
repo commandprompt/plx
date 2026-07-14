@@ -208,6 +208,21 @@ assert n > 0, "must be positive"
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
 - `None` becomes `NULL`.
 
+## Trigger functions
+
+A function returning `trigger` can be used as a trigger. Assign to `NEW` fields
+and return `NEW`:
+
+```sql
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxpython3 AS $$
+NEW.tag = f"row {NEW.id}"
+return NEW
+$$;
+```
+
+`NEW`, `OLD`, and the `TG_` variables are available. Assigning to a record field
+(`NEW.col = e`) or an array element is supported.
+
 ## Semantic differences
 
 These are intentional. plx pins semantics to SQL and plpgsql.

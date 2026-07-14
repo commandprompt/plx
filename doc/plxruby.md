@@ -249,6 +249,21 @@ assert(n > 0, "must be positive")
 - Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
   `::double precision`. `nil` becomes `NULL`.
 
+## Trigger functions
+
+A function returning `trigger` can be used as a trigger. Assign to `NEW` fields
+and return `NEW` (or `OLD`, or `nil`):
+
+```sql
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxruby AS $$
+NEW.tag = "row #{NEW.id}"
+return NEW
+$$;
+```
+
+`NEW`, `OLD`, and the `TG_` variables are available. Assigning to a record field
+(`NEW.col = e`) or an array element (`arr[i] = e`) is supported.
+
 ## Semantic differences
 
 These are intentional. plx pins semantics to SQL and plpgsql.

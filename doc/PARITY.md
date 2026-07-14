@@ -39,6 +39,10 @@ This file is updated as constructs land.
 
 ## Notes
 
+- Trigger functions: a function returning `trigger` runs as a trigger. `NEW`,
+  `OLD`, and the `TG_` variables are available, and assignment to a record field
+  (`NEW.col = e`) or an array element (`arr[i] = e`) is supported. This is the
+  qualified/subscripted lvalue form; a bare `NEW = e` is not.
 - Variable scope: plx locals are function-scoped, which matches the natural
   scoping of the source languages (Ruby method locals, JavaScript `var`, PHP
   function scope). plpgsql's per-block `DECLARE` is not exposed as a separate
