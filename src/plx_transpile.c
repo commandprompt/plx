@@ -993,6 +993,38 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				i++;
 			continue;
 		}
+		/*
+		 * A SQL string-literal prefix (E'...', B'...', X'...', U&'...') passed
+		 * through from a SQL expression: emit the prefix and the literal
+		 * verbatim so we do not re-quote it (e.g. E'x' must not become EE'x').
+		 */
+		if ((c == 'E' || c == 'e' || c == 'B' || c == 'b' || c == 'X' || c == 'x') &&
+			i + 1 < len && s[i + 1] == '\'' &&
+			(i == 0 || !is_ident(s[i - 1])))
+		{
+			int			j = i + 1;
+
+			appendStringInfoChar(&out, c);
+			j++;				/* opening quote */
+			appendStringInfoChar(&out, '\'');
+			while (j < len && s[j] != '\'')
+			{
+				if (s[j] == '\\' && j + 1 < len)
+				{
+					appendStringInfoChar(&out, s[j]);
+					j++;
+				}
+				appendStringInfoChar(&out, s[j]);
+				j++;
+			}
+			if (j < len)
+			{
+				appendStringInfoChar(&out, '\'');
+				j++;
+			}
+			i = j;
+			continue;
+		}
 		if (c == '\'' || c == '"' || c == '`')
 		{
 			/* build a synthetic token to reuse emit_string_value */

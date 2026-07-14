@@ -55,11 +55,12 @@ raise notice: "50% done for #{1 + 1} items"
 $$;
 SELECT f_pct();
 
--- exclusive range yields the exact element set
+-- exclusive range yields the exact element set (built via interpolation, since
+-- + stays numeric)
 CREATE FUNCTION f_excl() RETURNS text LANGUAGE plxruby AS $$
 out = "" #:: text
 for i in 1...4
-  out = out + i.to_s
+  out = "#{out}#{i}"
 end
 return out
 $$;

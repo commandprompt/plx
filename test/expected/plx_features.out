@@ -73,11 +73,11 @@ CREATE FUNCTION f_esc() RETURNS boolean LANGUAGE plxruby AS $$
 return "a\tb\nc" = E'a\tb\nc'
 $$;
 SELECT f_esc();
-ERROR:  type "ee" does not exist
-LINE 1: E'a\tb\nc' = EE'a\tb\nc'
-                     ^
-QUERY:  E'a\tb\nc' = EE'a\tb\nc'
-CONTEXT:  PL/pgSQL function f_esc() line 3 at RETURN
+ f_esc 
+-------
+ t
+(1 row)
+
 -- literal percent in a RAISE message is preserved
 CREATE FUNCTION f_pct() RETURNS void LANGUAGE plxruby AS $$
 raise notice: "50% done for #{1 + 1} items"
@@ -89,21 +89,21 @@ NOTICE:  50% done for 2 items
  
 (1 row)
 
--- exclusive range yields the exact element set
+-- exclusive range yields the exact element set (built via interpolation, since
+-- + stays numeric)
 CREATE FUNCTION f_excl() RETURNS text LANGUAGE plxruby AS $$
 out = "" #:: text
 for i in 1...4
-  out = out + i.to_s
+  out = "#{out}#{i}"
 end
 return out
 $$;
 SELECT f_excl();
-ERROR:  operator does not exist: text + text
-LINE 1: out := out + i::text
-                   ^
-HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
-QUERY:  out := out + i::text
-CONTEXT:  PL/pgSQL function f_excl() line 6 at assignment
+ f_excl 
+--------
+ 123
+(1 row)
+
 -- SQL three-valued equality: == maps to plain = (not null-aware), so a
 -- comparison involving NULL is unknown and the condition is not taken.
 CREATE FUNCTION f_null(a int, b int) RETURNS text LANGUAGE plxruby AS $$
