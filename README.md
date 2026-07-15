@@ -210,6 +210,7 @@ plx.control, plx--1.0.sql   extension control and install SQL
 Makefile                    PGXS build
 src/                        C sources (transpiler, dialect surfaces, PL handler)
 doc/                        per-dialect chapters, architecture, transpiler, parity
+examples/                   runnable recipes (triggers, SRFs, cursors, dynamic SQL)
 test/                       pg_regress suite, corpus runner, fuzzer
 bench/                      benchmark harness and results
 ```
