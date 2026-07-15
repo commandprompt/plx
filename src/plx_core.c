@@ -39,6 +39,7 @@ extern const PlxDialect plx_cobol_dialect;
 extern const PlxDialect plx_plsql_dialect;
 extern const PlxDialect plx_ts_dialect;
 extern const PlxDialect plx_tsql_dialect;
+extern const PlxDialect plx_go_dialect;
 
 /* ---- dialect registry ------------------------------------------------- */
 
@@ -209,4 +210,5 @@ _PG_init(void)
 	plx_register_dialect(&plx_plsql_dialect);
 	plx_register_dialect(&plx_ts_dialect);
 	plx_register_dialect(&plx_tsql_dialect);
+	plx_register_dialect(&plx_go_dialect);
 }

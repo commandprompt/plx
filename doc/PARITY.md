@@ -23,6 +23,13 @@ IMMEDIATE`, `NVL`, `seq.NEXTVAL`, `NUMBER`/`VARCHAR2`, ...) on top. See
 (mapped to SQL types); every construct is the plxjs spelling. See
 [plxts.md](plxts.md).
 
+**plxgo** (Go) is not shown as a separate column because it, too, restructures:
+`var`/`:=` declarations (with type inference) hoist into the `DECLARE` block,
+parenless `if`/`for` headers become `IF ... THEN`/`WHILE ... LOOP`, `for range`
+becomes `FOR`/`FOREACH`, the no-fallthrough `switch` becomes `IF`/`ELSIF`, and
+`panic`/`fmt.Println` become `RAISE`. Every plpgsql construct is reachable
+through Go surface syntax. See [plxgo.md](plxgo.md).
+
 **plxtsql** (Transact-SQL, SQL Server) is not shown as a separate column because
 it restructures rather than renames: `@x` variables hoist to the `DECLARE` block,
 `IF`/`WHILE` bodies written as `BEGIN ... END` become `THEN ... END IF` /

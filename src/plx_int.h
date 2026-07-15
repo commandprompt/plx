@@ -36,7 +36,8 @@ typedef enum
 	PLX_BLK_INDENT,					/* Python: if ...: <indent> */
 	PLX_BLK_COBOL,					/* COBOL: verb-driven, scope terminators (END-IF) */
 	PLX_BLK_PLSQL,					/* Oracle PL/SQL: near-passthrough token rewrite */
-	PLX_BLK_TSQL					/* T-SQL: own tokenizer, restructures to plpgsql */
+	PLX_BLK_TSQL,					/* T-SQL: own tokenizer, restructures to plpgsql */
+	PLX_BLK_GO						/* Go: own tokenizer (with ASI), restructures */
 } PlxBlockStyle;
 
 typedef struct PlxSurface

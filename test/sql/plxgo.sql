@@ -1,0 +1,168 @@
+-- plxgo regression tests (Go dialect)
+CREATE EXTENSION IF NOT EXISTS plx;
+SET client_min_messages = warning;
+
+-- := type inference, C-style for, compound assignment, type conversion
+CREATE FUNCTION g_fact(n int) RETURNS bigint LANGUAGE plxgo AS $$
+	var acc int64 = 1
+	for i := 1; i <= n; i++ {
+		acc *= int64(i)
+	}
+	return acc
+$$;
+SELECT g_fact(0) AS f0, g_fact(5) AS f120, g_fact(10) AS f3628800;
+
+-- if / else if / else, string returns (Go "..." -> SQL '...')
+CREATE FUNCTION g_grade(score int) RETURNS text LANGUAGE plxgo AS $$
+	if score >= 90 {
+		return "A"
+	} else if score >= 80 {
+		return "B"
+	} else {
+		return "F"
+	}
+$$;
+SELECT g_grade(95) AS a, g_grade(85) AS b, g_grade(50) AS f;
+
+-- switch with a tag: case values (incl. comma lists) and default -> IF/ELSIF
+CREATE FUNCTION g_day(n int) RETURNS text LANGUAGE plxgo AS $$
+	switch n {
+	case 0, 6:
+		return "weekend"
+	case 1, 2, 3, 4, 5:
+		return "weekday"
+	default:
+		return "invalid"
+	}
+$$;
+SELECT g_day(0) AS wknd, g_day(3) AS wkdy, g_day(9) AS inv;
+
+-- tagless switch (each case is a boolean condition)
+CREATE FUNCTION g_sign(n int) RETURNS text LANGUAGE plxgo AS $$
+	switch {
+	case n > 0:
+		return "positive"
+	case n < 0:
+		return "negative"
+	default:
+		return "zero"
+	}
+$$;
+SELECT g_sign(5) AS pos, g_sign(-3) AS neg, g_sign(0) AS zero;
+
+-- slice: append, for-range over a slice (value type inferred from the slice), len()
+CREATE FUNCTION g_sumsq(nums int) RETURNS int LANGUAGE plxgo AS $$
+	var s []int
+	for i := 1; i <= nums; i++ {
+		s = append(s, i*i)
+	}
+	total := 0
+	for _, v := range s {
+		total += v
+	}
+	return total * 100 + len(s)
+$$;
+SELECT g_sumsq(3) AS should_be_1403;
+
+-- continue in a counting for must still advance the loop variable (the loop
+-- lowers to a plpgsql integer FOR, not a WHILE with a trailing increment)
+CREATE FUNCTION g_skip(n int) RETURNS int LANGUAGE plxgo AS $$
+	sum := 0
+	for i := 1; i <= n; i++ {
+		if i % 3 == 0 {
+			continue
+		}
+		sum += i
+	}
+	return sum
+$$;
+SELECT g_skip(10) AS should_be_37;
+
+-- a decrement counting loop lowers to FOR ... IN REVERSE
+CREATE FUNCTION g_countdown(n int) RETURNS text LANGUAGE plxgo AS $$
+	var b []int
+	for i := n; i >= 1; i-- {
+		b = append(b, i)
+	}
+	return array_to_string(b, ",")
+$$;
+SELECT g_countdown(4) AS should_be_4_3_2_1;
+
+-- integer range (Go 1.22): for i := range n
+CREATE FUNCTION g_count(n int) RETURNS int LANGUAGE plxgo AS $$
+	total := 0
+	for i := range n {
+		total += i
+	}
+	return total
+$$;
+SELECT g_count(5) AS should_be_10;
+
+-- infinite for with break, and a plain for-condition (while)
+CREATE FUNCTION g_firstpow2(min int) RETURNS int LANGUAGE plxgo AS $$
+	x := 1
+	for {
+		if x >= min {
+			break
+		}
+		x *= 2
+	}
+	return x
+$$;
+SELECT g_firstpow2(100) AS should_be_128;
+
+-- multiple short declaration and swap
+CREATE FUNCTION g_gcd(a int, b int) RETURNS int LANGUAGE plxgo AS $$
+	for b != 0 {
+		a, b = b, a % b
+	}
+	return a
+$$;
+SELECT g_gcd(48, 36) AS should_be_12;
+
+-- panic -> RAISE EXCEPTION, fmt.Println -> RAISE NOTICE
+CREATE FUNCTION g_safe(n int) RETURNS int LANGUAGE plxgo AS $$
+	if n == 0 {
+		panic("cannot be zero")
+	}
+	return 100 / n
+$$;
+SELECT g_safe(4) AS should_be_25;
+SELECT g_safe(0) AS boom;
+
+-- stdlib: strings.ToUpper returned directly (no + concatenation)
+CREATE FUNCTION g_upper(s text) RETURNS text LANGUAGE plxgo AS $$
+	return strings.ToUpper(s)
+$$;
+SELECT g_upper('hello') AS should_be_HELLO;
+
+-- stdlib: math.Sqrt with float64()/int() conversions, len(), numeric result
+CREATE FUNCTION g_lib(s text, n int) RETURNS int LANGUAGE plxgo AS $$
+	root := int(math.Sqrt(float64(n)))
+	return len(strings.ToUpper(s)) + root
+$$;
+SELECT g_lib('hi', 16) AS should_be_6;
+
+-- set-returning via emit(), and a range over query()
+CREATE FUNCTION g_series(n int) RETURNS SETOF int LANGUAGE plxgo AS $$
+	for i := range n {
+		emit(i * i)
+	}
+$$;
+SELECT string_agg(g_series::text, ',') AS squares FROM g_series(4) AS g_series;
+
+CREATE FUNCTION g_rowcount() RETURNS int LANGUAGE plxgo AS $$
+	total := 0
+	for _, r := range query("SELECT g FROM generate_series(1,5) AS g") {
+		total += r.g
+	}
+	return total
+$$;
+SELECT g_rowcount() AS should_be_15;
+
+-- const declaration
+CREATE FUNCTION g_circle(r float8) RETURNS float8 LANGUAGE plxgo AS $$
+	const pi = 3.14159
+	return pi * r * r
+$$;
+SELECT round(g_circle(2.0)::numeric, 5) AS should_be_12_56636;

@@ -28,6 +28,16 @@ version in `plx.control` (currently `1.0`).
   `EXCEPTION` block, and translates the type and function libraries (`INT`,
   `NVARCHAR(MAX)`, `DATETIME`, `ISNULL`, `IIF`, `CONVERT`, `LEN`, `GETDATE`,
   `PRINT`, `RAISERROR`, `THROW`, ...). See [doc/plxtsql.md](doc/plxtsql.md).
+- `plxgo`, a Go dialect. Go's parenless `if`/`for`, `:=` short declarations with
+  type inference, `for ... range`, and no-fallthrough `switch` differ enough from
+  plpgsql that plxgo is a restructuring front end with its own tokenizer
+  (including Go's automatic semicolon insertion) and parser. It hoists
+  `var`/`:=`/`const` declarations, rewrites assignment (including `a, b = x, y`
+  parallel assignment to `SELECT ... INTO`), turns `if`/`for`/`switch` into
+  `IF`/`WHILE`/`FOR`/`FOREACH`/`IF-ELSIF`, maps `panic`/`fmt.Println` to `RAISE`,
+  translates the type and a stdlib library (`strings`, `math`, `strconv`, `len`,
+  `append`, type conversions), and provides `emit`/`execute`/`range query()` SQL
+  intrinsics. See [doc/plxgo.md](doc/plxgo.md).
 - `plxcobol` tables: `OCCURS n` maps a `WORKING-STORAGE` item to a PostgreSQL
   array, with `WS-ARR(i)` subscripts as both lvalues and expressions and
   `PERFORM v OVER ARRAY` iteration.

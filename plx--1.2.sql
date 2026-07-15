@@ -189,3 +189,21 @@ CREATE TRUSTED LANGUAGE plxtsql
 	VALIDATOR plx_tsql_validator;
 
 COMMENT ON LANGUAGE plxtsql IS 'plx Transact-SQL (SQL Server) dialect (transpiles to plpgsql)';
+
+/* Go dialect validator + inline handler live in plx.so */
+CREATE FUNCTION plx_go_validator(oid)
+	RETURNS void
+	AS '$libdir/plx', 'plx_go_validator'
+	LANGUAGE C STRICT;
+
+CREATE FUNCTION plx_go_inline_handler(internal)
+	RETURNS void
+	AS '$libdir/plx', 'plx_go_inline_handler'
+	LANGUAGE C;
+
+CREATE TRUSTED LANGUAGE plxgo
+	HANDLER plx_call_handler
+	INLINE plx_go_inline_handler
+	VALIDATOR plx_go_validator;
+
+COMMENT ON LANGUAGE plxgo IS 'plx Go dialect (transpiles to plpgsql)';

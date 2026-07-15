@@ -185,3 +185,32 @@ CREATE FUNCTION e_tq_execproc() RETURNS int LANGUAGE plxtsql AS $$
   EXEC some_procedure;
   RETURN 1;
 $$;
+
+-- plxgo: a := with a right-hand side whose type cannot be inferred
+CREATE FUNCTION e_go_infer(n int) RETURNS int LANGUAGE plxgo AS $$
+	x := somefunc(n)
+	return x
+$$;
+
+-- plxgo: goto is not supported
+CREATE FUNCTION e_go_goto() RETURNS int LANGUAGE plxgo AS $$
+	goto done
+	return 1
+$$;
+
+-- plxgo: switch fallthrough is not supported
+CREATE FUNCTION e_go_fallthrough(n int) RETURNS int LANGUAGE plxgo AS $$
+	switch n {
+	case 1:
+		fallthrough
+	case 2:
+		return 2
+	}
+	return 0
+$$;
+
+-- plxgo: map/chan/struct types are not supported
+CREATE FUNCTION e_go_maptype() RETURNS int LANGUAGE plxgo AS $$
+	var m map[string]int
+	return 1
+$$;
