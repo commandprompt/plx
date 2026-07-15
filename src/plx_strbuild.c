@@ -179,12 +179,20 @@ plx_sb_append(PG_FUNCTION_ARGS)
  * argument in place, provided that argument is exactly the variable being
  * assigned to. Without this the executor passes the argument read-only and the
  * in-place fast path never fires.
+ *
+ * SupportRequestModifyInPlace was introduced in PostgreSQL 18. On earlier
+ * versions this support function does nothing (returns NULL), so plx_sb_append
+ * still produces correct results but without the amortized-O(1) fast path: on
+ * PostgreSQL 13 to 17, only the built-in array functions can take a read-write
+ * expanded argument, and a third-party function cannot opt in.
  */
 Datum
 plx_sb_append_support(PG_FUNCTION_ARGS)
 {
-	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
 	Node	   *ret = NULL;
+
+#if PG_VERSION_NUM >= 180000
+	Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
 
 	if (IsA(rawreq, SupportRequestModifyInPlace))
 	{
@@ -196,5 +204,6 @@ plx_sb_append_support(PG_FUNCTION_ARGS)
 			arg->paramid == req->paramid)
 			ret = (Node *) arg;
 	}
+#endif
 	PG_RETURN_POINTER(ret);
 }
