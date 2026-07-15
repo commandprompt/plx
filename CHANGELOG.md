@@ -16,6 +16,10 @@ version in `plx.control` (currently `1.0`).
   `RAISE_APPLICATION_ERROR`, `EXECUTE IMMEDIATE`, `FROM DUAL`, `NVL`,
   `seq.NEXTVAL`, `SYSDATE`, and `CURSOR c IS`. Function signatures use PostgreSQL
   types; the body is PL/SQL. See [doc/plxplsql.md](doc/plxplsql.md).
+- `plxts`, a TypeScript dialect: the plxjs dialect plus `let x: T` type
+  annotations, which map TypeScript types (`number`, `string`, `boolean`,
+  `bigint`, `T[]`, `T | null`) to SQL types and otherwise accept a SQL type name
+  verbatim. See [doc/plxts.md](doc/plxts.md).
 - `doc/DEBUGGING.md`: correlating runtime errors to your dialect source, and a
   `plx_source()` helper that recovers the embedded original body.
 

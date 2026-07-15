@@ -54,6 +54,7 @@ typedef struct PlxSurface
 	bool		interp_dollarbrace;	/* "...${expr}..." interpolation (JS template) */
 	bool		fstrings;			/* Python f"...{expr}..." interpolation */
 	char		concat_op;			/* string concat operator char ('.' PHP), 0=none */
+	bool		ts_types;			/* TypeScript: rewrite "id: T" annotations */
 	const PlxKwSpell *kws;
 	int			nkws;
 	const PlxExcMap *excs;

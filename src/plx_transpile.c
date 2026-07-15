@@ -6796,6 +6796,362 @@ plsql_transpile(Ctx *cx)
 		appendBinaryStringInfo(out, pl.t[pl.nt - 1].pre, pl.t[pl.nt - 1].prelen);
 }
 
+/* ======================================================================== */
+/* TypeScript preprocessing (plxts).                                        */
+/*                                                                          */
+/* plxts is the plxjs (brace) dialect plus TypeScript type annotations. A   */
+/* declaration "let x: T = e" is rewritten to the JS leading-colon-colon     */
+/* block-comment annotation the shared parser already understands, with T    */
+/* mapped from a TypeScript type to a SQL type. Only declaration annotations */
+/* are touched (after let/const/var), so ternary and label colons are left   */
+/* alone. The original TypeScript is what gets embedded for debugging.       */
+/* ======================================================================== */
+
+/* map a TypeScript type to a SQL type (palloc'd result) */
+static char *
+ts_map_type(const char *s, int len)
+{
+	StringInfoData r;
+	bool		arr = false;
+
+	while (len > 0 && (*s == ' ' || *s == '\t'))
+	{
+		s++;
+		len--;
+	}
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t'))
+		len--;
+
+	/* union: "T | null" / "T | undefined" -> first non-null member */
+	{
+		int			depth = 0,
+					i;
+
+		for (i = 0; i < len; i++)
+		{
+			char		c = s[i];
+
+			if (c == '<' || c == '(' || c == '[' || c == '{')
+				depth++;
+			else if (c == '>' || c == ')' || c == ']' || c == '}')
+				depth--;
+			else if (depth == 0 && c == '|')
+			{
+				int			la = i + 1,
+							lb = len;
+				const char *rest = s + la;
+				int			restlen = lb - la;
+
+				/* left member */
+				if (!((i == 4 && pg_strncasecmp(s, "null", 4) == 0) ||
+					  (i == 9 && pg_strncasecmp(s, "undefined", 9) == 0)))
+					return ts_map_type(s, i);
+				return ts_map_type(rest, restlen);
+			}
+		}
+	}
+
+	/* trailing [] -> array */
+	if (len >= 2 && s[len - 2] == '[' && s[len - 1] == ']')
+	{
+		arr = true;
+		len -= 2;
+		while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t'))
+			len--;
+	}
+
+	initStringInfo(&r);
+	if (len == 6 && pg_strncasecmp(s, "number", 6) == 0)
+		appendStringInfoString(&r, "numeric");
+	else if (len == 6 && pg_strncasecmp(s, "string", 6) == 0)
+		appendStringInfoString(&r, "text");
+	else if (len == 7 && pg_strncasecmp(s, "boolean", 7) == 0)
+		appendStringInfoString(&r, "boolean");
+	else if (len == 6 && pg_strncasecmp(s, "bigint", 6) == 0)
+		appendStringInfoString(&r, "bigint");
+	else
+		appendBinaryStringInfo(&r, s, len);	/* pass through a SQL type verbatim */
+	if (arr)
+		appendStringInfoString(&r, "[]");
+	return r.data;
+}
+
+/* copy a quoted string / template literal starting at *pp verbatim into out */
+static void
+ts_copy_string(const char **pp, const char *end, StringInfo out)
+{
+	const char *p = *pp;
+	char		q = *p;
+
+	appendStringInfoChar(out, *p);
+	p++;
+	if (q == '`')
+	{
+		int			brace = 0;
+
+		while (p < end)
+		{
+			if (*p == '\\' && p + 1 < end)
+			{
+				appendBinaryStringInfo(out, p, 2);
+				p += 2;
+				continue;
+			}
+			if (brace == 0 && *p == '`')
+			{
+				appendStringInfoChar(out, *p);
+				p++;
+				break;
+			}
+			if (*p == '$' && p + 1 < end && p[1] == '{')
+			{
+				appendBinaryStringInfo(out, p, 2);
+				p += 2;
+				brace++;
+				continue;
+			}
+			if (brace > 0 && *p == '}')
+				brace--;
+			appendStringInfoChar(out, *p);
+			p++;
+		}
+	}
+	else
+	{
+		while (p < end)
+		{
+			if (*p == '\\' && p + 1 < end)
+			{
+				appendBinaryStringInfo(out, p, 2);
+				p += 2;
+				continue;
+			}
+			appendStringInfoChar(out, *p);
+			if (*p == q)
+			{
+				p++;
+				break;
+			}
+			p++;
+		}
+	}
+	*pp = p;
+}
+
+/* advance *pp past a string / template literal (no output) */
+static void
+ts_skip_string(const char **pp, const char *end)
+{
+	const char *p = *pp;
+	char		q = *p++;
+	int			brace = 0;
+
+	while (p < end)
+	{
+		if (*p == '\\' && p + 1 < end)
+		{
+			p += 2;
+			continue;
+		}
+		if (q == '`' && *p == '$' && p + 1 < end && p[1] == '{')
+		{
+			p += 2;
+			brace++;
+			continue;
+		}
+		if (q == '`' && brace > 0 && *p == '}')
+		{
+			brace--;
+			p++;
+			continue;
+		}
+		if (brace == 0 && *p == q)
+		{
+			p++;
+			break;
+		}
+		p++;
+	}
+	*pp = p;
+}
+
+static char *
+ts_preprocess(const char *src)
+{
+	const char *p = src,
+			   *end = src + strlen(src);
+	StringInfoData out;
+	int			pdepth = 0;			/* parenthesis nesting */
+	int			for_depth = -1;		/* paren depth of an open for(...) header */
+	bool		last_for = false;	/* previous significant word was "for" */
+
+	initStringInfo(&out);
+	while (p < end)
+	{
+		if (*p == '\'' || *p == '"' || *p == '`')
+		{
+			last_for = false;
+			ts_copy_string(&p, end, &out);
+			continue;
+		}
+		if (p[0] == '/' && p + 1 < end && p[1] == '/')
+		{
+			while (p < end && *p != '\n')
+				appendStringInfoChar(&out, *p++);
+			continue;
+		}
+		if (p[0] == '/' && p + 1 < end && p[1] == '*')
+		{
+			appendBinaryStringInfo(&out, p, 2);
+			p += 2;
+			while (p < end && !(p[0] == '*' && p + 1 < end && p[1] == '/'))
+				appendStringInfoChar(&out, *p++);
+			if (p < end)
+			{
+				appendBinaryStringInfo(&out, p, 2);
+				p += 2;
+			}
+			continue;
+		}
+		if (*p == '(')
+		{
+			pdepth++;
+			if (last_for)
+				for_depth = pdepth;
+			last_for = false;
+			appendStringInfoChar(&out, *p++);
+			continue;
+		}
+		if (*p == ')')
+		{
+			if (pdepth == for_depth)
+				for_depth = -1;
+			if (pdepth > 0)
+				pdepth--;
+			last_for = false;
+			appendStringInfoChar(&out, *p++);
+			continue;
+		}
+		if (is_ident_start(*p))
+		{
+			const char *ws = p;			/* word start */
+
+			while (p < end && is_ident(*p))
+				p++;
+			appendBinaryStringInfo(&out, ws, (int) (p - ws));
+
+			/* let / const / var  IDENT  : TYPE  ->  a JS block-comment annotation
+			 * (dropped inside a for(...) header, where the counter is integer) */
+			if ((p - ws == 3 && (strncmp(ws, "let", 3) == 0 || strncmp(ws, "var", 3) == 0)) ||
+				(p - ws == 5 && strncmp(ws, "const", 5) == 0))
+			{
+				const char *q = p;
+				const char *ide;
+
+				while (q < end && (*q == ' ' || *q == '\t'))
+					q++;
+				if (q < end && is_ident_start(*q))
+				{
+					const char *r;
+
+					while (q < end && is_ident(*q))
+						q++;
+					ide = q;
+					r = q;
+					while (r < end && (*r == ' ' || *r == '\t'))
+						r++;
+					if (r < end && *r == ':')
+					{
+						const char *ts,
+								   *te;
+						char	   *mapped;
+						int			depth = 0;
+
+						appendBinaryStringInfo(&out, p, (int) (ide - p));	/* "let x" */
+						r++;			/* skip ':' */
+						while (r < end && (*r == ' ' || *r == '\t'))
+							r++;
+						ts = r;
+						while (r < end)	/* read the type up to = ; , ) or newline */
+						{
+							char		c = *r;
+
+							if (c == '<' || c == '(' || c == '[' || c == '{')
+								depth++;
+							else if (c == '>' || c == ')' || c == ']' || c == '}')
+								depth--;
+							else if (depth <= 0 && (c == '=' || c == ';' || c == ',' ||
+													c == ')' || c == '\n'))
+								break;
+							r++;
+						}
+						te = r;
+						mapped = ts_map_type(ts, (int) (te - ts));
+
+						if (te < end && *te == '=')
+						{
+							/* has a value: emit "= value", then the annotation, so
+							 * plxjs sees the annotation trailing the value */
+							const char *v = te;
+							int			vd = 0;
+
+							while (v < end)
+							{
+								char		c = *v;
+
+								if (c == '\'' || c == '"' || c == '`')
+								{
+									ts_skip_string(&v, end);
+									continue;
+								}
+								if (c == '/' && v + 1 < end && v[1] == '/')
+								{
+									while (v < end && *v != '\n')
+										v++;
+									continue;
+								}
+								if (c == '(' || c == '[' || c == '{')
+									vd++;
+								else if (c == ')' || c == ']' || c == '}')
+								{
+									if (vd == 0)
+										break;
+									vd--;
+								}
+								else if (vd == 0 && (c == ';' || c == ','))
+									break;
+								v++;
+							}
+							appendBinaryStringInfo(&out, te, (int) (v - te));
+							if (for_depth < 0)
+								appendStringInfo(&out, " /*:: %s */", mapped);
+							p = v;
+						}
+						else
+						{
+							/* no value: annotate the declaration directly */
+							if (for_depth < 0)
+								appendStringInfo(&out, " /*:: %s */", mapped);
+							else
+								appendStringInfoChar(&out, ' ');
+							p = te;
+						}
+						last_for = false;
+						continue;
+					}
+				}
+			}
+			last_for = (p - ws == 3 && strncmp(ws, "for", 3) == 0);
+			continue;
+		}
+		if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+			last_for = false;
+		appendStringInfoChar(&out, *p);
+		p++;
+	}
+	return out.data;
+}
+
 /* ---------------------------------------------------------------- assemble */
 
 /* Self-contained base64 encoder (the server pg_b64_encode signature differs
@@ -6894,6 +7250,11 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 		appendStringInfo(&asm_, "/*plx-orig:b64$%s$plx-orig*/\n", b64_encode_body(body));
 		return asm_.data;
 	}
+
+	/* TypeScript: rewrite "id: T" annotations before lexing (the original TS is
+	 * still embedded via the unchanged `body`). */
+	if (surf->ts_types)
+		cx.body = ts_preprocess(body);
 
 	lex(&cx);
 

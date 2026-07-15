@@ -19,6 +19,10 @@ the Oracle spellings (`DBMS_OUTPUT.PUT_LINE`, `RAISE_APPLICATION_ERROR`, `EXECUT
 IMMEDIATE`, `NVL`, `seq.NEXTVAL`, `NUMBER`/`VARCHAR2`, ...) on top. See
 [plxplsql.md](plxplsql.md).
 
+**plxts** (TypeScript) is the plxjs column plus `let x: T` type annotations
+(mapped to SQL types); every construct is the plxjs spelling. See
+[plxts.md](plxts.md).
+
 ## Control flow
 
 | plpgsql | plxruby | plxphp | plxjs | plxpython3 | plxcobol |

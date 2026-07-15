@@ -12,7 +12,7 @@ import os, random, subprocess, sys
 
 PSQL = "/usr/local/pgsql/bin/psql"
 ENV = dict(os.environ, PGHOST=os.environ.get("PGHOST", "/tmp"), PGUSER="postgres")
-DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql"]
+DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql", "plxts"]
 random.seed(20260714)
 
 SEEDS = {
@@ -73,6 +73,15 @@ SEEDS = {
   "  c bigint;\nBEGIN\n  EXECUTE IMMEDIATE 'SELECT 1' INTO c;\n  RETURN c;\nEND;",
   "  CURSOR c IS SELECT 1;\n  v int;\nBEGIN\n  OPEN c; FETCH c INTO v; CLOSE c;\n  RETURN v;\nEND;",
   "BEGIN\n  RETURN NVL(NULL, SYSDATE);\nEND;",
+ ],
+ "plxts": [
+  "let x: number = 1; return x + 2;",
+  "let total: bigint = 0;\nfor (let i: number = 1; i <= 10; i++) { total = total + i; }\nreturn total;",
+  'let r: string = "F";\nif (1 > 0) { r = "A"; }\nreturn r;',
+  "let m: number | null;\nm = 5;\nreturn m;",
+  "let a: numeric(10,2) = 1.5;\nreturn a;",
+  "let v: number[] = null;\nreturn 1;",
+  "let s: boolean = true;\nreturn s;",
  ],
 }
 SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b")",
@@ -149,6 +158,13 @@ def pathological():
      ("plxplsql", "  v VARCHAR2(" + "9" * 100000 + ");\nBEGIN NULL; END;"),
      ("plxplsql", "BEGIN\n  v := 'unterminated"),
      ("plxplsql", "/*" + "a" * 200000),
+     # plxts
+     ("plxts", "let x: " + "number | " * 5000 + "null = 0; return x;"),
+     ("plxts", "let x: numeric(" + "(" * 8000),
+     ("plxts", "let x: number = " + "(" * 8000),
+     ("plxts", "for (let i: number = 1; " * 3000),
+     ("plxts", "let s: string = `" + "a" * 200000),
+     ("plxts", "let x: number[" + "[" * 5000),
     ]
 
 def quote(body):
