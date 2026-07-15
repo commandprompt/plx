@@ -120,6 +120,13 @@ CREATE FUNCTION g_gcd(a int, b int) RETURNS int LANGUAGE plxgo AS $$
 $$;
 SELECT g_gcd(48, 36) AS should_be_12;
 
+-- multiple-target short declaration (exercises the RHS pair table)
+CREATE FUNCTION g_multi4() RETURNS int LANGUAGE plxgo AS $$
+	a, b, c, d := 1, 2, 3, 4
+	return a*1000 + b*100 + c*10 + d
+$$;
+SELECT g_multi4() AS should_be_1234;
+
 -- panic -> RAISE EXCEPTION, fmt.Println -> RAISE NOTICE
 CREATE FUNCTION g_safe(n int) RETURNS int LANGUAGE plxgo AS $$
 	if n == 0 {
@@ -129,6 +136,26 @@ CREATE FUNCTION g_safe(n int) RETURNS int LANGUAGE plxgo AS $$
 $$;
 SELECT g_safe(4) AS should_be_25;
 SELECT g_safe(0) AS boom;
+
+-- Go slices are 0-based; subscripts are rewritten to PostgreSQL's 1-based arrays
+CREATE FUNCTION g_index(k int) RETURNS int LANGUAGE plxgo AS $$
+	a := []int{10, 20, 30, 40}
+	sum := a[0] + a[3]
+	for i := range k {
+		sum += a[i]
+	}
+	return sum
+$$;
+SELECT g_index(2) AS should_be_80;
+
+-- fmt.Println / fmt.Printf: one % placeholder per value argument (empty is ok)
+CREATE FUNCTION g_print() RETURNS int LANGUAGE plxgo AS $$
+	fmt.Println("a", 1, true)
+	fmt.Printf("%d-%d", 2, 3)
+	fmt.Println()
+	return 0
+$$;
+SELECT g_print() AS zero;
 
 -- stdlib: strings.ToUpper returned directly (no + concatenation)
 CREATE FUNCTION g_upper(s text) RETURNS text LANGUAGE plxgo AS $$

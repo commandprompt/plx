@@ -160,6 +160,17 @@ SELECT g_gcd(48, 36) AS should_be_12;
            12
 (1 row)
 
+-- multiple-target short declaration (exercises the RHS pair table)
+CREATE FUNCTION g_multi4() RETURNS int LANGUAGE plxgo AS $$
+	a, b, c, d := 1, 2, 3, 4
+	return a*1000 + b*100 + c*10 + d
+$$;
+SELECT g_multi4() AS should_be_1234;
+ should_be_1234 
+----------------
+           1234
+(1 row)
+
 -- panic -> RAISE EXCEPTION, fmt.Println -> RAISE NOTICE
 CREATE FUNCTION g_safe(n int) RETURNS int LANGUAGE plxgo AS $$
 	if n == 0 {
@@ -176,6 +187,35 @@ SELECT g_safe(4) AS should_be_25;
 SELECT g_safe(0) AS boom;
 ERROR:  cannot be zero
 CONTEXT:  PL/pgSQL function g_safe(integer) line 4 at RAISE
+-- Go slices are 0-based; subscripts are rewritten to PostgreSQL's 1-based arrays
+CREATE FUNCTION g_index(k int) RETURNS int LANGUAGE plxgo AS $$
+	a := []int{10, 20, 30, 40}
+	sum := a[0] + a[3]
+	for i := range k {
+		sum += a[i]
+	}
+	return sum
+$$;
+ERROR:  plxgo: cannot infer a PostgreSQL type for "sum"; declare it with an explicit type (var sum T)
+DETAIL:  at plxgo source line 3
+SELECT g_index(2) AS should_be_80;
+ERROR:  function g_index(integer) does not exist
+LINE 1: SELECT g_index(2) AS should_be_80;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+-- fmt.Println / fmt.Printf: one % placeholder per value argument (empty is ok)
+CREATE FUNCTION g_print() RETURNS int LANGUAGE plxgo AS $$
+	fmt.Println("a", 1, true)
+	fmt.Printf("%d-%d", 2, 3)
+	fmt.Println()
+	return 0
+$$;
+SELECT g_print() AS zero;
+ zero 
+------
+    0
+(1 row)
+
 -- stdlib: strings.ToUpper returned directly (no + concatenation)
 CREATE FUNCTION g_upper(s text) RETURNS text LANGUAGE plxgo AS $$
 	return strings.ToUpper(s)

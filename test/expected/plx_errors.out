@@ -246,3 +246,17 @@ CREATE FUNCTION e_go_maptype() RETURNS int LANGUAGE plxgo AS $$
 $$;
 ERROR:  plxgo: map, chan, func, interface, and struct types are not supported
 DETAIL:  at plxgo source line 2
+-- plxgo: a stray closing bracket at statement position (must error, not hang)
+CREATE FUNCTION e_go_stray() RETURNS int LANGUAGE plxgo AS $$
+	x))
+	return 1
+$$;
+ERROR:  plxgo: unexpected token
+DETAIL:  at plxgo source line 2
+-- plxtsql: a dangling ELSE (must error, not hang)
+CREATE FUNCTION e_tq_else() RETURNS int LANGUAGE plxtsql AS $$
+	IF 1 = 1 PRINT 'a' ELSE PRINT 'b' ELSE PRINT 'c';
+	RETURN 1;
+$$;
+ERROR:  plxtsql: unexpected keyword in statement position
+DETAIL:  at plxtsql source line 2

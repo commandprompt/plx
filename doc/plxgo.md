@@ -122,9 +122,23 @@ $$;
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `cardinality(x)` (a slice) |
 | `append(s, x)` | `array_append(s, x)` |
+| `a[i]` (subscript) | `a[(i) + 1]` (see below) |
+| `[]int{1, 2, 3}` (again) | `ARRAY[1, 2, 3]` |
 | `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` / `::bigint` / `::double precision` / `::text` |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
+
+### Slices and indexing
+
+A slice literal `[]T{...}` becomes a PostgreSQL `ARRAY[...]`. Go slices are
+0-based while PostgreSQL arrays are 1-based, so a subscript `a[i]` is rewritten
+to `a[(i) + 1]`. Indexing therefore follows Go semantics: `a[0]` is the first
+element, and `len(a)`, `for i := range a`, and `a[i]` all agree on 0-based
+positions. Go slice expressions (`a[i:j]`) are not translated.
+
+`fmt.Println`/`fmt.Printf` raise a `NOTICE` with one `%` placeholder per value
+argument (space-separated); a `Printf`/`Sprintf` format string's literal text and
+directives are not reproduced, since SQL `RAISE` has no printf verbs.
 
 ### Types (in declarations)
 

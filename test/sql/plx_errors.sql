@@ -214,3 +214,15 @@ CREATE FUNCTION e_go_maptype() RETURNS int LANGUAGE plxgo AS $$
 	var m map[string]int
 	return 1
 $$;
+
+-- plxgo: a stray closing bracket at statement position (must error, not hang)
+CREATE FUNCTION e_go_stray() RETURNS int LANGUAGE plxgo AS $$
+	x))
+	return 1
+$$;
+
+-- plxtsql: a dangling ELSE (must error, not hang)
+CREATE FUNCTION e_tq_else() RETURNS int LANGUAGE plxtsql AS $$
+	IF 1 = 1 PRINT 'a' ELSE PRINT 'b' ELSE PRINT 'c';
+	RETURN 1;
+$$;

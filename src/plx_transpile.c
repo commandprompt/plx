@@ -8223,6 +8223,8 @@ tq_set(Tq *tq, int ind)
 	tq->pos++;
 	e0 = tq->pos;
 	e1 = tq_value_end(tq, e0);
+	if (e1 <= e0)
+		tq_err(tq, "SET is missing a value expression");
 	indent(&tq->cx->out, ind);
 	if (arith)
 	{
@@ -8427,9 +8429,14 @@ tq_print(Tq *tq, int ind)
 	e0 = tq->pos;
 	e1 = tq_value_end(tq, e0);
 	indent(&tq->cx->out, ind);
-	appendStringInfoString(&tq->cx->out, "RAISE NOTICE '%',");
-	tq_emit_range(tq, e0, e1, &tq->cx->out);
-	appendStringInfoString(&tq->cx->out, ";\n");
+	if (e1 > e0)
+	{
+		appendStringInfoString(&tq->cx->out, "RAISE NOTICE '%',");
+		tq_emit_range(tq, e0, e1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ";\n");
+	}
+	else
+		appendStringInfoString(&tq->cx->out, "RAISE NOTICE '';\n");
 	tq->pos = e1;
 	tq_eat_semi(tq);
 }
@@ -8462,6 +8469,11 @@ static void
 tq_raise_msg(Tq *tq, int msg0, int msg1, int ind)
 {
 	indent(&tq->cx->out, ind);
+	if (msg1 <= msg0)
+	{
+		appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION 'error';\n");
+		return;
+	}
 	appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION '%',");
 	tq_emit_range(tq, msg0, msg1, &tq->cx->out);
 	appendStringInfoString(&tq->cx->out, ";\n");
@@ -8605,12 +8617,10 @@ tq_raw(Tq *tq, int ind)
 	int			e0 = tq->pos,
 				e1 = tq_value_end(tq, e0);
 
+	/* an empty range means a stray terminator keyword (e.g. a dangling ELSE)
+	 * reached statement position; error rather than spin without advancing */
 	if (e1 == e0)
-	{
-		tq->pos = e1;
-		tq_eat_semi(tq);
-		return;
-	}
+		tq_err(tq, "unexpected keyword in statement position");
 	indent(&tq->cx->out, ind);
 	tq_emit_range(tq, e0, e1, &tq->cx->out);
 	appendStringInfoString(&tq->cx->out, ";\n");
@@ -9493,6 +9503,27 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 		}
 		if (tk->kind == GO_LBRACK)
 		{
+			/*
+			 * A subscript a[e] on a value: Go slices are 0-based but PostgreSQL
+			 * arrays are 1-based, so emit a[(e) + 1]. (An empty [] is a slice
+			 * literal, handled above; a [ opening at the very start of a range
+			 * is not a subscript.)
+			 */
+			if (i > a && i + 1 < b && g->t[i + 1].kind != GO_RBRACK &&
+				(g->t[i - 1].kind == GO_WORD || g->t[i - 1].kind == GO_RP ||
+				 g->t[i - 1].kind == GO_RBRACK))
+			{
+				int			close = go_match(g, i, b);
+
+				if (close > 0)
+				{
+					appendStringInfoString(out, "[(");
+					go_emit_range(g, i + 1, close, out);
+					appendStringInfoString(out, ") + 1]");
+					i = close + 1;
+					continue;
+				}
+			}
 			appendStringInfoChar(out, '[');
 			i++;
 			continue;
@@ -9725,6 +9756,11 @@ go_simple(Go *g, int ind, int stop)
 	char		opc = 0;
 	bool		shortdecl = false;
 
+	/* an empty statement range means a stray closer/terminator (e.g. ')' or ']')
+	 * reached statement position; error rather than spin without advancing */
+	if (e1 <= e0)
+		go_err(g, "unexpected token");
+
 	/* find the top-level assignment operator, if any (each is a single token) */
 	for (i = e0; i < e1; i++)
 	{
@@ -9784,42 +9820,72 @@ go_simple(Go *g, int ind, int stop)
 			int			lp = e0 + 1,
 						close = (g->t[lp].kind == GO_LP) ? go_match(g, lp, e1) : -1;
 
-			appendStringInfoString(&g->cx->out, "RAISE EXCEPTION '%',");
-			if (close > 0)
+			if (close > lp + 1)
+			{
+				appendStringInfoString(&g->cx->out, "RAISE EXCEPTION '%',");
 				go_emit_range(g, lp + 1, close, &g->cx->out);
-			appendStringInfoString(&g->cx->out, ";\n");
+				appendStringInfoString(&g->cx->out, ";\n");
+			}
+			else
+				appendStringInfoString(&g->cx->out, "RAISE EXCEPTION 'panic';\n");
 		}
 		else if (go_ci(h, "fmt") && g->t[e0 + 1].kind == GO_DOT)
 		{
 			GoTok	   *m = &g->t[e0 + 2];
 			int			lp = e0 + 3,
-						close = (g->t[lp].kind == GO_LP) ? go_match(g, lp, e1) : -1;
+						close = (lp < g->nt && g->t[lp].kind == GO_LP)
+			? go_match(g, lp, e1) : -1;
+			int			args0 = lp + 1;
 
-			appendStringInfoString(&g->cx->out, "RAISE NOTICE '%',");
-			if (close > 0)
+			/* Printf/Sprintf: the first argument is the format string; the rest
+			 * are the values to raise (SQL RAISE has no printf verbs, so the
+			 * format's literal text and directives are dropped) */
+			if (close > lp + 1 && (go_ci(m, "Printf") || go_ci(m, "Sprintf")))
 			{
-				if (go_ci(m, "Printf") || go_ci(m, "Sprintf"))
-				{
-					/* first arg is the format string; emit the arguments */
-					int			d = 0,
-								comma = -1,
-								j;
+				int			d = 0,
+							comma = -1,
+							j;
 
-					for (j = lp + 1; j < close; j++)
-					{
-						if (g->t[j].kind == GO_LP)
-							d++;
-						else if (g->t[j].kind == GO_RP)
-							d--;
-						else if (g->t[j].kind == GO_COMMA && d == 0 && comma < 0)
-							comma = j;
-					}
-					go_emit_range(g, comma > 0 ? comma + 1 : lp + 1, close, &g->cx->out);
+				for (j = lp + 1; j < close; j++)
+				{
+					if (g->t[j].kind == GO_LP)
+						d++;
+					else if (g->t[j].kind == GO_RP)
+						d--;
+					else if (g->t[j].kind == GO_COMMA && d == 0 && comma < 0)
+						comma = j;
 				}
-				else
-					go_emit_range(g, lp + 1, close, &g->cx->out);
+				if (comma > 0)
+					args0 = comma + 1;
 			}
-			appendStringInfoString(&g->cx->out, ";\n");
+			if (close > args0)
+			{
+				/* one % placeholder per top-level argument */
+				int			d = 0,
+							nargs = 1,
+							j,
+							k;
+
+				for (j = args0; j < close; j++)
+				{
+					GoKind		kk = g->t[j].kind;
+
+					if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+						d++;
+					else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+						d--;
+					else if (kk == GO_COMMA && d == 0)
+						nargs++;
+				}
+				appendStringInfoString(&g->cx->out, "RAISE NOTICE '");
+				for (k = 0; k < nargs; k++)
+					appendStringInfoString(&g->cx->out, k ? " %" : "%");
+				appendStringInfoString(&g->cx->out, "',");
+				go_emit_range(g, args0, close, &g->cx->out);
+				appendStringInfoString(&g->cx->out, ";\n");
+			}
+			else
+				appendStringInfoString(&g->cx->out, "RAISE NOTICE '';\n");
 		}
 		else if (go_ci(h, "emit"))
 		{
@@ -9887,9 +9953,10 @@ go_simple(Go *g, int ind, int stop)
 			g->pos = e1;
 			return;
 		}
-		/* multiple targets a, b := x, y : split RHS on top-level commas */
+		/* multiple targets a, b := x, y : split RHS on top-level commas.
+		 * rhs holds (start,end) pairs, so it needs 2 ints per target. */
 		{
-			int			rhs[32],
+			int			rhs[64],
 						nrhs = 0,
 						start = opidx + 1;
 
@@ -9989,6 +10056,11 @@ go_if(Go *g, int ind)
 				i,
 				depth = 0;
 
+	/* guard the else-if chain, which recurses into go_if directly (bypassing
+	 * go_stmt's depth counter) */
+	if (++g->cx->depth > PLX_MAX_DEPTH)
+		go_err(g, "if/else nested too deeply");
+
 	g->pos++;								/* if */
 	hb = go_header_end(g, g->pos);
 	/* an optional init statement precedes a top-level ; in the header */
@@ -10035,6 +10107,7 @@ go_if(Go *g, int ind)
 	}
 	indent(&g->cx->out, ind);
 	appendStringInfoString(&g->cx->out, "END IF;\n");
+	g->cx->depth--;
 }
 
 /* for { } | for cond { } | for init; cond; post { } | for k,v := range e { } */
@@ -10283,6 +10356,8 @@ go_for(Go *g, int ind)
 			}
 			if (step0 >= 0)
 			{
+				if (step1 <= step0)
+					go_err(g, "for loop step (+=/-=) is missing its amount");
 				appendStringInfoString(&g->cx->out, " BY");
 				go_emit_range(g, step0, step1, &g->cx->out);
 			}
