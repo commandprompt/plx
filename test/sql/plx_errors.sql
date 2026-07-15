@@ -226,3 +226,36 @@ CREATE FUNCTION e_tq_else() RETURNS int LANGUAGE plxtsql AS $$
 	IF 1 = 1 PRINT 'a' ELSE PRINT 'b' ELSE PRINT 'c';
 	RETURN 1;
 $$;
+
+-- shared: too many intrinsic arguments (must error, not read past the arg array)
+CREATE FUNCTION e_js_manyargs() RETURNS int LANGUAGE plxjs AS $$
+	execute(`insert`, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17);
+	return 1;
+$$;
+
+-- plxcobol: USAGE with no value (truncated; must error, not read past EOF)
+CREATE FUNCTION e_cob_usage() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-X USAGE
+$$;
+
+-- plxjs: a switch with only a default (plpgsql CASE needs at least one WHEN)
+CREATE FUNCTION e_js_defonly(n int) RETURNS int LANGUAGE plxjs AS $$
+	switch (n) { default: return 1; }
+$$;
+
+-- plxjs: a case after default (plpgsql requires ELSE last)
+CREATE FUNCTION e_js_deffirst(n int) RETURNS int LANGUAGE plxjs AS $$
+	switch (n) { default: return 0; case 1: return 1; }
+$$;
+
+-- plxphp: the ?: elvis operator (empty THEN branch) is not supported
+CREATE FUNCTION e_php_elvis(n int) RETURNS int LANGUAGE plxphp AS $$
+	return $n ?: 5;
+$$;
+
+-- plxgo: a const with no value
+CREATE FUNCTION e_go_constval() RETURNS int LANGUAGE plxgo AS $$
+	const x int
+	return 1
+$$;

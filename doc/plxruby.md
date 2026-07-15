@@ -315,6 +315,9 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Hash and array literals as general values.
 - `||=`, `&&=`, and `and`/`or` in value position.
 - `redo`, `retry`.
+- Predicate/bang methods (`x.zero?`, `arr.empty?`, `s.strip!`): the trailing
+  `?`/`!` is not a SQL operator. Use the SQL form (`x = 0`,
+  `cardinality(arr) = 0`).
 - Per-block local `DECLARE` (locals are function-scoped by design).
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and

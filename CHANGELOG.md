@@ -44,6 +44,28 @@ version in `plx.control` (currently `1.0`).
 - `doc/DEBUGGING.md`: correlating runtime errors to your dialect source, and a
   `plx_source()` helper that recovers the embedded original body.
 
+### Hardened
+
+A whole-project adversarial audit (fresh-eyes review of every front end plus
+mutation fuzzing of all nine dialects) fixed a set of transpiler defects, all now
+covered by tests:
+
+- Backend crashes: an unbounded intrinsic argument list read past a fixed stack
+  array (17+ arguments to `call`/`query`/`execute`); the Python parser had no
+  recursion-depth guard (deep nesting exhausted the C stack); a COBOL `USAGE`
+  clause at end of input stepped past the token-array sentinel. All now error.
+- Backend hangs: a stray `)`/`]` (Go) or dangling `ELSE` (T-SQL) at statement
+  position, and a `for`/`if`/`else-if` recursion in Go, could spin or overflow;
+  all now error cleanly.
+- Wrong or invalid output: Go slice subscripts are 0-based (rewritten to
+  PostgreSQL's 1-based arrays); a COBOL compound `UNTIL` no longer misfolds into
+  the integer-`FOR` bound; a JS/PHP `switch` with no case, only `default`, or a
+  `case` after `default` now errors instead of emitting uncompilable plpgsql; the
+  `?:` elvis operator, a value-less Go `const`, and several empty-argument forms
+  (`fmt.Println()`, `panic()`, `PRINT;`, `RAISERROR()`) are handled or rejected.
+
+The mutation fuzzer (`test/fuzz.py`) and corpus now cover all nine dialects.
+
 ### Upgrading
 
 - `ALTER EXTENSION plx UPDATE TO '1.2'` (see `plx--1.1.1--1.2.sql`).

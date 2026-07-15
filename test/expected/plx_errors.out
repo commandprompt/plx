@@ -260,3 +260,42 @@ CREATE FUNCTION e_tq_else() RETURNS int LANGUAGE plxtsql AS $$
 $$;
 ERROR:  plxtsql: unexpected keyword in statement position
 DETAIL:  at plxtsql source line 2
+-- shared: too many intrinsic arguments (must error, not read past the arg array)
+CREATE FUNCTION e_js_manyargs() RETURNS int LANGUAGE plxjs AS $$
+	execute(`insert`, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17);
+	return 1;
+$$;
+ERROR:  plxjs: too many arguments (maximum 16)
+DETAIL:  at plxjs source line 2
+-- plxcobol: USAGE with no value (truncated; must error, not read past EOF)
+CREATE FUNCTION e_cob_usage() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-X USAGE
+$$;
+ERROR:  plxcobol: USAGE requires a value
+DETAIL:  at plxcobol source line 4
+-- plxjs: a switch with only a default (plpgsql CASE needs at least one WHEN)
+CREATE FUNCTION e_js_defonly(n int) RETURNS int LANGUAGE plxjs AS $$
+	switch (n) { default: return 1; }
+$$;
+ERROR:  plxjs: switch needs at least one case (a switch with only default is not supported)
+DETAIL:  at plxjs source line 2
+-- plxjs: a case after default (plpgsql requires ELSE last)
+CREATE FUNCTION e_js_deffirst(n int) RETURNS int LANGUAGE plxjs AS $$
+	switch (n) { default: return 0; case 1: return 1; }
+$$;
+ERROR:  plxjs: a case after default is not supported; put default last
+DETAIL:  at plxjs source line 2
+-- plxphp: the ?: elvis operator (empty THEN branch) is not supported
+CREATE FUNCTION e_php_elvis(n int) RETURNS int LANGUAGE plxphp AS $$
+	return $n ?: 5;
+$$;
+ERROR:  plxphp: empty branch in ?: (the elvis operator is not supported; write a ? a : b)
+DETAIL:  at plxphp source line 2
+-- plxgo: a const with no value
+CREATE FUNCTION e_go_constval() RETURNS int LANGUAGE plxgo AS $$
+	const x int
+	return 1
+$$;
+ERROR:  plxgo: a constant needs a value (const x = ...)
+DETAIL:  at plxgo source line 2

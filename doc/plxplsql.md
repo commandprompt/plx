@@ -148,6 +148,17 @@ Rejected or unchanged (and therefore likely to error) at `CREATE FUNCTION` time:
 - Autonomous transactions (`PRAGMA AUTONOMOUS_TRANSACTION`) and other pragmas.
 - Oracle-only SQL (outer-join `(+)`, `CONNECT BY`, `DECODE`, `MERGE` specifics,
   Oracle hint comments) inside statements. Use the PostgreSQL equivalent.
+- Oracle spellings **inside** a `DBMS_OUTPUT.PUT_LINE(...)` or
+  `RAISE_APPLICATION_ERROR(...)` argument are not translated (the argument is
+  copied verbatim), so avoid `NVL`/`SYSDATE`/`seq.NEXTVAL` there; assign to a
+  variable first, or use the PostgreSQL form.
+- Schema-qualified sequence pseudocolumns (`schema.seq.NEXTVAL`): write
+  `nextval('schema.seq')` instead.
+- A type name (`NUMBER`, `VARCHAR2`, ...) is translated only in the outermost
+  declaration section; a nested `DECLARE` block's declarations use PostgreSQL
+  type names.
+- Parameterized cursors (`CURSOR c(p NUMBER) IS ...`) and single-argument
+  `RAISE_APPLICATION_ERROR`.
 
 See [PARITY.md](PARITY.md) for the plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

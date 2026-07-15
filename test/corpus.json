@@ -332,10 +332,10 @@
     {
       "id": "reject-cobol-occurs",
       "category": "reject-cobol",
-      "description": "plxcobol rejects OCCURS (arrays) in WORKING-STORAGE.",
-      "ruby_create": "CREATE FUNCTION cx_bad() RETURNS int\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-T PIC 9(9) OCCURS 5 TIMES.\nPROCEDURE DIVISION.\n    GOBACK RETURNING 1.\n$$;",
+      "description": "plxcobol rejects OCCURS with no element type (OCCURS with a PIC/TYPE is supported).",
+      "ruby_create": "CREATE FUNCTION cx_bad() RETURNS int\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-T OCCURS 5 TIMES.\nPROCEDURE DIVISION.\n    GOBACK RETURNING 1.\n$$;",
       "test_sql": "SELECT cx_bad() AS r;",
-      "expected_output": "ERROR:  plxcobol: OCCURS (arrays) is not supported in WORKING-STORAGE"
+      "expected_output": "ERROR:  plxcobol: an OCCURS item needs a PIC or TYPE for its element type"
     }
   ]
 }

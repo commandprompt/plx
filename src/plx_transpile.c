@@ -120,6 +120,7 @@ static void parse_switch_brace(Ctx *cx, int ind);
 static void parse_py_program(Ctx *cx);
 static void parse_py_block(Ctx *cx, int ind);
 static void parse_py_stmt(Ctx *cx, int ind, bool toplevel);
+static void parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel);
 static void parse_brace_stmt(Ctx *cx, int ind, bool toplevel);
 
 /* ---------------------------------------------------------------- errors */
@@ -168,6 +169,15 @@ parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
 	parse_brace_stmt_inner(cx, ind, toplevel);
+	cx->depth--;
+}
+
+static void
+parse_py_stmt(Ctx *cx, int ind, bool toplevel)
+{
+	if (++cx->depth > PLX_MAX_DEPTH)
+		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
+	parse_py_stmt_inner(cx, ind, toplevel);
 	cx->depth--;
 }
 
@@ -972,11 +982,27 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			if (c > q)
 			{
-				char	   *cond = rewrite_expr(cx, s, q, true);
-				char	   *a = rewrite_expr(cx, s + q + 1, c - q - 1, false);
-				char	   *b = rewrite_expr(cx, s + c + 1, len - c - 1, false);
+				char	   *cond;
+				char	   *a;
+				char	   *b;
 				char	   *r;
+				int			ta = q + 1,
+							tn = c - q - 1;
 
+				/* a ?: b (empty THEN arm, the elvis operator) would emit
+				 * "CASE WHEN cond THEN  ELSE b END" -> a plpgsql syntax error */
+				while (tn > 0 && (s[ta] == ' ' || s[ta] == '\t' ||
+								  s[ta] == '\n' || s[ta] == '\r'))
+				{
+					ta++;
+					tn--;
+				}
+				if (tn == 0)
+					plx_err(cx, cx->t[cx->pos].line,
+							"empty branch in ?: (the elvis operator is not supported; write a ? a : b)");
+				cond = rewrite_expr(cx, s, q, true);
+				a = rewrite_expr(cx, s + q + 1, c - q - 1, false);
+				b = rewrite_expr(cx, s + c + 1, len - c - 1, false);
 				r = psprintf("CASE WHEN %s THEN %s ELSE %s END", cond, a, b);
 				return r;
 			}
@@ -1494,6 +1520,10 @@ parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after)
 		if (n < maxargs) { as[n] = s; ae[n] = p; }
 		n++;
 	}
+	/* callers iterate i < n over fixed as[]/ae[] arrays sized maxargs; refuse
+	 * an over-long list rather than let them read past the array end */
+	if (n > maxargs)
+		plx_err(cx, cx->t[a].line, "too many arguments (maximum %d)", maxargs);
 	*after = p + 1;
 	return n;
 }
@@ -3616,6 +3646,8 @@ parse_switch_brace(Ctx *cx, int ind)
 	StringInfo	o = &cx->out;
 	int			line = cx->t[cx->pos].line;
 	int			ca, cb;
+	int			when_count = 0;		/* plpgsql CASE needs >= 1 WHEN, ELSE last */
+	bool		seen_default = false;
 
 	cx->pos++;					/* switch */
 	paren_group(cx, &ca, &cb);
@@ -3677,9 +3709,19 @@ parse_switch_brace(Ctx *cx, int ind)
 
 		indent(o, ind + 1);
 		if (is_default)
+		{
+			seen_default = true;
 			appendStringInfoString(o, "ELSE\n");
+		}
 		else
+		{
+			/* plpgsql requires every WHEN before the ELSE (default) */
+			if (seen_default)
+				plx_err(cx, line,
+						"a case after default is not supported; put default last");
+			when_count++;
 			appendStringInfo(o, "WHEN %s THEN\n", vals.data);
+		}
 
 		/*
 		 * Body: statements until break / next label / '}'. An arm may end with
@@ -3719,6 +3761,9 @@ parse_switch_brace(Ctx *cx, int ind)
 			}
 		}
 	}
+	if (when_count == 0)
+		plx_err(cx, line,
+				"switch needs at least one case (a switch with only default is not supported)");
 	indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
 }
@@ -4213,7 +4258,7 @@ emit_py_raise(Ctx *cx, int a, int b, int ind)
 }
 
 static void
-parse_py_stmt(Ctx *cx, int ind, bool toplevel)
+parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 {
 	Tok		   *tk;
 
@@ -5067,6 +5112,8 @@ cob_type_from_pic(Cb *cb, const char *pic, int len, const char *usage, int ulen)
 			i++;
 			r = cob_pic_repeat(pic, len, &i);
 			strlen_ += r;
+			if (strlen_ > 1000000)			/* clamp the running total, not just each group */
+				strlen_ = 1000000;
 			continue;
 		}
 		if (c == '9')
@@ -5079,6 +5126,10 @@ cob_type_from_pic(Cb *cb, const char *pic, int len, const char *usage, int ulen)
 				scale += r;
 			else
 				intdig += r;
+			if (intdig > 1000000)
+				intdig = 1000000;
+			if (scale > 1000000)
+				scale = 1000000;
 			continue;
 		}
 		i++;									/* Z, comma, etc.: ignore */
@@ -5173,6 +5224,8 @@ cob_decl(Cb *cb)
 			cb->pos++;
 			if (cob_ci(cob_cur(cb), "IS"))
 				cb->pos++;
+			if (cob_cur(cb)->kind == CB_EOF || cob_cur(cb)->kind == CB_PERIOD)
+				cob_err(cb, "USAGE requires a value");
 			usage = cob_cur(cb)->s;
 			ulen = cob_cur(cb)->len;
 			cb->pos++;
@@ -5616,6 +5669,43 @@ cob_evaluate(Cb *cb, int ind)
 	appendStringInfoString(&cb->cx->out, "END CASE;\n");
 }
 
+/*
+ * True if the UNTIL condition starting at `from` (the token after the control
+ * variable's comparison operator) is a *simple* "var op bound", i.e. the bound
+ * runs to the loop body with no logical connector or second comparison. A
+ * compound UNTIL (v > n AND done = 1) must use the general WHILE, not the
+ * integer-FOR fast path (which would otherwise fold the connector into the FOR
+ * bound and emit wrong output).
+ */
+static bool
+cob_until_simple(Cb *cb, int from)
+{
+	int			i,
+				depth = 0;
+
+	for (i = from; i < cb->nt; i++)
+	{
+		CbTok	   *t = &cb->t[i];
+
+		if (t->kind == CB_LP)
+			depth++;
+		else if (t->kind == CB_RP)
+			depth--;
+		else if (t->kind == CB_PERIOD || t->kind == CB_EOF)
+			break;
+		else if (depth == 0 && (cob_is_verb(t) || cob_ci(t, "END-PERFORM")))
+			break;					/* the loop body / terminator begins here */
+		else if (depth == 0 &&
+				 (cob_ci(t, "AND") || cob_ci(t, "OR") || cob_ci(t, "NOT") ||
+				  cob_ci(t, "EQUAL") || cob_ci(t, "EQUALS") ||
+				  cob_ci(t, "GREATER") || cob_ci(t, "LESS") ||
+				  (t->kind == CB_OP && t->len == 1 &&
+				   (t->s[0] == '<' || t->s[0] == '=' || t->s[0] == '>'))))
+			return false;			/* a connector or second comparison */
+	}
+	return true;
+}
+
 static void
 cob_perform(Cb *cb, int ind)
 {
@@ -5675,7 +5765,8 @@ cob_perform(Cb *cb, int ind)
 			while (*bytrim == ' ')
 				bytrim++;
 			if (strcmp(bytrim, "1") == 0 && c0->kind == CB_WORD && (gt || ge) &&
-				strcmp(cob_map(c0->s, c0->len), var) == 0)
+				strcmp(cob_map(c0->s, c0->len), var) == 0 &&
+				cob_until_simple(cb, cb->pos + 2))
 			{
 				StringInfoData bound;
 
@@ -9660,6 +9751,10 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 					name, name);
 		l->typ = pstrdup(inf);
 	}
+	/* a const with no initializer would leave l->init NULL (invalid) */
+	if (isconst && e1 <= e0)
+		plx_err(g->cx, g->t[e0 < g->nt ? e0 : g->nt - 1].line,
+				"a constant needs a value (const %s = ...)", name);
 	l->is_const = isconst;
 	if (e1 > e0)
 	{

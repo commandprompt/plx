@@ -12,7 +12,8 @@ import os, random, subprocess, sys
 
 PSQL = "/usr/local/pgsql/bin/psql"
 ENV = dict(os.environ, PGHOST=os.environ.get("PGHOST", "/tmp"), PGUSER="postgres")
-DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql", "plxts"]
+DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql",
+            "plxts", "plxtsql", "plxgo"]
 random.seed(20260714)
 
 SEEDS = {
@@ -83,6 +84,26 @@ SEEDS = {
   "let v: number[] = null;\nreturn 1;",
   "let s: boolean = true;\nreturn s;",
  ],
+ "plxtsql": [
+  "DECLARE @x int = 1;\nRETURN @x + 2;",
+  "DECLARE @i int = 0;\nDECLARE @s int = 0;\nWHILE @i < 10\nBEGIN\n  SET @s = @s + @i;\n  SET @i += 1;\nEND\nRETURN @s;",
+  "DECLARE @g varchar(10);\nIF 1 > 0\n  SET @g = 'p';\nELSE\n  SET @g = 'n';\nRETURN @g;",
+  "DECLARE @c int;\nSELECT @c = count(*) FROM (VALUES (1)) AS v(x);\nRETURN @c;",
+  "BEGIN TRY\n  THROW 50000, 'bad', 1;\nEND TRY\nBEGIN CATCH\n  RETURN 'e' + ERROR_MESSAGE();\nEND CATCH\nRETURN 'ok';",
+  "PRINT 'hi';\nRAISERROR('bad', 16, 1);\nRETURN 1;",
+  "DECLARE @n int = 4;\nRETURN IIF(@n > 0, CONVERT(varchar, @n), ISNULL(NULL, 'x'));",
+  "DECLARE @a int, @b int;\nSELECT @a = 10, @b = 32;\nRETURN @a + @b;",
+ ],
+ "plxgo": [
+  "return 1 + 2 * 3",
+  "acc := 1\nfor i := 1; i <= 10; i++ {\n\tacc *= i\n}\nreturn acc",
+  "if 1 > 0 {\n\treturn 1\n} else if 1 < 0 {\n\treturn -1\n}\nreturn 0",
+  "switch 2 {\ncase 1:\n\treturn 10\ndefault:\n\treturn 0\n}",
+  "var s []int\nfor i := range 5 {\n\ts = append(s, i*i)\n}\nreturn len(s)",
+  "a := []int{1, 2, 3}\nreturn a[0] + a[2]",
+  "fmt.Println(\"hi\", 1)\npanic(\"bad\")",
+  "a, b := 1, 2\na, b = b, a\nreturn a",
+ ],
 }
 SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b")",
             b"{", b"}", b"[", b"]", b"end", b"..", b"...", b"do |", b"|", b"::",
@@ -90,7 +111,11 @@ SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b"
             b'\n    ', b'\n\t', b':', b'    ', b'if ', b'for ', b'range(',
             b'f"', b'except ', b'pass', b'\n        ', b'elif ',
             b'END-IF', b'END-PERFORM', b'PERFORM ', b'PIC ', b'MOVE ',
-            b'GOBACK', b'UNTIL', b'STRING-APPEND ', b'WS-', b'.', b'%', b',']
+            b'GOBACK', b'UNTIL', b'STRING-APPEND ', b'WS-', b'.', b'%', b',',
+            b'@', b'@@', b':=', b'++', b'--', b'&&', b'||', b'range ', b'func ',
+            b'DECLARE ', b'BEGIN TRY', b'END TRY', b'BEGIN CATCH', b'THROW ',
+            b'SET ', b'PRINT ', b'switch ', b'case ', b'default:', b'[]int{',
+            b'else if ', b'defer ', b'go ', b'RAISERROR(']
 
 def mutate(s):
     b = bytearray(s.encode("utf-8", "ignore"))
@@ -165,6 +190,35 @@ def pathological():
      ("plxts", "for (let i: number = 1; " * 3000),
      ("plxts", "let s: string = `" + "a" * 200000),
      ("plxts", "let x: number[" + "[" * 5000),
+     # plxtsql
+     ("plxtsql", "WHILE 1=1 BEGIN\n" * 3000 + "SET @x = 1;\n" + "END\n" * 3000 + "RETURN 1;"),
+     ("plxtsql", "BEGIN TRY " * 3000),
+     ("plxtsql", "DECLARE @x int = " + "(" * 8000),
+     ("plxtsql", "IF 1=1 " * 4000 + "PRINT 'x'"),
+     ("plxtsql", "SELECT " + "@a = 1, " * 3000 + "@b = 2"),
+     ("plxtsql", "DECLARE @s varchar = 'unterminated"),
+     ("plxtsql", "RAISERROR(" + "'a'," * 5000),
+     ("plxtsql", "PRINT " + "'a' + " * 5000 + "'b'"),
+     # plxgo
+     ("plxgo", "for {\n" * 4000 + "x := 1\n" + "}\n" * 4000 + "return 1"),
+     ("plxgo", "if 1==1 {} else " * 4000 + "{}"),   # deep else-if chain
+     ("plxgo", "a" + ", a" * 3000 + " := 1" + ", 1" * 3000),  # many-target assign
+     ("plxgo", "x := " + "(" * 8000),
+     ("plxgo", "fmt." + "\n" * 200),                # dot as final token
+     ("plxgo", "return \"" + "a" * 200000),         # unterminated string
+     ("plxgo", "return `" + "a" * 200000),          # unterminated raw string
+     ("plxgo", "switch {\n" + "case 1==1:\n\tx := 1\n" * 3000 + "}"),
+     ("plxgo", "s := []int{" + "1, " * 50000 + "2}"),
+     ("plxgo", "for i := 0; i < 3; " + "i++" * 3000 + " {}"),
+     # crash regressions (all must error cleanly, never crash the backend)
+     ("plxjs", "return call(`p`, " + ", ".join(str(i) for i in range(50)) + ");"),
+     ("plxphp", "execute($s, " + ", ".join("$b" for _ in range(40)) + ");"),
+     ("plxruby", 'query("s", ' + ", ".join("b" for _ in range(40)) +
+      ").each do |r|\n x = r.a\nend\nreturn x"),
+     ("plxpython3", "\n".join(" " * i + "if x:" for i in range(4000)) +
+      "\n" + " " * 4000 + "x = 1"),
+     ("plxcobol", "WORKING-STORAGE SECTION.\n01 WS-X USAGE"),
+     ("plxcobol", "WORKING-STORAGE SECTION.\n01 WS-X USAGE IS"),
     ]
 
 def quote(body):
