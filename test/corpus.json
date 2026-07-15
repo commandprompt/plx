@@ -271,13 +271,13 @@
       "expected_output": "NOTICE:  0: Alice\nNOTICE:  1: Bob\nNOTICE:  2: Carol\n c16 \n-----\n \n(1 row)"
     },
     {
-      "id": "reject-case-when",
-      "category": "reject-out-of-subset",
-      "description": "case/when is out of the M3 subset and must be rejected at CREATE time with a FEATURE_NOT_SUPPORTED ereport (no plpgsql body is produced).",
+      "id": "case-when",
+      "category": "case",
+      "description": "plxruby case/when lowers to a simple CASE (supported; was a stale M3-era reject case).",
       "ruby_create": "CREATE FUNCTION e_case(x int) RETURNS text LANGUAGE plxruby AS $$\ncase x\nwhen 1\n  return 'one'\nelse\n  return 'other'\nend\n$$;",
-      "expected_plpgsql_body": "-- none: transpile aborts at CREATE time; ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED)); no prosrc rewritten",
-      "test_sql": "CREATE FUNCTION e_case(x int) RETURNS text LANGUAGE plxruby AS $$\ncase x\nwhen 1\n  return 'one'\nelse\n  return 'other'\nend\n$$;",
-      "expected_output": "ERROR:  plxruby: case/when is not supported (out of the M3 subset)"
+      "expected_plpgsql_body": "BEGIN\n  CASE x\n  WHEN 1 THEN RETURN 'one';\n  ELSE RETURN 'other';\n  END CASE;\nEND;",
+      "test_sql": "SELECT e_case(1) AS r;",
+      "expected_output": " r  \n-----\n one\n(1 row)"
     },
     {
       "id": "reject-nested-def",
@@ -296,6 +296,46 @@
       "expected_plpgsql_body": "-- none: transpile aborts at CREATE time; ereport(ERROR) demanding a #:: annotation; no prosrc rewritten",
       "test_sql": "CREATE FUNCTION e_infer(x int) RETURNS text LANGUAGE plxruby AS $$\nlabel = compute_thing(x)\nreturn label\n$$;",
       "expected_output": "ERROR:  plxruby: cannot infer a PostgreSQL type for local variable \"label\" (first assigned at line 1); add an annotation, e.g. label = ... #:: text"
+    },
+    {
+      "id": "cobol-scalar-return",
+      "category": "cobol-return-arith",
+      "description": "plxcobol scalar GOBACK RETURNING an arithmetic expression over args.",
+      "ruby_create": "CREATE FUNCTION cx_add(a int, b int) RETURNS int\nLANGUAGE plxcobol AS $$\nPROCEDURE DIVISION.\n    GOBACK RETURNING A + B * 2.\n$$;",
+      "test_sql": "SELECT cx_add(3, 4) AS r;",
+      "expected_output": " r  \n----\n 11\n(1 row)"
+    },
+    {
+      "id": "cobol-perform-varying",
+      "category": "cobol-loop",
+      "description": "plxcobol PERFORM VARYING counting loop accumulating a sum.",
+      "ruby_create": "CREATE FUNCTION cx_sum(n int) RETURNS bigint\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-T PIC 9(18) VALUE 0.\n01 WS-I PIC 9(9).\nPROCEDURE DIVISION.\n    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > N\n        ADD WS-I TO WS-T\n    END-PERFORM\n    GOBACK RETURNING WS-T.\n$$;",
+      "test_sql": "SELECT cx_sum(100) AS r;",
+      "expected_output": "  r   \n------\n 5050\n(1 row)"
+    },
+    {
+      "id": "cobol-evaluate",
+      "category": "cobol-case",
+      "description": "plxcobol EVALUATE with stacked WHEN and WHEN OTHER lowered to CASE.",
+      "ruby_create": "CREATE FUNCTION cx_eval(n int) RETURNS text\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-R PIC X(8).\nPROCEDURE DIVISION.\n    EVALUATE N\n        WHEN 1\n            MOVE \"one\" TO WS-R\n        WHEN 2\n        WHEN 3\n            MOVE \"few\" TO WS-R\n        WHEN OTHER\n            MOVE \"many\" TO WS-R\n    END-EVALUATE\n    GOBACK RETURNING WS-R.\n$$;",
+      "test_sql": "SELECT cx_eval(3) AS r;",
+      "expected_output": "  r  \n-----\n few\n(1 row)"
+    },
+    {
+      "id": "cobol-string-append",
+      "category": "cobol-strbuild",
+      "description": "plxcobol STRING-APPEND lowers to the plx_strbuild string builder.",
+      "ruby_create": "CREATE FUNCTION cx_build(n int) RETURNS text\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-S PIC X(1) VALUE \"\".\n01 WS-I PIC 9(9).\nPROCEDURE DIVISION.\n    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > N\n        STRING-APPEND \"ab\" TO WS-S\n    END-PERFORM\n    GOBACK RETURNING WS-S.\n$$;",
+      "test_sql": "SELECT cx_build(3) AS r;",
+      "expected_output": "   r    \n--------\n ababab\n(1 row)"
+    },
+    {
+      "id": "reject-cobol-occurs",
+      "category": "reject-cobol",
+      "description": "plxcobol rejects OCCURS (arrays) in WORKING-STORAGE.",
+      "ruby_create": "CREATE FUNCTION cx_bad() RETURNS int\nLANGUAGE plxcobol AS $$\nWORKING-STORAGE SECTION.\n01 WS-T PIC 9(9) OCCURS 5 TIMES.\nPROCEDURE DIVISION.\n    GOBACK RETURNING 1.\n$$;",
+      "test_sql": "SELECT cx_bad() AS r;",
+      "expected_output": "ERROR:  plxcobol: OCCURS (arrays) is not supported in WORKING-STORAGE"
     }
   ]
 }

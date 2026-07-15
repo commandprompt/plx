@@ -12,7 +12,7 @@ import os, random, subprocess, sys
 
 PSQL = "/usr/local/pgsql/bin/psql"
 ENV = dict(os.environ, PGHOST=os.environ.get("PGHOST", "/tmp"), PGUSER="postgres")
-DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3"]
+DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol"]
 random.seed(20260714)
 
 SEEDS = {
@@ -54,12 +54,24 @@ SEEDS = {
   'if x > 0:\n    pass\nelse:\n    x = 0\nreturn x\n',
   'assert n > 0, "bad"\nraise ValueError(f"no {x}")\n',
  ],
+ "plxcobol": [
+  "PROCEDURE DIVISION.\n    GOBACK RETURNING 1.",
+  "WORKING-STORAGE SECTION.\n01 WS-I PIC 9(9).\nPROCEDURE DIVISION.\n    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 10\n        CONTINUE\n    END-PERFORM\n    GOBACK RETURNING WS-I.",
+  'WORKING-STORAGE SECTION.\n01 WS-R PIC X(4).\nPROCEDURE DIVISION.\n    IF 1 IS GREATER THAN OR EQUAL TO 0\n        MOVE "yes" TO WS-R\n    ELSE\n        MOVE "no" TO WS-R\n    END-IF\n    GOBACK RETURNING WS-R.',
+  'WORKING-STORAGE SECTION.\n01 WS-R PIC X(8).\nPROCEDURE DIVISION.\n    EVALUATE 2\n        WHEN 1\n            MOVE "one" TO WS-R\n        WHEN OTHER\n            MOVE "many" TO WS-R\n    END-EVALUATE\n    GOBACK RETURNING WS-R.',
+  'WORKING-STORAGE SECTION.\n01 WS-S PIC X(1) VALUE "".\n01 WS-I PIC 9(9).\nPROCEDURE DIVISION.\n    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 5\n        STRING-APPEND "x" TO WS-S\n    END-PERFORM\n    GOBACK RETURNING WS-S.',
+  'WORKING-STORAGE SECTION.\n01 WS-M PIC X(80).\nPROCEDURE DIVISION.\n    BEGIN-TRY\n        COMPUTE WS-M = mod(1, 0)\n    WHEN OTHER\n        MOVE "err" TO WS-M\n    END-TRY\n    GOBACK RETURNING WS-M.',
+  'PROCEDURE DIVISION.\n    DISPLAY "hi" 1 "there"\n    GOBACK RETURNING 1.',
+  "WORKING-STORAGE SECTION.\n01 WS-T PIC S9(9) VALUE 0.\nPROCEDURE DIVISION.\n    ADD 1 2 3 TO WS-T\n    GOBACK RETURNING WS-T.",
+ ],
 }
 SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b")",
             b"{", b"}", b"[", b"]", b"end", b"..", b"...", b"do |", b"|", b"::",
             b"->", b"=>", b";", b"raise", b"query(", b"fetch_one(", b"\n",
             b'\n    ', b'\n\t', b':', b'    ', b'if ', b'for ', b'range(',
-            b'f"', b'except ', b'pass', b'\n        ', b'elif ']
+            b'f"', b'except ', b'pass', b'\n        ', b'elif ',
+            b'END-IF', b'END-PERFORM', b'PERFORM ', b'PIC ', b'MOVE ',
+            b'GOBACK', b'UNTIL', b'STRING-APPEND ', b'WS-', b'.', b'%', b',']
 
 def mutate(s):
     b = bytearray(s.encode("utf-8", "ignore"))
@@ -104,6 +116,20 @@ def pathological():
      ("plxpython3", "return f\"" + "{" * 3000 + "x" + "}" * 3000 + "\"\n"),
      ("plxpython3", "\n".join("    " * i + "if x:" for i in range(2000))),
      ("plxpython3", "for i in range(" + "(" * 5000),
+     # plxcobol
+     ("plxcobol", "PROCEDURE DIVISION.\n" + "    IF 1 = 1\n" * 4000 +
+      "        CONTINUE\n" + "    END-IF\n" * 4000 + "    GOBACK RETURNING 1."),
+     ("plxcobol", "PROCEDURE DIVISION.\n    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL"),
+     ("plxcobol", "WORKING-STORAGE SECTION.\n01 WS-X PIC 9(999999999999).\n"
+      "PROCEDURE DIVISION.\n    GOBACK RETURNING 1."),
+     ("plxcobol", 'PROCEDURE DIVISION.\n    DISPLAY "' + "a" * 200000),
+     ("plxcobol", "PROCEDURE DIVISION.\n    COMPUTE X = " + "(" * 8000),
+     ("plxcobol", "PROCEDURE DIVISION.\n" + "    PERFORM UNTIL 1 = 1\n" * 3000 +
+      "        CONTINUE\n" + "    END-PERFORM\n" * 3000 + "    GOBACK RETURNING 1."),
+     ("plxcobol", "*> " + "a" * 200000 + "\nPROCEDURE DIVISION.\n    GOBACK RETURNING 1."),
+     ("plxcobol", "WORKING-STORAGE SECTION.\n" + "01 WS-A PIC X(1).\n" * 5000 +
+      "PROCEDURE DIVISION.\n    GOBACK RETURNING 1."),
+     ("plxcobol", "PROCEDURE DIVISION.\n    MOVE " + "mod(1," * 3000 + "2" + ")" * 3000 + " TO X."),
     ]
 
 def quote(body):

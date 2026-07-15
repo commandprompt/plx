@@ -35,7 +35,8 @@ for v in 13 14 15 16 17; do
   # build plx against this version in a clean copy
   B=/root/plxbuild_$v
   rm -rf "$B"; mkdir -p "$B"
-  cp -r "$PLX/src" "$PLX/Makefile" "$PLX/plx.control" "$PLX/plx--1.0.sql" "$PLX/test" "$B/"
+  cp -r "$PLX/src" "$PLX/Makefile" "$PLX/plx.control" "$PLX/test" "$B/"
+  cp "$PLX"/plx--*.sql "$B/"
   if ! make -C "$B" PG_CONFIG="$PREFIX/bin/pg_config" >"/root/plx_pg${v}.log" 2>&1; then
     echo "pg$v: plx COMPILE FAILED (see /root/plx_pg${v}.log)" | tee -a "$SUMMARY"; continue
   fi
