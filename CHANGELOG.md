@@ -4,7 +4,7 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
-## [1.2] - unreleased
+## [1.2] - 2026-07-15
 
 ### Added
 
