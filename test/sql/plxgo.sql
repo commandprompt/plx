@@ -140,7 +140,7 @@ SELECT g_safe(0) AS boom;
 -- Go slices are 0-based; subscripts are rewritten to PostgreSQL's 1-based arrays
 CREATE FUNCTION g_index(k int) RETURNS int LANGUAGE plxgo AS $$
 	a := []int{10, 20, 30, 40}
-	sum := a[0] + a[3]
+	var sum int = a[0] + a[3]
 	for i := range k {
 		sum += a[i]
 	}

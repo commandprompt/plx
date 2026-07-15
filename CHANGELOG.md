@@ -4,6 +4,21 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Fixed
+
+- Build on PostgreSQL 19 and 20 with a C23 toolchain (for example gcc 15). There,
+  `pg_noreturn` expands to the standard `[[noreturn]]` attribute, whose placement
+  is strict; plx wrote it after the storage class (`static pg_noreturn void`),
+  which C23 rejects. It is now the first token of the declaration
+  (`pg_noreturn static void`), matching PostgreSQL's own convention, and still
+  compiles on 13 through 18. The full suite passes on PostgreSQL 13 through 18
+  plus 19beta and 20devel built from source. See [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md).
+- A plxgo regression test (0-based indexing) declared its accumulator with `:=`
+  from a non-inferable expression, so the function failed to create and the test
+  silently checked the failure rather than indexing; it now uses `var sum int`.
+
 ## [1.2] - 2026-07-15
 
 ### Added

@@ -190,19 +190,18 @@ CONTEXT:  PL/pgSQL function g_safe(integer) line 4 at RAISE
 -- Go slices are 0-based; subscripts are rewritten to PostgreSQL's 1-based arrays
 CREATE FUNCTION g_index(k int) RETURNS int LANGUAGE plxgo AS $$
 	a := []int{10, 20, 30, 40}
-	sum := a[0] + a[3]
+	var sum int = a[0] + a[3]
 	for i := range k {
 		sum += a[i]
 	}
 	return sum
 $$;
-ERROR:  plxgo: cannot infer a PostgreSQL type for "sum"; declare it with an explicit type (var sum T)
-DETAIL:  at plxgo source line 3
 SELECT g_index(2) AS should_be_80;
-ERROR:  function g_index(integer) does not exist
-LINE 1: SELECT g_index(2) AS should_be_80;
-               ^
-HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ should_be_80 
+--------------
+           80
+(1 row)
+
 -- fmt.Println / fmt.Printf: one % placeholder per value argument (empty is ok)
 CREATE FUNCTION g_print() RETURNS int LANGUAGE plxgo AS $$
 	fmt.Println("a", 1, true)

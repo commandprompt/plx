@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-plx supports PostgreSQL 13 through 18. The full pg_regress suite (plxruby,
-plxphp, plxjs, plxpython3, plxcobol, plxplsql, plxts, and the rejection tests)
-passes on each of PostgreSQL 13, 14, 15, 16, 17, and 18.
+plx supports PostgreSQL 13 through 18 (released), and builds and passes on the
+19 and 20 development lines. The full pg_regress suite (plxruby, plxphp, plxjs,
+plxpython3, plxgo, plxcobol, plxplsql, plxts, plxtsql, and the rejection tests)
+passes on each of PostgreSQL 13 through 18, plus 19 and 20 built from source.
 
 | PostgreSQL | Status | string builder |
 |------------|--------|----------------|
@@ -14,6 +15,12 @@ passes on each of PostgreSQL 13, 14, 15, 16, 17, and 18.
 | 16 | pass | correct, not accelerated |
 | 17 | pass | correct, not accelerated |
 | 18 | pass | accelerated (amortized O(1)) |
+| 19 (beta) | pass (from source) | accelerated (amortized O(1)) |
+| 20 (devel) | pass (from source) | accelerated (amortized O(1)) |
+
+PostgreSQL 19 and 20 compile with a C23 toolchain (for example gcc 15), where
+`pg_noreturn` becomes the standard `[[noreturn]]` attribute; plx writes it as the
+first token of each declaration so it compiles across all of these versions.
 
 ## The string builder is accelerated only on PostgreSQL 18
 

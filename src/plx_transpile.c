@@ -24,9 +24,12 @@
 #include "plx_int.h"
 
 /*
- * Cross-version shims. pg_noreturn is a PG18 prefix specifier; older releases
- * use a suffix attribute. Define it as the GCC/clang attribute (usable as a
- * prefix) when the server headers do not provide it.
+ * Cross-version shims. pg_noreturn (added in PG16) must be written as the very
+ * first token of the declaration, before the storage class: write
+ * "pg_noreturn static void f()", not "static pg_noreturn void f()". On PG20+
+ * (C23) it expands to the standard [[noreturn]] attribute, whose placement is
+ * strict; on older releases we define it as the GCC/clang attribute, which is
+ * position-tolerant, so the same prefix spelling compiles everywhere.
  */
 #ifndef pg_noreturn
 #define pg_noreturn __attribute__((noreturn))
@@ -101,7 +104,7 @@ typedef struct
 #define PLX_DIAG_SCHEMA     0x20
 #define PLX_DIAG_DATATYPE   0x40
 
-static pg_noreturn void plx_err(Ctx *cx, int line, const char *fmt,...) pg_attribute_printf(3, 4);
+pg_noreturn static void plx_err(Ctx *cx, int line, const char *fmt,...) pg_attribute_printf(3, 4);
 static char *rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx);
 static char *rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx);
 static char *rw_range(Ctx *cx, int a, int b, bool boolctx);
@@ -125,7 +128,7 @@ static void parse_brace_stmt(Ctx *cx, int ind, bool toplevel);
 
 /* ---------------------------------------------------------------- errors */
 
-static pg_noreturn void
+pg_noreturn static void
 plx_err(Ctx *cx, int line, const char *fmt,...)
 {
 	char		buf[512];
@@ -4446,7 +4449,7 @@ cob_cur(Cb *cb)
 	return &cb->t[cb->pos];
 }
 
-static pg_noreturn void
+pg_noreturn static void
 cob_err(Cb *cb, const char *msg)
 {
 	plx_err(cb->cx, cb->t[cb->pos].line, "%s", msg);
@@ -7452,7 +7455,7 @@ tq_ci(TqTok *tk, const char *w)
 	return tk->kind == TQ_WORD && tk->len == l && pg_strncasecmp(tk->s, w, l) == 0;
 }
 
-static pg_noreturn void
+pg_noreturn static void
 tq_err(Tq *tq, const char *msg)
 {
 	plx_err(tq->cx, tq->t[tq->pos].line, "%s", msg);
@@ -8916,7 +8919,7 @@ go_ci(GoTok *tk, const char *w)
 	return tk->kind == GO_WORD && tk->len == l && strncmp(tk->s, w, l) == 0;
 }
 
-static pg_noreturn void
+pg_noreturn static void
 go_err(Go *g, const char *msg)
 {
 	plx_err(g->cx, g->t[g->pos].line, "%s", msg);
