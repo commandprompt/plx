@@ -102,3 +102,10 @@ CREATE FUNCTION e_js_fn() RETURNS int LANGUAGE plxjs AS $$
 function helper() { return 1; }
 return 1;
 $$;
+
+-- plxruby: << on a numeric variable is not a string append; rejected
+CREATE FUNCTION e_rb_numshift() RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x << 2
+return x
+$$;

@@ -89,3 +89,49 @@ for (let i = 1; i <= n; i++) { t += i; }
 return t;
 $$;
 SELECT acc_num(5);
+
+-- large build exercises the repalloc doubling; verify exact content via md5
+CREATE FUNCTION sb_big(n int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE s plx_strbuild := ''; i int;
+BEGIN FOR i IN 1..n LOOP s := plx_sb_append(s, 'abcde'); END LOOP;
+  RETURN md5(s::text) || '/' || length(s::text); END; $$;
+SELECT sb_big(10000) = md5(repeat('abcde', 10000)) || '/50000' AS big_ok;
+
+-- appending the accumulator to itself (doubling) is safe
+CREATE FUNCTION sb_self(n int) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE s plx_strbuild := 'a'; i int;
+BEGIN FOR i IN 1..n LOOP s := plx_sb_append(s, s); END LOOP; RETURN length(s::text); END; $$;
+SELECT sb_self(10) AS self_append_pow2;
+
+-- a varchar-typed accumulator also lowers to the builder
+CREATE FUNCTION acc_vc(n int) RETURNS text LANGUAGE plxruby AS $$
+s = "" #:: varchar
+for i in 1..n
+  s << "z"
+end
+return s
+$$;
+SELECT acc_vc(4);
+
+-- multibyte content is not corrupted across buffer growth
+CREATE FUNCTION acc_mb(n int) RETURNS text LANGUAGE plxruby AS $$
+s = "" #:: text
+for i in 1..n
+  s << "é中"
+end
+return length(s) || ':' || substring(s from 1 for 4)
+$$;
+SELECT acc_mb(50);
+
+-- a plain assignment mid-build resets the accumulator correctly
+CREATE FUNCTION acc_reset(n int) RETURNS text LANGUAGE plxruby AS $$
+s = "" #:: text
+for i in 1..n
+  s << "a"
+  if i == 2
+    s = "R"
+  end
+end
+return s
+$$;
+SELECT acc_reset(4);

@@ -118,3 +118,11 @@ return 1;
 $$;
 ERROR:  plxjs: nested function definitions are not supported
 DETAIL:  at plxjs source line 2
+-- plxruby: << on a numeric variable is not a string append; rejected
+CREATE FUNCTION e_rb_numshift() RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x << 2
+return x
+$$;
+ERROR:  plxruby: unsupported operator in statement
+DETAIL:  at plxruby source line 3
