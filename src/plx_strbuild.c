@@ -24,7 +24,10 @@
 #include "utils/builtins.h"
 #include "utils/expandeddatum.h"
 #include "utils/memutils.h"
-#include "varatt.h"
+#if PG_VERSION_NUM >= 160000
+#include "varatt.h"				/* split out of postgres.h in PG16; the VARATT
+								 * macros come from postgres.h on PG13-15 */
+#endif
 
 #define SB_MAGIC 0x53425544		/* 'SBUD' */
 
