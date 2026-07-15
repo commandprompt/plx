@@ -12,7 +12,7 @@ import os, random, subprocess, sys
 
 PSQL = "/usr/local/pgsql/bin/psql"
 ENV = dict(os.environ, PGHOST=os.environ.get("PGHOST", "/tmp"), PGUSER="postgres")
-DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol"]
+DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql"]
 random.seed(20260714)
 
 SEEDS = {
@@ -63,6 +63,16 @@ SEEDS = {
   'WORKING-STORAGE SECTION.\n01 WS-M PIC X(80).\nPROCEDURE DIVISION.\n    BEGIN-TRY\n        COMPUTE WS-M = mod(1, 0)\n    WHEN OTHER\n        MOVE "err" TO WS-M\n    END-TRY\n    GOBACK RETURNING WS-M.',
   'PROCEDURE DIVISION.\n    DISPLAY "hi" 1 "there"\n    GOBACK RETURNING 1.',
   "WORKING-STORAGE SECTION.\n01 WS-T PIC S9(9) VALUE 0.\nPROCEDURE DIVISION.\n    ADD 1 2 3 TO WS-T\n    GOBACK RETURNING WS-T.",
+ ],
+ "plxplsql": [
+  "BEGIN RETURN 1 + 2; END;",
+  "  v NUMBER := 0;\nBEGIN\n  FOR i IN 1..10 LOOP\n    v := v + i;\n  END LOOP;\n  RETURN v;\nEND;",
+  "  r VARCHAR2(10);\nBEGIN\n  IF 1 > 0 THEN r := 'p'; ELSE r := 'n'; END IF;\n  RETURN r;\nEND;",
+  "BEGIN\n  DBMS_OUTPUT.PUT_LINE('hi ' || 42);\n  RETURN 'x';\nEND;",
+  "BEGIN\n  RAISE_APPLICATION_ERROR(-20001, 'bad');\nEXCEPTION WHEN OTHERS THEN RETURN -1;\nEND;",
+  "  c bigint;\nBEGIN\n  EXECUTE IMMEDIATE 'SELECT 1' INTO c;\n  RETURN c;\nEND;",
+  "  CURSOR c IS SELECT 1;\n  v int;\nBEGIN\n  OPEN c; FETCH c INTO v; CLOSE c;\n  RETURN v;\nEND;",
+  "BEGIN\n  RETURN NVL(NULL, SYSDATE);\nEND;",
  ],
 }
 SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b")",
@@ -130,6 +140,15 @@ def pathological():
      ("plxcobol", "WORKING-STORAGE SECTION.\n" + "01 WS-A PIC X(1).\n" * 5000 +
       "PROCEDURE DIVISION.\n    GOBACK RETURNING 1."),
      ("plxcobol", "PROCEDURE DIVISION.\n    MOVE " + "mod(1," * 3000 + "2" + ")" * 3000 + " TO X."),
+     # plxplsql
+     ("plxplsql", "BEGIN\n" + "IF 1=1 THEN\n" * 4000 + "NULL;\n" + "END IF;\n" * 4000 + "END;"),
+     ("plxplsql", "BEGIN " * 3000 + "NULL; " + "END; " * 3000),
+     ("plxplsql", "BEGIN RETURN " + "(" * 8000 + "1"),
+     ("plxplsql", "BEGIN DBMS_OUTPUT.PUT_LINE(" + "(" * 5000),
+     ("plxplsql", "BEGIN RAISE_APPLICATION_ERROR(-20001," + "'a'" * 5000),
+     ("plxplsql", "  v VARCHAR2(" + "9" * 100000 + ");\nBEGIN NULL; END;"),
+     ("plxplsql", "BEGIN\n  v := 'unterminated"),
+     ("plxplsql", "/*" + "a" * 200000),
     ]
 
 def quote(body):

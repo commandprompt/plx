@@ -4,12 +4,20 @@ Target: every plpgsql capability is expressible in each plx dialect. The
 reference is the plpgsql statement set in `src/pl/plpgsql/src/plpgsql.h`
 (`PLpgSQL_stmt_*`) plus its declaration forms.
 
-Every construct below is supported in all five dialects — **plxruby**,
+Every construct below is supported in all five column dialects — **plxruby**,
 **plxphp**, **plxjs**, **plxpython3**, **plxcobol** — except where a footnote
 notes an equivalent form. The cells show the dialect spelling; full syntax and
 semantics are in the per-dialect chapters ([plxruby](plxruby.md),
 [plxphp](plxphp.md), [plxjs](plxjs.md), [plxpython3](plxpython3.md),
 [plxcobol](plxcobol.md)).
+
+**plxplsql** (Oracle PL/SQL) is not shown as a separate column because its
+spelling *is* the plpgsql form: PL/SQL and plpgsql share `IF/ELSIF`, `LOOP`,
+`WHILE`, `FOR`, `CASE`, `:=`, `||`, `RAISE`, cursors, `%TYPE`, and the
+`EXCEPTION` section, so those constructs pass through unchanged. plxplsql adds
+the Oracle spellings (`DBMS_OUTPUT.PUT_LINE`, `RAISE_APPLICATION_ERROR`, `EXECUTE
+IMMEDIATE`, `NVL`, `seq.NEXTVAL`, `NUMBER`/`VARCHAR2`, ...) on top. See
+[plxplsql.md](plxplsql.md).
 
 ## Control flow
 

@@ -4,8 +4,8 @@
 
 <p align="center">
   <b>Write PostgreSQL functions in the language you already know.</b><br>
-  Ruby, PHP, JavaScript, Python, or COBOL syntax, compiled to plpgsql at
-  <code>CREATE FUNCTION</code> time.
+  Ruby, PHP, JavaScript, Python, COBOL, or Oracle PL/SQL syntax, compiled to
+  plpgsql at <code>CREATE FUNCTION</code> time.
 </p>
 
 <p align="center">
@@ -39,6 +39,7 @@ dialects available today are:
 - `plxjs`: a JavaScript dialect. See [doc/plxjs.md](doc/plxjs.md).
 - `plxpython3`: a Python dialect. See [doc/plxpython3.md](doc/plxpython3.md).
 - `plxcobol`: a COBOL dialect (ISO/IEC 1989:2023). See [doc/plxcobol.md](doc/plxcobol.md).
+- `plxplsql`: an Oracle PL/SQL dialect. See [doc/plxplsql.md](doc/plxplsql.md).
 
 Every plpgsql statement type is reachable from every dialect. See
 [doc/PARITY.md](doc/PARITY.md) for the construct matrix. The language names carry
@@ -187,8 +188,9 @@ CREATE EXTENSION plx;
 
 - Per-dialect chapters: [plxruby](doc/plxruby.md), [plxphp](doc/plxphp.md),
   [plxjs](doc/plxjs.md), [plxpython3](doc/plxpython3.md),
-  [plxcobol](doc/plxcobol.md). Each covers the full syntax, supported constructs
-  with examples, semantic differences, and what is rejected.
+  [plxcobol](doc/plxcobol.md), [plxplsql](doc/plxplsql.md). Each covers the full
+  syntax, supported constructs with examples, semantic differences, and what is
+  rejected.
 - [doc/PARITY.md](doc/PARITY.md): the plpgsql construct parity matrix.
 - [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md): supported PostgreSQL versions.
 - [doc/USERGUIDE.md](doc/USERGUIDE.md): examples from the PL/pgSQL manual shown in

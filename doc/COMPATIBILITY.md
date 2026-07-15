@@ -3,8 +3,8 @@
 ## Supported versions
 
 plx supports PostgreSQL 13 through 18. The full pg_regress suite (plxruby,
-plxphp, plxjs, plxpython3, plxcobol, and the rejection tests) passes on each of
-PostgreSQL 13, 14, 15, 16, 17, and 18.
+plxphp, plxjs, plxpython3, plxcobol, plxplsql, and the rejection tests) passes on
+each of PostgreSQL 13, 14, 15, 16, 17, and 18.
 
 | PostgreSQL | Status | string builder |
 |------------|--------|----------------|

@@ -4,6 +4,25 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [1.2] - unreleased
+
+### Added
+
+- `plxplsql`, an Oracle PL/SQL dialect. PL/SQL and plpgsql are both Ada-descended,
+  so most of the language (`DECLARE`/`BEGIN`/`EXCEPTION`/`END`, `IF`/`ELSIF`,
+  `LOOP`/`WHILE`/`FOR`, `CASE`, `:=`, `||`, cursors, `%TYPE`) passes through
+  unchanged. plxplsql is a layout-preserving rewriter that translates the Oracle
+  spellings: `NUMBER`/`VARCHAR2`/`PLS_INTEGER`/... types, `DBMS_OUTPUT.PUT_LINE`,
+  `RAISE_APPLICATION_ERROR`, `EXECUTE IMMEDIATE`, `FROM DUAL`, `NVL`,
+  `seq.NEXTVAL`, `SYSDATE`, and `CURSOR c IS`. Function signatures use PostgreSQL
+  types; the body is PL/SQL. See [doc/plxplsql.md](doc/plxplsql.md).
+- `doc/DEBUGGING.md`: correlating runtime errors to your dialect source, and a
+  `plx_source()` helper that recovers the embedded original body.
+
+### Upgrading
+
+- `ALTER EXTENSION plx UPDATE TO '1.2'` (see `plx--1.1.1--1.2.sql`).
+
 ## [1.1.1] - 2026-07-15
 
 Code-only patch release (no catalog changes). Upgrade with
