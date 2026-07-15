@@ -193,6 +193,8 @@ CREATE EXTENSION plx;
 - [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md): supported PostgreSQL versions.
 - [doc/USERGUIDE.md](doc/USERGUIDE.md): examples from the PL/pgSQL manual shown in
   each dialect next to the plpgsql they produce.
+- [doc/DEBUGGING.md](doc/DEBUGGING.md): correlating runtime errors to your
+  source, and recovering the original dialect body.
 - [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) and
   [doc/TRANSPILER.md](doc/TRANSPILER.md): design and transpiler specification.
 - [bench/BENCHMARKS.md](bench/BENCHMARKS.md): performance across five workloads.
