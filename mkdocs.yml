@@ -64,8 +64,20 @@ nav:
       - COBOL (plxcobol): plxcobol.md
       - Oracle PL/SQL (plxplsql): plxplsql.md
       - Transact-SQL (plxtsql): plxtsql.md
+  - Cookbooks:
+      - Overview: cookbook/index.md
+      - Ruby: cookbook/plxruby.md
+      - PHP: cookbook/plxphp.md
+      - JavaScript: cookbook/plxjs.md
+      - TypeScript: cookbook/plxts.md
+      - Python: cookbook/plxpython3.md
+      - Go: cookbook/plxgo.md
+      - COBOL: cookbook/plxcobol.md
+      - Oracle PL/SQL: cookbook/plxplsql.md
+      - Transact-SQL: cookbook/plxtsql.md
   - Reference:
       - Feature parity: PARITY.md
+      - Gaps and limitations: LIMITATIONS.md
       - Compatibility: COMPATIBILITY.md
       - Architecture: ARCHITECTURE.md
       - Transpiler: TRANSPILER.md

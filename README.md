@@ -199,6 +199,11 @@ CREATE EXTENSION plx;
   [plxts](doc/plxts.md), [plxtsql](doc/plxtsql.md), [plxgo](doc/plxgo.md). Each
   covers the full syntax, supported constructs with examples, semantic
   differences, and what is rejected.
+- [Cookbooks](doc/cookbook/index.md): verified, runnable recipes for each dialect
+  (scalar functions, loops, string building, query loops, set-returning
+  functions, error handling, triggers, dynamic SQL, and dialect idioms).
+- [doc/LIMITATIONS.md](doc/LIMITATIONS.md): the constraints shared by every
+  dialect and what each individual dialect cannot do.
 - [doc/PARITY.md](doc/PARITY.md): the plpgsql construct parity matrix.
 - [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md): supported PostgreSQL versions.
 - [doc/USERGUIDE.md](doc/USERGUIDE.md): examples from the PL/pgSQL manual shown in

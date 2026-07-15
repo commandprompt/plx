@@ -246,18 +246,20 @@ feature).
 
 ## Trigger functions
 
-A function returning `trigger` can be used as a trigger. Assign to `$NEW` fields
-and return `$NEW`:
+A function returning `trigger` can be used as a trigger. Read `$NEW` fields with
+`$NEW->col`, assign to them with the array-element form `$NEW['col'] = e`, and
+return `$NEW`:
 
 ```sql
 CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxphp AS $$
-$NEW->tag = "row {$NEW->id}";
+$NEW['tag'] = "row {$NEW->id}";
 return $NEW;
 $$;
 ```
 
-`$NEW`, `$OLD`, and the `TG_` variables are available. Assigning to a record
-field (`$NEW->col = e`) or an array element is supported.
+`$NEW`, `$OLD`, and the `TG_` variables are available. Read a record field with
+the arrow form (`$NEW->col`); assign to a field with the array-element form
+(`$NEW['col'] = e`). The arrow form is not an assignment target.
 
 ## Semantic differences
 
