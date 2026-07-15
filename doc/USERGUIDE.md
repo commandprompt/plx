@@ -2,9 +2,9 @@
 
 This guide shows how to write functions in the plx dialects. Each example is
 taken from the PL/pgSQL chapter of the PostgreSQL documentation and is shown in
-four forms: the plpgsql from the manual, the plxruby version, the plxphp version,
-and the plxjs version. Because plx transpiles to plpgsql, the plpgsql form is
-also what the plx versions produce and run.
+six forms: the plpgsql from the manual and then the plxruby, plxphp, plxjs,
+plxpython3, and plxcobol versions. Because plx transpiles to plpgsql, the plpgsql
+form is also what the plx versions produce and run.
 
 Install the extension first:
 
@@ -47,6 +47,23 @@ plxjs:
 ```sql
 CREATE FUNCTION sales_tax(subtotal real) RETURNS real LANGUAGE plxjs AS $$
 return subtotal * 0.06;
+$$;
+```
+
+plxpython3:
+
+```sql
+CREATE FUNCTION sales_tax(subtotal real) RETURNS real LANGUAGE plxpython3 AS $$
+return subtotal * 0.06
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION sales_tax(subtotal real) RETURNS real LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    GOBACK RETURNING SUBTOTAL * 0.06.
 $$;
 ```
 
@@ -119,6 +136,44 @@ return result;
 $$;
 ```
 
+plxpython3:
+
+```sql
+CREATE FUNCTION classify(number int) RETURNS text LANGUAGE plxpython3 AS $$
+result #:: text
+if number == 0:
+    result = "zero"
+elif number > 0:
+    result = "positive"
+elif number < 0:
+    result = "negative"
+else:
+    result = "NULL"
+return result
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION classify(number int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-RESULT PIC X(8).
+PROCEDURE DIVISION.
+    EVALUATE TRUE
+        WHEN NUMBER = 0
+            MOVE "zero" TO WS-RESULT
+        WHEN NUMBER > 0
+            MOVE "positive" TO WS-RESULT
+        WHEN NUMBER < 0
+            MOVE "negative" TO WS-RESULT
+        WHEN OTHER
+            MOVE "NULL" TO WS-RESULT
+    END-EVALUATE
+    GOBACK RETURNING WS-RESULT.
+$$;
+```
+
 Note: `==` lowers to SQL `=`. A comparison with a NULL argument is unknown, so
 none of the branches match and the `else` branch runs.
 
@@ -178,6 +233,32 @@ return total;
 $$;
 ```
 
+plxpython3:
+
+```sql
+CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxpython3 AS $$
+total = 0 #:: bigint
+for r in query(f"SELECT amount FROM orders WHERE grp = {g}"):
+    total = total + r.amount
+return total
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-TOTAL PIC 9(18) VALUE 0.
+01 WS-R TYPE RECORD.
+PROCEDURE DIVISION.
+    PERFORM WS-R OVER "SELECT amount FROM orders WHERE grp = $1" USING G
+        ADD WS-R.AMOUNT TO WS-TOTAL
+    END-PERFORM
+    GOBACK RETURNING WS-TOTAL.
+$$;
+```
+
 ## An integer FOR loop
 
 PL/pgSQL manual, "FOR (integer variant)".
@@ -233,6 +314,32 @@ return total;
 $$;
 ```
 
+plxpython3:
+
+```sql
+CREATE FUNCTION sum_to(n int) RETURNS bigint LANGUAGE plxpython3 AS $$
+total = 0 #:: bigint
+for i in range(1, n + 1):
+    total = total + i
+return total
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION sum_to(n int) RETURNS bigint LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-TOTAL PIC 9(18) VALUE 0.
+01 WS-I PIC 9(9).
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > N
+        ADD WS-I TO WS-TOTAL
+    END-PERFORM
+    GOBACK RETURNING WS-TOTAL.
+$$;
+```
+
 ## A set-returning function
 
 PL/pgSQL manual, "RETURN NEXT and RETURN QUERY".
@@ -280,6 +387,30 @@ for (let i = 1; i <= n; i++) {
   return_next(i * i);
 }
 return;
+$$;
+```
+
+plxpython3:
+
+```sql
+CREATE FUNCTION squares(n int) RETURNS SETOF int LANGUAGE plxpython3 AS $$
+for i in range(1, n + 1):
+    return_next(i * i)
+return
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION squares(n int) RETURNS SETOF int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(9).
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > N
+        RETURN-NEXT WS-I * WS-I
+    END-PERFORM
+    GOBACK.
 $$;
 ```
 
@@ -340,6 +471,32 @@ try {
 $$;
 ```
 
+plxpython3:
+
+```sql
+CREATE FUNCTION safe_divide(a int, b int) RETURNS int LANGUAGE plxpython3 AS $$
+try:
+    return a / b
+except Exception as e:
+    raise("notice", f"caught: {e.message}")
+    return -1
+$$;
+```
+
+plxcobol:
+
+```sql
+CREATE FUNCTION safe_divide(a int, b int) RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    BEGIN-TRY
+        GOBACK RETURNING A / B
+    WHEN DIVISION-BY-ZERO
+        DISPLAY "caught division by zero"
+        GOBACK RETURNING -1
+    END-TRY.
+$$;
+```
+
 ## Raising errors
 
 PL/pgSQL manual, "Errors and messages".
@@ -366,6 +523,18 @@ plxjs:
 
 ```sql
 throw new Error(`Nonexistent ID --> ${user_id}`);
+```
+
+plxpython3:
+
+```sql
+raise ValueError(f"Nonexistent ID --> {user_id}")
+```
+
+plxcobol:
+
+```sql
+RAISE EXCEPTION concat("Nonexistent ID --> ", USER-ID) SQLSTATE "P0002"
 ```
 
 ## Anonymous code blocks
@@ -396,6 +565,28 @@ for (let i = 1; i <= 3; i++) { raise("notice", `row ${i}`); }
 $$;
 ```
 
+plxpython3:
+
+```sql
+DO LANGUAGE plxpython3 $$
+for i in range(1, 4):
+    raise("notice", f"row {i}")
+$$;
+```
+
+plxcobol:
+
+```sql
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(9).
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 3
+        DISPLAY "row " WS-I
+    END-PERFORM.
+$$;
+```
+
 ## Trust and security
 
 The plx languages are declared `TRUSTED`. This is correct for the following
@@ -423,8 +614,9 @@ Two points to keep in mind:
 ## Further reading
 
 - `README.md`: build and install.
-- Per-dialect chapters: `doc/plxruby.md`, `doc/plxphp.md`, `doc/plxjs.md`
-  (full syntax, supported and rejected constructs, semantic differences).
+- Per-dialect chapters: `doc/plxruby.md`, `doc/plxphp.md`, `doc/plxjs.md`,
+  `doc/plxpython3.md`, `doc/plxcobol.md` (full syntax, supported and rejected
+  constructs, semantic differences).
 - `doc/PARITY.md`: the plpgsql construct parity matrix.
 - `doc/ARCHITECTURE.md`: how plx maps to the plpgsql engine.
 - `doc/TRANSPILER.md`: transpiler specification.
