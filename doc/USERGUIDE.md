@@ -1,10 +1,15 @@
 # plx User Guide
 
 This guide shows how to write functions in the plx dialects. Each example is
-taken from the PL/pgSQL chapter of the PostgreSQL documentation and is shown in
-six forms: the plpgsql from the manual and then the plxruby, plxphp, plxjs,
-plxpython3, and plxcobol versions. Because plx transpiles to plpgsql, the plpgsql
-form is also what the plx versions produce and run.
+taken from the PL/pgSQL chapter of the PostgreSQL documentation and is shown as
+the plpgsql from the manual and then the plxruby, plxphp, plxjs, plxpython3, and
+plxcobol versions. Because plx transpiles to plpgsql, the plpgsql form is also
+what the plx versions produce and run.
+
+The SQL-derived dialects that restructure their input rather than rename
+keywords — plxplsql (Oracle PL/SQL), plxts (TypeScript), and plxtsql
+(Transact-SQL) — are covered in full in their own chapters (see Further reading);
+each produces the same plpgsql shown here.
 
 Install the extension first:
 
@@ -615,8 +620,9 @@ Two points to keep in mind:
 
 - `README.md`: build and install.
 - Per-dialect chapters: `doc/plxruby.md`, `doc/plxphp.md`, `doc/plxjs.md`,
-  `doc/plxpython3.md`, `doc/plxcobol.md` (full syntax, supported and rejected
-  constructs, semantic differences).
+  `doc/plxpython3.md`, `doc/plxcobol.md`, `doc/plxplsql.md`, `doc/plxts.md`,
+  `doc/plxtsql.md` (full syntax, supported and rejected constructs, semantic
+  differences).
 - `doc/PARITY.md`: the plpgsql construct parity matrix.
 - `doc/ARCHITECTURE.md`: how plx maps to the plpgsql engine.
 - `doc/TRANSPILER.md`: transpiler specification.

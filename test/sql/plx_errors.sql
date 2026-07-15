@@ -159,3 +159,29 @@ CREATE FUNCTION e_cob_str() RETURNS void LANGUAGE plxcobol AS $$
 PROCEDURE DIVISION.
     DISPLAY "unterminated
 $$;
+
+-- plxtsql: the @@ROWCOUNT global variable is not supported
+CREATE FUNCTION e_tq_rowcount() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @n int;
+  SET @n = @@ROWCOUNT;
+  RETURN @n;
+$$;
+
+-- plxtsql: DECLARE of a TABLE variable is not supported
+CREATE FUNCTION e_tq_tablevar() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @t TABLE (id int);
+  RETURN 1;
+$$;
+
+-- plxtsql: transaction control is not allowed in a function
+CREATE FUNCTION e_tq_commit() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @x int = 1;
+  COMMIT;
+  RETURN @x;
+$$;
+
+-- plxtsql: EXEC of a stored procedure (not dynamic SQL) is not supported
+CREATE FUNCTION e_tq_execproc() RETURNS int LANGUAGE plxtsql AS $$
+  EXEC some_procedure;
+  RETURN 1;
+$$;

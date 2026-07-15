@@ -171,3 +171,21 @@ CREATE TRUSTED LANGUAGE plxts
 	VALIDATOR plx_ts_validator;
 
 COMMENT ON LANGUAGE plxts IS 'plx TypeScript dialect (transpiles to plpgsql)';
+
+/* T-SQL dialect (Transact-SQL) validator + inline handler live in plx.so */
+CREATE FUNCTION plx_tsql_validator(oid)
+	RETURNS void
+	AS '$libdir/plx', 'plx_tsql_validator'
+	LANGUAGE C STRICT;
+
+CREATE FUNCTION plx_tsql_inline_handler(internal)
+	RETURNS void
+	AS '$libdir/plx', 'plx_tsql_inline_handler'
+	LANGUAGE C;
+
+CREATE TRUSTED LANGUAGE plxtsql
+	HANDLER plx_call_handler
+	INLINE plx_tsql_inline_handler
+	VALIDATOR plx_tsql_validator;
+
+COMMENT ON LANGUAGE plxtsql IS 'plx Transact-SQL (SQL Server) dialect (transpiles to plpgsql)';

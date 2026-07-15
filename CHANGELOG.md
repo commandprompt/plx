@@ -20,6 +20,17 @@ version in `plx.control` (currently `1.0`).
   annotations, which map TypeScript types (`number`, `string`, `boolean`,
   `bigint`, `T[]`, `T | null`) to SQL types and otherwise accept a SQL type name
   verbatim. See [doc/plxts.md](doc/plxts.md).
+- `plxtsql`, a Transact-SQL (SQL Server) dialect. T-SQL is not Ada-descended, so
+  plxtsql is a restructuring front end with its own tokenizer and parser: it
+  hoists `@`-variables and inline `DECLARE` into the plpgsql `DECLARE` block,
+  rewrites `SET`/`SELECT @x =` assignments, turns `IF`/`WHILE ... BEGIN ... END`
+  into `THEN ... END IF` / `LOOP ... END LOOP`, maps `TRY`/`CATCH` to an
+  `EXCEPTION` block, and translates the type and function libraries (`INT`,
+  `NVARCHAR(MAX)`, `DATETIME`, `ISNULL`, `IIF`, `CONVERT`, `LEN`, `GETDATE`,
+  `PRINT`, `RAISERROR`, `THROW`, ...). See [doc/plxtsql.md](doc/plxtsql.md).
+- `plxcobol` tables: `OCCURS n` maps a `WORKING-STORAGE` item to a PostgreSQL
+  array, with `WS-ARR(i)` subscripts as both lvalues and expressions and
+  `PERFORM v OVER ARRAY` iteration.
 - `doc/DEBUGGING.md`: correlating runtime errors to your dialect source, and a
   `plx_source()` helper that recovers the embedded original body.
 

@@ -183,3 +183,33 @@ PROCEDURE DIVISION.
 $$;
 ERROR:  plxcobol: unterminated string literal
 DETAIL:  at plxcobol source line 4
+-- plxtsql: the @@ROWCOUNT global variable is not supported
+CREATE FUNCTION e_tq_rowcount() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @n int;
+  SET @n = @@ROWCOUNT;
+  RETURN @n;
+$$;
+ERROR:  plxtsql: the T-SQL global variable @@ROWCOUNT is not supported
+DETAIL:  at plxtsql source line 3
+-- plxtsql: DECLARE of a TABLE variable is not supported
+CREATE FUNCTION e_tq_tablevar() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @t TABLE (id int);
+  RETURN 1;
+$$;
+ERROR:  plxtsql: DECLARE of a TABLE variable or CURSOR is not supported
+DETAIL:  at plxtsql source line 2
+-- plxtsql: transaction control is not allowed in a function
+CREATE FUNCTION e_tq_commit() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @x int = 1;
+  COMMIT;
+  RETURN @x;
+$$;
+ERROR:  plxtsql: transaction control is not allowed in a function
+DETAIL:  at plxtsql source line 3
+-- plxtsql: EXEC of a stored procedure (not dynamic SQL) is not supported
+CREATE FUNCTION e_tq_execproc() RETURNS int LANGUAGE plxtsql AS $$
+  EXEC some_procedure;
+  RETURN 1;
+$$;
+ERROR:  plxtsql: EXEC of a stored procedure is not supported; use EXEC('<sql>') for dynamic SQL
+DETAIL:  at plxtsql source line 2

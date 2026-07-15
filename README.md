@@ -4,8 +4,8 @@
 
 <p align="center">
   <b>Write PostgreSQL functions in the language you already know.</b><br>
-  Ruby, PHP, JavaScript, TypeScript, Python, COBOL, or Oracle PL/SQL syntax,
-  compiled to plpgsql at <code>CREATE FUNCTION</code> time.
+  Ruby, PHP, JavaScript, TypeScript, Python, COBOL, Oracle PL/SQL, or
+  Transact-SQL syntax, compiled to plpgsql at <code>CREATE FUNCTION</code> time.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 ## What plx is
 
 plx is a PostgreSQL extension that lets you write stored functions and triggers
-in a Ruby, PHP, JavaScript, Python, or COBOL dialect. When you run `CREATE FUNCTION`,
+in the dialect you already know (the current set is listed below). When you run `CREATE FUNCTION`,
 plx transpiles the body to plpgsql and stores that plpgsql in `pg_proc.prosrc`.
 At run time the function is executed by PostgreSQL's own plpgsql interpreter.
 There is no separate language runtime loaded into the backend, and nothing new to
@@ -41,6 +41,7 @@ dialects available today are:
 - `plxcobol`: a COBOL dialect (ISO/IEC 1989:2023). See [doc/plxcobol.md](doc/plxcobol.md).
 - `plxplsql`: an Oracle PL/SQL dialect. See [doc/plxplsql.md](doc/plxplsql.md).
 - `plxts`: a TypeScript dialect (plxjs plus type annotations). See [doc/plxts.md](doc/plxts.md).
+- `plxtsql`: a Transact-SQL (SQL Server) dialect. See [doc/plxtsql.md](doc/plxtsql.md).
 
 Every plpgsql statement type is reachable from every dialect. See
 [doc/PARITY.md](doc/PARITY.md) for the construct matrix. The language names carry
@@ -190,8 +191,8 @@ CREATE EXTENSION plx;
 - Per-dialect chapters: [plxruby](doc/plxruby.md), [plxphp](doc/plxphp.md),
   [plxjs](doc/plxjs.md), [plxpython3](doc/plxpython3.md),
   [plxcobol](doc/plxcobol.md), [plxplsql](doc/plxplsql.md),
-  [plxts](doc/plxts.md). Each covers the full syntax, supported constructs with
-  examples, semantic differences, and what is rejected.
+  [plxts](doc/plxts.md), [plxtsql](doc/plxtsql.md). Each covers the full syntax,
+  supported constructs with examples, semantic differences, and what is rejected.
 - [doc/PARITY.md](doc/PARITY.md): the plpgsql construct parity matrix.
 - [doc/COMPATIBILITY.md](doc/COMPATIBILITY.md): supported PostgreSQL versions.
 - [doc/USERGUIDE.md](doc/USERGUIDE.md): examples from the PL/pgSQL manual shown in
