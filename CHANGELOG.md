@@ -4,6 +4,17 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Added
+
+- plxtsql: a trigger can now assign to `NEW` fields with `SET NEW.col = e`, which
+  lowers to `NEW.col := e`, so a Transact-SQL trigger can rewrite the row and not
+  only validate it. A `SET` whose target is a qualified name with a top-level `=`
+  is an assignment; `SET NOCOUNT ON` and other session options are still ignored.
+  Qualified names also emit without a stray space around the dot. Covered by a new
+  plxtsql trigger regression test.
+
 ## [1.2.2] - 2026-07-15
 
 Code-only patch release (no catalog changes). Upgrade with

@@ -151,10 +151,6 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`).
 - Calling a stored procedure by name; only `EXEC('<sql>')` dynamic SQL.
 - `+` for string concatenation (use `||` or `CONCAT(...)`).
-- Mutating a trigger's `NEW` fields. `SET NEW.col = e` is read as a session
-  option, and `NEW.col := e` does not parse, so a plxtsql trigger can validate or
-  reject a row (for example with `THROW`) but not rewrite it. Write a trigger that
-  rewrites `NEW` in another dialect.
 
 ## Working around a gap
 

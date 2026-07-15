@@ -166,11 +166,27 @@ find statement boundaries, so a missing `;` between two statements can cause the
 to be read as one. Control-flow blocks (`IF`, `WHILE`, `BEGIN ... END`,
 `TRY`/`CATCH`) are self-delimiting and do not require a trailing `;`.
 
+## Triggers
+
+A function that returns `trigger` can back a trigger. Read the row through `NEW`
+(and `OLD` on updates and deletes), and assign to a field with `SET NEW.col = e`,
+which becomes `NEW.col := e`. Return `NEW`.
+
+```sql
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxtsql AS $$
+  SET NEW.total = NEW.qty * NEW.price;
+  SET NEW.tag = 'row ' || CONVERT(varchar, NEW.id);
+  RETURN NEW;
+$$;
+```
+
 ## Session SET options
 
 Statements such as `SET NOCOUNT ON` and `SET XACT_ABORT ON` are recognized and
 ignored (they configure the SQL Server session and have no PostgreSQL
-equivalent). `SET @variable = ...` is always an assignment.
+equivalent). `SET @variable = ...` and `SET NEW.col = ...` are always
+assignments; a `SET` with no qualified target and no assignment is treated as a
+session option.
 
 ## Not supported
 

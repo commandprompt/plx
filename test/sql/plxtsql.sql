@@ -133,3 +133,17 @@ $$;
 SELECT tq_insert('first') AS should_be_1, tq_insert('second') AS should_be_2;
 
 DROP TABLE tq_log CASCADE;
+
+-- trigger: mutate NEW fields with SET NEW.col = e (session options are ignored)
+CREATE TABLE tq_trg(id int, qty int, price numeric, total numeric, tag text);
+CREATE FUNCTION tq_stamp() RETURNS trigger LANGUAGE plxtsql AS $$
+  SET NOCOUNT ON;
+  SET NEW.total = NEW.qty * NEW.price;
+  SET NEW.tag = 'row ' || CONVERT(varchar, NEW.id);
+  RETURN NEW;
+$$;
+CREATE TRIGGER tq_trg_ins BEFORE INSERT ON tq_trg
+  FOR EACH ROW EXECUTE FUNCTION tq_stamp();
+INSERT INTO tq_trg(id, qty, price) VALUES (7, 3, 10);
+SELECT id, total, tag FROM tq_trg;
+DROP TABLE tq_trg CASCADE;

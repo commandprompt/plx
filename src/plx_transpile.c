@@ -7730,7 +7730,9 @@ tq_is_stmt_kw(TqTok *tk)
 static void
 tq_sp(StringInfo out)
 {
-	if (out->len && out->data[out->len - 1] != ' ' && out->data[out->len - 1] != '(')
+	char		last = out->len ? out->data[out->len - 1] : ' ';
+
+	if (out->len && last != ' ' && last != '(' && last != '.')
 		appendStringInfoChar(out, ' ');
 }
 
@@ -8305,8 +8307,47 @@ tq_set(Tq *tq, int ind)
 	v = tq_cur(tq);
 	if (v->kind != TQ_VAR)
 	{
-		/* SET NOCOUNT ON, SET XACT_ABORT ON, ... : a session option, no-op */
-		e1 = tq_value_end(tq, tq->pos);
+		/*
+		 * "SET <qualified> = e" assigns to a field, e.g. SET NEW.col = e in a
+		 * trigger; emit "target := e". A session option (SET NOCOUNT ON, SET
+		 * XACT_ABORT ON, ...) has no top-level '=' with a qualified target and
+		 * is ignored.
+		 */
+		int			i,
+					depth = 0,
+					eq = -1;
+		bool		qualified = false;
+
+		e0 = tq->pos;
+		e1 = tq_value_end(tq, e0);
+		for (i = e0; i < e1; i++)
+		{
+			TqTok	   *t = &tq->t[i];
+
+			if (t->kind == TQ_LP)
+				depth++;
+			else if (t->kind == TQ_RP)
+			{
+				if (depth > 0)
+					depth--;
+			}
+			else if (depth == 0 && eq < 0)
+			{
+				if (t->kind == TQ_DOT)
+					qualified = true;
+				else if (t->kind == TQ_OP && t->len == 1 && t->s[0] == '=')
+					eq = i;
+			}
+		}
+		if (eq > e0 && qualified)
+		{
+			indent(&tq->cx->out, ind);
+			tq_emit_range(tq, e0, eq, &tq->cx->out);
+			appendStringInfoString(&tq->cx->out, " :=");
+			tq_emit_range(tq, eq + 1, e1, &tq->cx->out);
+			appendStringInfoString(&tq->cx->out, ";\n");
+		}
+		/* otherwise a session option: ignored */
 		tq->pos = e1;
 		tq_eat_semi(tq);
 		return;

@@ -167,31 +167,33 @@ SELECT safe_divide(10, 2), safe_divide(10, 0);
 
 ## Trigger function
 
-A trigger function returns `trigger` and reads the row through `NEW` (and `OLD` on updates and deletes). This `BEFORE INSERT` trigger validates the incoming row and raises with `THROW` when the amount is negative; `RETURN NEW` lets a valid row through unchanged.
+A trigger function returns `trigger` and reads the row through `NEW` (and `OLD` on updates and deletes). Assign to a field with `SET NEW.col = e`, which becomes `NEW.col := e`. This `BEFORE INSERT` trigger validates the incoming row with `THROW`, then derives a fee and a tag before the row is stored.
 
 ```sql
-CREATE TABLE deposits (id int, amount numeric);
+CREATE TABLE deposits (id int, amount numeric, fee numeric, tag text);
 
-CREATE FUNCTION deposits_check() RETURNS trigger LANGUAGE plxtsql AS $$
+CREATE FUNCTION deposits_stamp() RETURNS trigger LANGUAGE plxtsql AS $$
   IF NEW.amount < 0
     THROW 50001, 'amount cannot be negative', 1;
+  SET NEW.fee = NEW.amount * 0.02;
+  SET NEW.tag = 'deposit ' || CONVERT(varchar, NEW.id);
   RETURN NEW;
 $$;
 
-CREATE TRIGGER trg_deposits_check BEFORE INSERT ON deposits
-  FOR EACH ROW EXECUTE FUNCTION deposits_check();
+CREATE TRIGGER trg_deposits BEFORE INSERT ON deposits
+  FOR EACH ROW EXECUTE FUNCTION deposits_stamp();
 ```
 
 ```sql
 INSERT INTO deposits (id, amount) VALUES (1, 100), (2, 50);
-SELECT * FROM deposits ORDER BY id;
+SELECT id, amount, fee, tag FROM deposits ORDER BY id;
 ```
 
 ```
- id | amount 
-----+--------
-  1 |    100
-  2 |     50
+ id | amount | fee  |    tag
+----+--------+------+-----------
+  1 |    100 | 2.00 | deposit 1
+  2 |     50 | 1.00 | deposit 2
 ```
 
 A row that fails the check is rejected:
