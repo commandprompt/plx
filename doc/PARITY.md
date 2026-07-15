@@ -109,5 +109,15 @@ provides the nested `BEGIN/EXCEPTION/END` structure sharing the function scope.
   dialect. `NEW`, `OLD`, and the `TG_` variables are available, and assignment to
   a record field (`NEW.col = e`) or array element is supported (the
   qualified/subscripted lvalue form; a bare `NEW = e` is not).
+- Function forms (verified across dialects): `OUT` and `INOUT` parameters work;
+  assign to the parameter by name. `RETURNS TABLE(...)` works, but the table
+  columns are `OUT` parameters, so emit a row with a bare `emit` /
+  `return_next` (no argument); the argument form is only for `RETURNS SETOF
+  <scalar>`. `SELECT INTO` with the strict fetch (`fetch_one!`) raises on zero or
+  more than one row; the non-strict `fetch_one` returns all-NULL on no row.
+  `GET DIAGNOSTICS ROW_COUNT` is exposed as `row_count()`; stacked-diagnostics
+  fields are exposed via the exception accessors. Not surfaced yet: `SCROLL`
+  cursors and the `GET DIAGNOSTICS` fields other than `ROW_COUNT`
+  (`PG_CONTEXT`, `PG_ROUTINE_OID`).
 
 This file is updated as constructs land.

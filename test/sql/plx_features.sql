@@ -99,3 +99,35 @@ CREATE FUNCTION f_interp_py(x int) RETURNS text LANGUAGE plxpython3 AS $$ return
 SELECT f_interp_rb(NULL) AS rb, f_interp_php(NULL) AS php,
        f_interp_js(NULL) AS js, f_interp_py(NULL) AS py;
 SELECT f_interp_rb(7) AS rb7;
+
+-- OUT / INOUT parameters (audit): supported across dialects
+CREATE FUNCTION f_out(a int, OUT b int, OUT c int) LANGUAGE plxruby AS $$
+b = a * 2
+c = a + 1
+$$;
+SELECT b, c FROM f_out(5);
+CREATE FUNCTION f_inout(INOUT x int) LANGUAGE plxphp AS $$ $x = $x + 100; $$;
+SELECT f_inout(1);
+
+-- RETURNS TABLE: the table columns are OUT parameters, so emit a row with a bare
+-- emit / return_next (an argument form is rejected by plpgsql here)
+CREATE FUNCTION f_table(n int) RETURNS TABLE(k int, sq int) LANGUAGE plxruby AS $$
+for i in 1..n
+  k = i
+  sq = i * i
+  emit
+end
+return
+$$;
+SELECT string_agg(k || ':' || sq, ',') FROM f_table(3);
+
+-- SELECT INTO with fetch_one! is STRICT (raises when no row is returned)
+CREATE FUNCTION f_strict() RETURNS int LANGUAGE plxruby AS $$
+begin
+  r = fetch_one!("SELECT 1 AS a WHERE false")
+  return r.a
+rescue => e
+  return -1
+end
+$$;
+SELECT f_strict() AS strict_no_row;

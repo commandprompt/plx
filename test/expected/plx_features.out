@@ -159,3 +159,52 @@ SELECT f_interp_rb(7) AS rb7;
  [7]
 (1 row)
 
+-- OUT / INOUT parameters (audit): supported across dialects
+CREATE FUNCTION f_out(a int, OUT b int, OUT c int) LANGUAGE plxruby AS $$
+b = a * 2
+c = a + 1
+$$;
+SELECT b, c FROM f_out(5);
+ b  | c 
+----+---
+ 10 | 6
+(1 row)
+
+CREATE FUNCTION f_inout(INOUT x int) LANGUAGE plxphp AS $$ $x = $x + 100; $$;
+SELECT f_inout(1);
+ f_inout 
+---------
+     101
+(1 row)
+
+-- RETURNS TABLE: the table columns are OUT parameters, so emit a row with a bare
+-- emit / return_next (an argument form is rejected by plpgsql here)
+CREATE FUNCTION f_table(n int) RETURNS TABLE(k int, sq int) LANGUAGE plxruby AS $$
+for i in 1..n
+  k = i
+  sq = i * i
+  emit
+end
+return
+$$;
+SELECT string_agg(k || ':' || sq, ',') FROM f_table(3);
+ string_agg  
+-------------
+ 1:1,2:4,3:9
+(1 row)
+
+-- SELECT INTO with fetch_one! is STRICT (raises when no row is returned)
+CREATE FUNCTION f_strict() RETURNS int LANGUAGE plxruby AS $$
+begin
+  r = fetch_one!("SELECT 1 AS a WHERE false")
+  return r.a
+rescue => e
+  return -1
+end
+$$;
+SELECT f_strict() AS strict_no_row;
+ strict_no_row 
+---------------
+            -1
+(1 row)
+
