@@ -4,7 +4,7 @@
    "description": "plx is a dialect-pluggable procedural language for PostgreSQL. A function body written in a Ruby, PHP, JavaScript, Python, or COBOL dialect is transpiled to plpgsql at CREATE FUNCTION time and stored in pg_proc.prosrc, then executed by the standard plpgsql interpreter. There is no separate language runtime in the backend, the generated plpgsql is visible in the catalog, and every plpgsql construct is reachable from every dialect. plx also ships plx_strbuild, an expanded-object string builder with amortized-O(1) append that fixes plpgsql's quadratic in-loop string concatenation.",
    "version": "1.1.1",
    "maintainer": [
-      "Command Prompt, Inc. <offgridwithjd@gmail.com>"
+      "Command Prompt, Inc. <pgxn@commandprompt.com>"
    ],
    "license": "mit",
    "provides": {
