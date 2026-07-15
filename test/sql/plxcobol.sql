@@ -60,6 +60,60 @@ PROCEDURE DIVISION.
 $$;
 SELECT cob_calc(12, 3);
 
+-- arithmetic: multi-addend ADD ... TO (in place) and SUBTRACT ... FROM
+CREATE FUNCTION cob_addto() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-T PIC S9(9) VALUE 100.
+PROCEDURE DIVISION.
+    ADD 1 2 3 TO WS-T
+    SUBTRACT 6 FROM WS-T
+    GOBACK RETURNING WS-T.
+$$;
+SELECT cob_addto();
+
+-- relational word forms and figurative constants
+CREATE FUNCTION cob_relwords(a int, b int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(4).
+PROCEDURE DIVISION.
+    IF A IS GREATER THAN OR EQUAL TO B
+        MOVE "ge" TO WS-R
+    ELSE
+        IF A IS NOT EQUAL TO B
+            MOVE "lt" TO WS-R
+        END-IF
+    END-IF
+    GOBACK RETURNING WS-R.
+$$;
+SELECT cob_relwords(5, 5) AS ge, cob_relwords(2, 9) AS lt;
+
+CREATE FUNCTION cob_figs(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-C PIC 9(9) VALUE ZERO.
+01 WS-S PIC X(8) VALUE SPACE.
+PROCEDURE DIVISION.
+    IF N IS EQUAL TO ZERO
+        MOVE "zero" TO WS-S
+    END-IF
+    GOBACK RETURNING WS-S.
+$$;
+SELECT cob_figs(0) AS zero;
+
+-- MOVE to multiple receivers, PERFORM n TIMES
+CREATE FUNCTION cob_multimove(n int) RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(9).
+01 WS-B PIC 9(9).
+01 WS-I PIC 9(9) VALUE 0.
+PROCEDURE DIVISION.
+    MOVE N TO WS-A WS-B
+    PERFORM WS-A TIMES
+        ADD 1 TO WS-I
+    END-PERFORM
+    GOBACK RETURNING WS-I + WS-B.
+$$;
+SELECT cob_multimove(5) AS should_be_10;
+
 -- EVALUATE (simple) with stacked WHEN and WHEN OTHER
 CREATE FUNCTION cob_classify(n int) RETURNS text LANGUAGE plxcobol AS $$
 WORKING-STORAGE SECTION.

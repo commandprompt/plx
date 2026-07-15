@@ -109,3 +109,53 @@ x = 0
 x << 2
 return x
 $$;
+
+-- plxcobol: PERFORM VARYING truncated at UNTIL (must error cleanly, not crash)
+CREATE FUNCTION e_cob_varying() RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL
+$$;
+
+-- plxcobol: OCCURS (arrays) not supported in WORKING-STORAGE
+CREATE FUNCTION e_cob_occurs() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-T PIC 9(9) OCCURS 5 TIMES.
+PROCEDURE DIVISION.
+    GOBACK RETURNING 1.
+$$;
+
+-- plxcobol: data item with no PIC/TYPE/CONSTANT
+CREATE FUNCTION e_cob_notype() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-X.
+PROCEDURE DIVISION.
+    GOBACK RETURNING 1.
+$$;
+
+-- plxcobol: out-of-line PERFORM of a paragraph is not supported
+CREATE FUNCTION e_cob_para() RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    PERFORM SOME-PARAGRAPH
+    GOBACK RETURNING 1.
+$$;
+
+-- plxcobol: EXIT without PERFORM
+CREATE FUNCTION e_cob_exit() RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    EXIT
+    GOBACK RETURNING 1.
+$$;
+
+-- plxcobol: missing END-IF scope terminator
+CREATE FUNCTION e_cob_endif() RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    IF 1 = 1
+        MOVE 2 TO WS-X
+    GOBACK RETURNING 1.
+$$;
+
+-- plxcobol: unterminated string literal
+CREATE FUNCTION e_cob_str() RETURNS void LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    DISPLAY "unterminated
+$$;

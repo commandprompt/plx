@@ -4471,6 +4471,7 @@ cob_lex(Cb *cb, const char *body)
 		{
 			char		q = *p;
 			const char *st = p;
+			bool		closed = false;
 
 			p++;
 			while (p < end)
@@ -4483,12 +4484,15 @@ cob_lex(Cb *cb, const char *body)
 						continue;
 					}
 					p++;
+					closed = true;
 					break;
 				}
 				if (*p == '\n')
 					line++;
 				p++;
 			}
+			if (!closed)
+				plx_err(cb->cx, line, "unterminated string literal");
 			CBPUSH(CB_STR, st, (int) (p - st));
 			continue;
 		}
@@ -4801,7 +4805,7 @@ cob_emit_range(Cb *cb, int a, int b, StringInfo out)
 				i++;
 				if (i < b && cob_ci(&t[i], "THAN"))
 					i++;
-				if (i + 2 < b && cob_ci(&t[i], "OR") &&
+				if (i + 1 < b && cob_ci(&t[i], "OR") &&
 					cob_ci(&t[i + 1], "EQUAL"))
 				{
 					i += 2;
@@ -4958,7 +4962,11 @@ cob_pic_repeat(const char *p, int len, int *ip)
 	{
 		i++;
 		while (i < len && p[i] >= '0' && p[i] <= '9')
+		{
 			n = n * 10 + (p[i++] - '0');
+			if (n > 1000000)			/* clamp: no real type is this wide */
+				n = 1000000;
+		}
 		if (i < len && p[i] == ')')
 			i++;
 		*ip = i;
@@ -5281,74 +5289,124 @@ cob_compute(Cb *cb, int ind)
 	}
 }
 
-/* ADD / SUBTRACT / MULTIPLY / DIVIDE basic forms */
+/*
+ * ADD / SUBTRACT / MULTIPLY / DIVIDE.
+ *   ADD a b ... TO recv [GIVING g]        recv|g := recv + (a+b+...)
+ *   ADD a b ... GIVING g                  g := (a+b+...)
+ *   SUBTRACT a b ... FROM recv [GIVING g] recv|g := recv - (a+b+...)
+ *   MULTIPLY a BY recv [GIVING g]         recv|g := recv * a
+ *   DIVIDE a INTO recv [GIVING g]         recv|g := recv / a
+ *   DIVIDE a BY b GIVING g                g := a / b
+ */
 static void
 cob_arith(Cb *cb, int ind)
 {
 	CbTok	   *verb = cob_cur(cb);
-	char	   *src,
-			   *recv,
+	char	   *recv,
 			   *giv = NULL;
-	const char *op;
 
 	cb->pos++;
-	src = cob_operand(cb);
-	if (!src)
-		cob_err(cb, "arithmetic verb requires an operand");
 
-	if (cob_ci(verb, "ADD"))
+	if (cob_ci(verb, "ADD") || cob_ci(verb, "SUBTRACT"))
 	{
-		op = "+";
-		cob_expect(cb, "TO");
-	}
-	else if (cob_ci(verb, "SUBTRACT"))
-	{
-		op = "-";
-		cob_expect(cb, "FROM");
-	}
-	else if (cob_ci(verb, "MULTIPLY"))
-	{
-		op = "*";
-		cob_expect(cb, "BY");
-	}
-	else						/* DIVIDE */
-	{
-		if (cob_ci(cob_cur(cb), "INTO"))
-			op = "/into";
-		else if (cob_ci(cob_cur(cb), "BY"))
-			op = "/by";
+		bool		is_add = cob_ci(verb, "ADD");
+		StringInfoData sum;
+		int			n = 0;
+
+		/* operand list until TO / FROM / GIVING (ADD/SUBTRACT take many) */
+		initStringInfo(&sum);
+		for (;;)
+		{
+			char	   *op;
+
+			if (cob_ci(cob_cur(cb), "TO") || cob_ci(cob_cur(cb), "FROM") ||
+				cob_ci(cob_cur(cb), "GIVING") || cob_value_stop(cb, NULL, 0))
+				break;
+			op = cob_operand(cb);
+			if (!op)
+				break;
+			if (n++)
+				appendStringInfoString(&sum, " + ");
+			appendStringInfo(&sum, "%s", op);
+		}
+		if (n == 0)
+			cob_err(cb, "arithmetic verb requires an operand");
+
+		if (cob_ci(cob_cur(cb), is_add ? "TO" : "FROM"))
+		{
+			cb->pos++;
+			recv = cob_operand(cb);
+			if (!recv)
+				cob_err(cb, "arithmetic verb requires a receiving field");
+			if (cob_ci(cob_cur(cb), "GIVING"))
+			{
+				cb->pos++;
+				giv = cob_operand(cb);
+				if (!giv)
+					cob_err(cb, "GIVING requires a receiving field");
+			}
+			indent(&cb->cx->out, ind);
+			appendStringInfo(&cb->cx->out, "%s := (%s %c (%s));\n",
+							 giv ? giv : recv, recv, is_add ? '+' : '-', sum.data);
+		}
+		else if (is_add && cob_ci(cob_cur(cb), "GIVING"))
+		{
+			cb->pos++;
+			giv = cob_operand(cb);
+			if (!giv)
+				cob_err(cb, "GIVING requires a receiving field");
+			indent(&cb->cx->out, ind);
+			appendStringInfo(&cb->cx->out, "%s := (%s);\n", giv, sum.data);
+		}
 		else
-			cob_err(cb, "DIVIDE requires INTO or BY");
-		cb->pos++;
+			cob_err(cb, is_add ? "ADD requires TO or GIVING"
+					: "SUBTRACT requires FROM");
+		return;
 	}
 
-	recv = cob_operand(cb);
-	if (!recv)
-		cob_err(cb, "arithmetic verb requires a receiving field");
-	if (cob_ci(cob_cur(cb), "GIVING"))
+	/* MULTIPLY / DIVIDE take a single source operand */
 	{
-		cb->pos++;
-		giv = cob_operand(cb);
-		if (!giv)
-			cob_err(cb, "GIVING requires a receiving field");
-	}
+		char	   *src = cob_operand(cb);
+		const char *op;
 
-	indent(&cb->cx->out, ind);
-	if (strcmp(op, "+") == 0)
-		appendStringInfo(&cb->cx->out, "%s := (%s + %s);\n", giv ? giv : recv,
-						 recv, src);
-	else if (strcmp(op, "-") == 0)
-		appendStringInfo(&cb->cx->out, "%s := (%s - %s);\n", giv ? giv : recv,
-						 recv, src);
-	else if (strcmp(op, "*") == 0)
-		appendStringInfo(&cb->cx->out, "%s := (%s * %s);\n", giv ? giv : recv,
-						 recv, src);
-	else if (strcmp(op, "/into") == 0)
-		appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n", giv ? giv : recv,
-						 recv, src);
-	else						/* /by : DIVIDE a BY b GIVING g -> g := a / b */
-		appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n", giv ? giv : recv,
-						 src, recv);
+		if (!src)
+			cob_err(cb, "arithmetic verb requires an operand");
+		if (cob_ci(verb, "MULTIPLY"))
+		{
+			op = "*";
+			cob_expect(cb, "BY");
+		}
+		else						/* DIVIDE */
+		{
+			if (cob_ci(cob_cur(cb), "INTO"))
+				op = "/into";
+			else if (cob_ci(cob_cur(cb), "BY"))
+				op = "/by";
+			else
+				cob_err(cb, "DIVIDE requires INTO or BY");
+			cb->pos++;
+		}
+		recv = cob_operand(cb);
+		if (!recv)
+			cob_err(cb, "arithmetic verb requires a receiving field");
+		if (cob_ci(cob_cur(cb), "GIVING"))
+		{
+			cb->pos++;
+			giv = cob_operand(cb);
+			if (!giv)
+				cob_err(cb, "GIVING requires a receiving field");
+		}
+		indent(&cb->cx->out, ind);
+		if (strcmp(op, "*") == 0)
+			appendStringInfo(&cb->cx->out, "%s := (%s * %s);\n",
+							 giv ? giv : recv, recv, src);
+		else if (strcmp(op, "/into") == 0)
+			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
+							 giv ? giv : recv, recv, src);
+		else					/* /by : DIVIDE a BY b GIVING g -> g := a / b */
+			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
+							 giv ? giv : recv, src, recv);
+	}
 }
 
 static void
@@ -5506,7 +5564,8 @@ cob_perform(Cb *cb, int ind)
 		{
 			char	   *bytrim = by.data;
 			CbTok	   *c0 = cob_cur(cb);
-			CbTok	   *c1 = &cb->t[cb->pos + 1];
+			/* c1 only valid when c0 is not EOF (EOF is the last token) */
+			CbTok	   *c1 = (c0->kind != CB_EOF) ? &cb->t[cb->pos + 1] : c0;
 			bool		gt = (c1->kind == CB_OP && c1->len == 1 && c1->s[0] == '>');
 			bool		ge = (c1->kind == CB_OP && c1->len == 2 &&
 							  c1->s[0] == '>' && c1->s[1] == '=');
