@@ -4,7 +4,11 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
-## [Unreleased]
+## [1.3.0] - 2026-07-15
+
+Trigger row mutation across dialects, plus the cookbook and limitations
+documentation set. Upgrade with `ALTER EXTENSION plx UPDATE TO '1.3.0'` after
+installing the new module (no catalog changes).
 
 ### Added
 
@@ -14,6 +18,13 @@ version in `plx.control` (currently `1.0`).
   is an assignment; `SET NOCOUNT ON` and other session options are still ignored.
   Qualified names also emit without a stray space around the dot. Covered by a new
   plxtsql trigger regression test.
+- A verified cookbook for each of the nine dialects (`doc/cookbook/`) and a
+  consolidated gaps-and-limitations page (`doc/LIMITATIONS.md`), both on the
+  documentation site.
+
+With the plxphp arrow assignment (1.2.2) and this plxtsql `SET NEW.col`, assigning
+to a trigger's `NEW` fields is supported across the dialects in the dialect's own
+idiom. See each dialect's cookbook trigger recipe.
 
 ## [1.2.2] - 2026-07-15
 
