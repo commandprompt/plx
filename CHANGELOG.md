@@ -4,7 +4,10 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
-## [Unreleased]
+## [1.2.1] - 2026-07-15
+
+Code-only patch release (no catalog changes). Upgrade with
+`ALTER EXTENSION plx UPDATE TO '1.2.1'` after installing the new module.
 
 ### Fixed
 
