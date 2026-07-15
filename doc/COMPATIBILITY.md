@@ -25,8 +25,8 @@ PostgreSQL 13 to 17 the builder produces correct results, but the append is
 O(n^2), the same as plain concatenation, because those versions only let the
 built-in array functions take a read-write expanded argument. The transpiler
 lowers to the builder on every version (the results are always correct); the
-speedup appears when running on PostgreSQL 18. See
-[../bench/BENCHMARKS.md](../bench/BENCHMARKS.md).
+speedup appears when running on PostgreSQL 18. See the
+[benchmarks](https://github.com/commandprompt/plx/blob/master/bench/BENCHMARKS.md).
 
 ## Why the version range holds
 

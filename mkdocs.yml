@@ -1,0 +1,77 @@
+site_name: plx
+site_description: Write PostgreSQL functions in the dialect you already know, compiled to plpgsql
+site_url: https://commandprompt.github.io/plx/
+repo_url: https://github.com/commandprompt/plx
+repo_name: commandprompt/plx
+edit_uri: edit/master/doc/
+copyright: Command Prompt, Inc.
+
+# The Markdown documentation already lives in doc/; use it as the site source.
+docs_dir: doc
+site_dir: site
+
+theme:
+  name: material
+  logo: plx-logo.svg
+  favicon: plx-logo.svg
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.sections
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+
+nav:
+  - Home: index.md
+  - User guide: USERGUIDE.md
+  - Dialects:
+      - Ruby (plxruby): plxruby.md
+      - PHP (plxphp): plxphp.md
+      - JavaScript (plxjs): plxjs.md
+      - TypeScript (plxts): plxts.md
+      - Python (plxpython3): plxpython3.md
+      - Go (plxgo): plxgo.md
+      - COBOL (plxcobol): plxcobol.md
+      - Oracle PL/SQL (plxplsql): plxplsql.md
+      - Transact-SQL (plxtsql): plxtsql.md
+  - Reference:
+      - Feature parity: PARITY.md
+      - Compatibility: COMPATIBILITY.md
+      - Architecture: ARCHITECTURE.md
+      - Transpiler: TRANSPILER.md
+      - Debugging: DEBUGGING.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/commandprompt/plx

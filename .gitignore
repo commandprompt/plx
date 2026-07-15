@@ -10,3 +10,6 @@ regression.out
 # editor
 *.swp
 *~
+
+# MkDocs build output
+site/
