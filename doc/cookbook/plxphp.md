@@ -158,13 +158,13 @@ NOTICE:  caught: division by zero
 
 ## Trigger function
 
-A `BEFORE INSERT` trigger fills in a derived column. Assign to a field with the array-element form `$NEW['col'] = ...` and return `$NEW`. The row variable is read with `$NEW->col`, here inside an interpolated string.
+A `BEFORE INSERT` trigger fills in a derived column. Assign to a field with the arrow form `$NEW->col = ...` (or the array-element form `$NEW['col'] = ...`) and return `$NEW`. Read a field with `$NEW->col`, here inside an interpolated string.
 
 ```php
 CREATE TABLE audit_item(id int, name text, tag text);
 
 CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plxphp AS $$
-$NEW['tag'] = "row {$NEW->id}";
+$NEW->tag = "row {$NEW->id}";
 return $NEW;
 $$;
 

@@ -84,9 +84,6 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and `+= K` steps.
 - `foreach` over a key/value pair (value iteration only).
 - `switch` fall-through (end each case with `break` or `return`).
-- Assigning to a trigger record field uses the array-element form
-  (`$NEW['col'] = e`); the arrow form `$NEW->col` reads a field but is not an
-  assignment target.
 
 ### plxjs ([chapter](plxjs.md))
 

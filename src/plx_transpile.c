@@ -2208,8 +2208,11 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		}
 	}
 
-	/* assignment:  IDENT (= | += | -= | *= | /= | %=) RHS [#:: T] */
-	if (t0->kind == T_IDENT && a + 1 < b && cx->t[a + 1].kind == T_OP)
+	/* assignment:  IDENT (= | += | -= | *= | /= | %=) RHS [#:: T].
+	 * A leading "->" (PHP object access, e.g. $NEW->col = e) is not a simple
+	 * assignment; fall through to the qualified-lvalue handler below. */
+	if (t0->kind == T_IDENT && a + 1 < b && cx->t[a + 1].kind == T_OP &&
+		!(cx->t[a + 1].len == 2 && cx->t[a + 1].s[0] == '-' && cx->t[a + 1].s[1] == '>'))
 	{
 		Tok		   *op = &cx->t[a + 1];
 		bool		compound = false;
@@ -2391,7 +2394,9 @@ emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			}
 		}
 		if (eq > a && eq + 1 < b && t0->kind == T_IDENT &&
-			(cx->t[a + 1].kind == T_DOT || cx->t[a + 1].kind == T_LBRACKET))
+			(cx->t[a + 1].kind == T_DOT || cx->t[a + 1].kind == T_LBRACKET ||
+			 (cx->t[a + 1].kind == T_OP && cx->t[a + 1].len == 2 &&
+			  cx->t[a + 1].s[0] == '-' && cx->t[a + 1].s[1] == '>')))
 		{
 			char	   *lhs = rw_range(cx, a, eq, false);
 			char	   *rhs = rw_range(cx, eq + 1, b, false);

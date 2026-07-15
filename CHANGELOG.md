@@ -4,6 +4,16 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Fixed
+
+- plxphp: assigning to a record field with the arrow form (`$NEW->col = e`, the
+  documented and idiomatic PHP spelling) raised "unsupported operator in
+  statement"; only the array-element form worked. The arrow lvalue now lowers to
+  `NEW.col := e`, so trigger functions can stamp `NEW` fields with `$NEW->col`.
+  Covered by a new plxphp trigger regression test.
+
 ## [1.2.1] - 2026-07-15
 
 Code-only patch release (no catalog changes). Upgrade with

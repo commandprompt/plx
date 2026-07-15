@@ -107,3 +107,16 @@ foreach ($a as $v) { $total = $total + $v; }
 return $total;
 $$;
 SELECT php_sumarr(ARRAY[5,5,5]);
+
+-- trigger: read and assign NEW fields via the -> arrow form
+CREATE TABLE php_trg(id int, qty int, price numeric, total numeric, tag text);
+CREATE FUNCTION php_stamp() RETURNS trigger LANGUAGE plxphp AS $$
+$NEW->total = $NEW->qty * $NEW->price;
+$NEW->tag = "row {$NEW->id}";
+return $NEW;
+$$;
+CREATE TRIGGER php_trg_ins BEFORE INSERT ON php_trg
+  FOR EACH ROW EXECUTE FUNCTION php_stamp();
+INSERT INTO php_trg(id, qty, price) VALUES (7, 3, 10);
+SELECT id, total, tag FROM php_trg;
+DROP TABLE php_trg CASCADE;
