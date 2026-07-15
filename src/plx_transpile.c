@@ -4710,10 +4710,47 @@ cob_sp(StringInfo out)
 		appendStringInfoChar(out, ' ');
 }
 
+/* index of the ')' matching the '(' at index lp, within [.,limit), or -1 */
+static int
+cob_match_lp(Cb *cb, int lp, int limit)
+{
+	int			depth = 0,
+				i;
+
+	for (i = lp; i < limit; i++)
+	{
+		if (cb->t[i].kind == CB_LP)
+			depth++;
+		else if (cb->t[i].kind == CB_RP)
+		{
+			depth--;
+			if (depth == 0)
+				return i;
+		}
+		else if (cb->t[i].kind == CB_EOF)
+			break;
+	}
+	return -1;
+}
+
+/* is `name` a declared array local (its plpgsql type ends with "[]")? */
+static bool
+cob_is_array(Cb *cb, const char *name)
+{
+	PlxLocal2  *l = local_find(cb->cx, name, strlen(name));
+	int			tl;
+
+	if (!l || !l->typ)
+		return false;
+	tl = (int) strlen(l->typ);
+	return tl >= 2 && l->typ[tl - 2] == '[' && l->typ[tl - 1] == ']';
+}
+
 /*
  * Emit tokens [a,b) as a SQL expression / condition. Handles COBOL relational
  * words (EQUAL TO, GREATER THAN [OR EQUAL TO], ...), NOT combinations, the IS
- * noise word, figurative constants, ** -> ^, and data-name mapping.
+ * noise word, figurative constants, ** -> ^, data-name mapping, and array
+ * subscripts (WS-ARR(I) -> ws_arr[i]).
  */
 static void
 cob_emit_range(Cb *cb, int a, int b, StringInfo out)
@@ -4829,9 +4866,27 @@ cob_emit_range(Cb *cb, int a, int b, StringInfo out)
 				i++;
 				continue;
 			}
-			/* ordinary data name */
+			/* ordinary data name, or an array subscript WS-ARR(I) -> ws_arr[i] */
 			cob_sp(out);
-			appendStringInfoString(out, cob_map(tk->s, tk->len));
+			{
+				char	   *nm = cob_map(tk->s, tk->len);
+
+				if (i + 1 < b && t[i + 1].kind == CB_LP && cob_is_array(cb, nm))
+				{
+					int			close = cob_match_lp(cb, i + 1, b);
+
+					if (close > 0 && close < b)
+					{
+						appendStringInfoString(out, nm);
+						appendStringInfoChar(out, '[');
+						cob_emit_range(cb, i + 2, close, out);
+						appendStringInfoChar(out, ']');
+						i = close + 1;
+						continue;
+					}
+				}
+				appendStringInfoString(out, nm);
+			}
 			i++;
 			continue;
 		}
@@ -5072,6 +5127,7 @@ cob_decl(Cb *cb)
 	char	   *mapped;
 	const char *usage = NULL;
 	int			ulen = 0;
+	bool		is_array = false;
 
 	/* level number */
 	if (cob_cur(cb)->kind != CB_NUM)
@@ -5208,13 +5264,29 @@ cob_decl(Cb *cb)
 			}
 		}
 		else if (cob_ci(tk, "OCCURS"))
-			cob_err(cb, "OCCURS (arrays) is not supported in WORKING-STORAGE");
+		{
+			/* OCCURS n [TIMES] -> the item is a PostgreSQL array of its element
+			 * type (the fixed bound is not enforced) */
+			cb->pos++;
+			if (cob_cur(cb)->kind != CB_NUM)
+				cob_err(cb, "OCCURS requires a count");
+			cb->pos++;
+			if (cob_ci(cob_cur(cb), "TIMES"))
+				cb->pos++;
+			is_array = true;
+		}
 		else
 			cob_err(cb, "unexpected clause in a WORKING-STORAGE entry");
 	}
 	if (cob_cur(cb)->kind == CB_PERIOD)
 		cb->pos++;
 
+	if (is_array)
+	{
+		if (!l->typ)
+			cob_err(cb, "an OCCURS item needs a PIC or TYPE for its element type");
+		l->typ = psprintf("%s[]", l->typ);
+	}
 	if (!l->typ && !l->is_record)
 		cob_err(cb, "data item needs a PIC, TYPE, or CONSTANT clause");
 }
@@ -5233,6 +5305,38 @@ cob_expect(Cb *cb, const char *w)
 	cb->pos++;
 }
 
+/* read a receiving field (a data name, or an array element WS-ARR(I)) as a
+ * plpgsql lvalue string, consuming its tokens; NULL if the current token is not
+ * a data name */
+static char *
+cob_target(Cb *cb)
+{
+	char	   *nm;
+
+	if (cob_cur(cb)->kind != CB_WORD)
+		return NULL;
+	nm = cob_map(cob_cur(cb)->s, cob_cur(cb)->len);
+	cb->pos++;
+	if (cob_cur(cb)->kind == CB_LP && cob_is_array(cb, nm))
+	{
+		int			lp = cb->pos;
+		int			close = cob_match_lp(cb, lp, cb->nt);
+
+		if (close > lp)
+		{
+			StringInfoData s;
+
+			initStringInfo(&s);
+			appendStringInfo(&s, "%s[", nm);
+			cob_emit_range(cb, lp + 1, close, &s);
+			appendStringInfoChar(&s, ']');
+			cb->pos = close + 1;
+			return s.data;
+		}
+	}
+	return nm;
+}
+
 static void
 cob_move(Cb *cb, int ind)
 {
@@ -5249,9 +5353,8 @@ cob_move(Cb *cb, int ind)
 	while (cob_cur(cb)->kind == CB_WORD && !cob_is_verb(cob_cur(cb)) &&
 		   !cob_is_close(cob_cur(cb)))
 	{
-		char	   *tgt = cob_map(cob_cur(cb)->s, cob_cur(cb)->len);
+		char	   *tgt = cob_target(cb);
 
-		cb->pos++;
 		indent(&cb->cx->out, ind);
 		appendStringInfo(&cb->cx->out, "%s := %s;\n", tgt, v.data);
 	}
@@ -5270,8 +5373,7 @@ cob_compute(Cb *cb, int ind)
 	{
 		if (ntg >= 16)
 			cob_err(cb, "too many COMPUTE receivers");
-		tgts[ntg++] = cob_map(cob_cur(cb)->s, cob_cur(cb)->len);
-		cb->pos++;
+		tgts[ntg++] = cob_target(cb);
 	}
 	if (ntg == 0)
 		cob_err(cb, "COMPUTE requires a receiving field");

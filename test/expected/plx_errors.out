@@ -133,15 +133,15 @@ PROCEDURE DIVISION.
 $$;
 ERROR:  plxcobol: expected END-PERFORM
 DETAIL:  at plxcobol source line 4
--- plxcobol: OCCURS (arrays) not supported in WORKING-STORAGE
+-- plxcobol: OCCURS without an element type (PIC/TYPE) is rejected
 CREATE FUNCTION e_cob_occurs() RETURNS int LANGUAGE plxcobol AS $$
 WORKING-STORAGE SECTION.
-01 WS-T PIC 9(9) OCCURS 5 TIMES.
+01 WS-T OCCURS 5 TIMES.
 PROCEDURE DIVISION.
     GOBACK RETURNING 1.
 $$;
-ERROR:  plxcobol: OCCURS (arrays) is not supported in WORKING-STORAGE
-DETAIL:  at plxcobol source line 3
+ERROR:  plxcobol: an OCCURS item needs a PIC or TYPE for its element type
+DETAIL:  at plxcobol source line 4
 -- plxcobol: data item with no PIC/TYPE/CONSTANT
 CREATE FUNCTION e_cob_notype() RETURNS int LANGUAGE plxcobol AS $$
 WORKING-STORAGE SECTION.

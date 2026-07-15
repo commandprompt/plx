@@ -175,6 +175,40 @@ PROCEDURE DIVISION.
 $$;
 SELECT cob_area(2);
 
+-- OCCURS: a table (array). Subscript WS-ARR(i) reads/writes the element.
+CREATE FUNCTION cob_occurs() RETURNS bigint LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
+01 WS-I PIC 9(9).
+01 WS-SUM PIC 9(18) VALUE 0.
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 5
+        COMPUTE WS-ARR(WS-I) = WS-I * WS-I
+    END-PERFORM
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 5
+        COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I)
+    END-PERFORM
+    GOBACK RETURNING WS-SUM.
+$$;
+SELECT cob_occurs() AS should_be_55;
+
+-- MOVE into an array element (varchar element type), and FOREACH over the array
+CREATE FUNCTION cob_occurs2() RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC X(4) OCCURS 3 TIMES.
+01 WS-V PIC X(4).
+01 WS-S PIC X(1) VALUE "".
+PROCEDURE DIVISION.
+    MOVE "ab" TO WS-A(1)
+    MOVE "cd" TO WS-A(2)
+    MOVE "ef" TO WS-A(3)
+    PERFORM WS-V OVER ARRAY WS-A
+        STRING-APPEND WS-V TO WS-S
+    END-PERFORM
+    GOBACK RETURNING WS-S.
+$$;
+SELECT cob_occurs2() AS should_be_abcdef;
+
 -- multi-argument SQL function calls in expressions (comma survives inside parens)
 CREATE FUNCTION cob_funcs(a int, b int, c int) RETURNS int LANGUAGE plxcobol AS $$
 WORKING-STORAGE SECTION.

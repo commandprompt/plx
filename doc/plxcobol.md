@@ -76,6 +76,23 @@ A COBOL 2023 constant uses `CONSTANT AS`:
 01 PI CONSTANT AS 3.14159.
 ```
 
+### Tables (arrays)
+
+`OCCURS n [TIMES]` makes an item a table, mapped to a PostgreSQL array of the
+element type (the fixed bound is not enforced). A subscript `WS-ARR(i)` reads or
+writes element `i` (1-based):
+
+```sql
+01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
+...
+COMPUTE WS-ARR(WS-I) = WS-I * WS-I     -- write element
+COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I) -- read element
+```
+
+Iterate the whole table with `PERFORM v OVER ARRAY WS-ARR`. A subscript is
+recognized in `MOVE`/`COMPUTE` targets and in expressions; use `COMPUTE` (not
+`ADD`/`SUBTRACT`) when an operand is a subscripted element.
+
 ## Control flow
 
 ### IF / ELSE
@@ -340,8 +357,8 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Full program structure beyond a single procedure body: `IDENTIFICATION`,
   `ENVIRONMENT`, and `CONFIGURATION` divisions, and named paragraphs or sections
   with out-of-line `PERFORM <paragraph>`.
-- Group items and `OCCURS` (tables) in `WORKING-STORAGE`; declare elementary
-  items, or use a `TYPE` clause for a composite plpgsql type.
+- Group items (subordinate level entries under an `01`) in `WORKING-STORAGE`;
+  declare elementary items, or use a `TYPE` clause for a composite plpgsql type.
 - Fixed-format source (columns, sequence area, indicator area). Use free format.
 - Report Writer, screen sections, object orientation, and the standard COBOL
   intrinsic function library. Use SQL functions inside expressions and SQL text.

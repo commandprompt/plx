@@ -116,10 +116,10 @@ PROCEDURE DIVISION.
     PERFORM VARYING WS-I FROM 1 BY 1 UNTIL
 $$;
 
--- plxcobol: OCCURS (arrays) not supported in WORKING-STORAGE
+-- plxcobol: OCCURS without an element type (PIC/TYPE) is rejected
 CREATE FUNCTION e_cob_occurs() RETURNS int LANGUAGE plxcobol AS $$
 WORKING-STORAGE SECTION.
-01 WS-T PIC 9(9) OCCURS 5 TIMES.
+01 WS-T OCCURS 5 TIMES.
 PROCEDURE DIVISION.
     GOBACK RETURNING 1.
 $$;
