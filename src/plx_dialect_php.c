@@ -36,6 +36,7 @@ static const PlxSurface php_surface = {
 	.cmt_slash = true,
 	.cmt_block = true,
 	.type_ann = NULL,			/* annotations via a leading-colon-colon block comment */
+	.sq_is_raw = true,			/* PHP '...' is raw (backslashes literal) */
 	.interp_quote = '"',
 	.interp_hashbrace = false,
 	.interp_dollar = true,

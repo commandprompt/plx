@@ -51,6 +51,21 @@ typedef struct PlxDialect
 extern void plx_register_dialect(const PlxDialect *d);
 extern const PlxDialect *plx_lookup_dialect(const char *lanname);
 
+/*
+ * Built-in dialect descriptors. Declared here (rather than only in plx_core.c)
+ * so each defining translation unit sees a prior declaration, satisfying
+ * -Wmissing-variable-declarations.
+ */
+extern const PlxDialect plx_ruby_dialect;
+extern const PlxDialect plx_php_dialect;
+extern const PlxDialect plx_js_dialect;
+extern const PlxDialect plx_py_dialect;
+extern const PlxDialect plx_cobol_dialect;
+extern const PlxDialect plx_plsql_dialect;
+extern const PlxDialect plx_ts_dialect;
+extern const PlxDialect plx_tsql_dialect;
+extern const PlxDialect plx_go_dialect;
+
 /* Generic entry points; per-dialect trampolines forward to these */
 extern Datum plx_generic_validator(FunctionCallInfo fcinfo, const PlxDialect *d);
 extern Datum plx_generic_inline_handler(FunctionCallInfo fcinfo, const PlxDialect *d);

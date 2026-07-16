@@ -50,6 +50,8 @@ typedef struct PlxSurface
 	bool		cmt_slash;			/* '//' line comment */
 	bool		cmt_block;			/* C-style block comment */
 	const char *type_ann;			/* type annotation lead, e.g. "#::" or "::" */
+	bool		sq_is_raw;			/* single-quoted strings take backslashes
+									 * literally (Ruby/PHP), except \\ and \' */
 	char		interp_quote;		/* the quote char that interpolates ('"' or '`') */
 	bool		interp_hashbrace;	/* "...#{expr}..." interpolation (Ruby) */
 	bool		interp_dollar;		/* "...$var..." / "...{$expr}..." interpolation (PHP) */
@@ -64,7 +66,9 @@ typedef struct PlxSurface
 	int			flags;				/* PLX_TRUSTED, ... */
 } PlxSurface;
 
-/* Transpile a dialect body to a fully assembled plpgsql function body. */
+/* Transpile a dialect body to a fully assembled plpgsql function body. The
+ * scratch context is reserved for isolating the transpiler's transient
+ * allocations (currently stored on Ctx.mcx for future use). */
 extern char *plx_transpile(const char *body, const PlxFuncMeta *meta,
 						   const PlxSurface *surf, MemoryContext scratch);
 extern bool plx_has_sentinel(const char *prosrc);

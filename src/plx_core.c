@@ -30,16 +30,7 @@
 
 PG_MODULE_MAGIC;
 
-/* Built-in dialects registered at module load */
-extern const PlxDialect plx_ruby_dialect;
-extern const PlxDialect plx_php_dialect;
-extern const PlxDialect plx_js_dialect;
-extern const PlxDialect plx_py_dialect;
-extern const PlxDialect plx_cobol_dialect;
-extern const PlxDialect plx_plsql_dialect;
-extern const PlxDialect plx_ts_dialect;
-extern const PlxDialect plx_tsql_dialect;
-extern const PlxDialect plx_go_dialect;
+/* Built-in dialect descriptors are declared in plx.h (registered below). */
 
 /* ---- dialect registry ------------------------------------------------- */
 

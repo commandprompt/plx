@@ -220,3 +220,24 @@ SELECT js_labeled(5);
           3
 (1 row)
 
+-- non-decimal integer literals (hex/binary/octal, with '_' groups) convert to
+-- decimal so the generated plpgsql is portable to PG13-15 (no 0x/0o/0b there)
+CREATE FUNCTION js_hex()    RETURNS int LANGUAGE plxjs AS $$ return 0xFF; $$;
+CREATE FUNCTION js_bin()    RETURNS int LANGUAGE plxjs AS $$ return 0b1010; $$;
+CREATE FUNCTION js_oct()    RETURNS int LANGUAGE plxjs AS $$ return 0o17; $$;
+CREATE FUNCTION js_hex_us() RETURNS int LANGUAGE plxjs AS $$ return 0xFF_FF; $$;
+SELECT js_hex() AS hex, js_bin() AS bin, js_oct() AS oct, js_hex_us() AS hex_us;
+ hex | bin | oct | hex_us 
+-----+-----+-----+--------
+ 255 |  10 |  15 |  65535
+(1 row)
+
+-- float and exponent literals are unaffected
+CREATE FUNCTION js_flt() RETURNS numeric LANGUAGE plxjs AS $$ return 3.14; $$;
+CREATE FUNCTION js_exp() RETURNS numeric LANGUAGE plxjs AS $$ return 1.5e3; $$;
+SELECT js_flt() AS flt, js_exp() AS exp;
+ flt  | exp  
+------+------
+ 3.14 | 1500
+(1 row)
+

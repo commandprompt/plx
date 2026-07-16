@@ -18,6 +18,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 
 #include "plx.h"
@@ -89,7 +90,7 @@ typedef struct
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		retset;
-	MemoryContext mcx;
+	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 
 /* forward decls */
@@ -144,12 +145,17 @@ plx_err(Ctx *cx, int line, const char *fmt,...)
 }
 
 /* recursion-guarded wrappers: cap total parser/rewriter depth to avoid stack
- * overflow on hostile deeply-nested input. */
+ * overflow on hostile deeply-nested input. The fixed PLX_MAX_DEPTH count is a
+ * coarse backstop; check_stack_depth() is the real guard, since a single large
+ * parse_stmt_inner frame can exhaust the C stack (honoring max_stack_depth) well
+ * before 500 levels — without it a few hundred nested blocks crash the backend
+ * with SIGSEGV instead of raising a clean error. */
 static char *
 rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 {
 	char	   *r;
 
+	check_stack_depth();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, 0, "expression nested too deeply");
 	r = rewrite_expr_inner(cx, s, len, boolctx);
@@ -160,6 +166,7 @@ rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 static void
 parse_stmt(Ctx *cx, int indent, bool toplevel)
 {
+	check_stack_depth();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
 	parse_stmt_inner(cx, indent, toplevel);
@@ -169,6 +176,7 @@ parse_stmt(Ctx *cx, int indent, bool toplevel)
 static void
 parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
 {
+	check_stack_depth();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
 	parse_brace_stmt_inner(cx, ind, toplevel);
@@ -178,6 +186,7 @@ parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
 static void
 parse_py_stmt(Ctx *cx, int ind, bool toplevel)
 {
+	check_stack_depth();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
 	parse_py_stmt_inner(cx, ind, toplevel);
@@ -342,8 +351,15 @@ lex(Ctx *cx)
 					continue;	/* trailing dedents handled at EOF */
 				if (col > indent_stack[indent_sp])
 				{
-					if (indent_sp < 126)
-						indent_stack[++indent_sp] = col;
+					/*
+					 * Raise a clean error at the stack limit rather than emitting
+					 * a T_INDENT with no matching stack entry: past the cap the
+					 * unbalanced INDENT/DEDENT counts mis-nest every enclosing
+					 * block. indent_stack has lengthof() slots (indices 0..N-1).
+					 */
+					if (indent_sp >= (int) lengthof(indent_stack) - 1)
+						plx_err(cx, line, "indentation nested too deeply");
+					indent_stack[++indent_sp] = col;
 					PUSH0(T_INDENT);
 				}
 				else
@@ -475,6 +491,34 @@ lex(Ctx *cx)
 		{
 			bool		isflt = false;
 
+			/*
+			 * Non-decimal integer literal (0x.. / 0o.. / 0b..): consume the whole
+			 * literal as one T_INT so it is not split into '0' + an identifier
+			 * ('xFF'), which would emit two adjacent tokens and break the SQL.
+			 * The decimal conversion happens in rewrite_expr at emit time.
+			 */
+			if (*p == '0' && p + 1 < end &&
+				(p[1] == 'x' || p[1] == 'X' || p[1] == 'o' || p[1] == 'O' ||
+				 p[1] == 'b' || p[1] == 'B'))
+			{
+				char		pfx = p[1];
+
+				p += 2;
+				if (pfx == 'x' || pfx == 'X')
+					while (p < end && (((*p >= '0' && *p <= '9') ||
+										(*p >= 'a' && *p <= 'f') ||
+										(*p >= 'A' && *p <= 'F')) || *p == '_'))
+						p++;
+				else if (pfx == 'o' || pfx == 'O')
+					while (p < end && ((*p >= '0' && *p <= '7') || *p == '_'))
+						p++;
+				else
+					while (p < end && (*p == '0' || *p == '1' || *p == '_'))
+						p++;
+				PUSH(T_INT);
+				continue;
+			}
+
 			while (p < end && ((*p >= '0' && *p <= '9') || *p == '_'))
 				p++;
 			if (*p == '.' && p[1] != '.' && (p[1] >= '0' && p[1] <= '9'))
@@ -573,6 +617,9 @@ lex(Ctx *cx)
 			indent_sp--;
 			PUSH0(T_DEDENT);
 		}
+		/* T_EOF needs the same capacity guard as every other token write; without
+		 * it a source that lexes to exactly cap-1 tokens overflows t[] by one. */
+		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(Tok) * cap); }
 		memset(&t[n], 0, sizeof(Tok));
 		t[n].kind = T_EOF; t[n].line = line; t[n].s = tokstart; n++;
 	}
@@ -740,6 +787,28 @@ interp_at(const PlxSurface *surf, bool fstr, const char *s, const char *e,
 	}
 	if (surf->interp_dollar)
 	{
+		if (s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${name} (PHP curly) */
+		{
+			int			depth = 1;
+			const char *x = s + 2, *q = x;
+
+			while (q < e && depth > 0)
+			{
+				if (*q == '{')
+					depth++;
+				else if (*q == '}')
+				{
+					depth--;
+					if (!depth)
+						break;
+				}
+				q++;
+			}
+			*exs = x;
+			*exl = (int) (q - x);
+			*next = (q < e) ? q + 1 : q;
+			return true;
+		}
 		if (s + 1 < e && s[0] == '{' && s[1] == '$')	/* {$expr} */
 		{
 			int			depth = 1;
@@ -796,6 +865,8 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 		int			exl;
 		bool		can_interp = tk->fstr ||
 			(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
+		/* raw single-quoted string (Ruby/PHP): backslashes are literal */
+		bool		raw = tk->sq && cx->surf->sq_is_raw;
 
 		/* f-string brace escapes: {{ -> {  and }} -> } */
 		if (tk->fstr && ((s[0] == '{' && s + 1 < e && s[1] == '{') ||
@@ -835,7 +906,29 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
 			continue;
 		}
-		if (s[0] == '\\' && s + 1 < e)
+		if (raw && s[0] == '\\' && s + 1 < e)
+		{
+			/*
+			 * Raw single-quoted literal: only \\ and \' are special; every other
+			 * backslash sequence is two literal characters (Ruby/PHP semantics),
+			 * so '\n' stays a backslash + 'n', not a newline. Emitted verbatim
+			 * (no E'' prefix) under standard_conforming_strings.
+			 */
+			char		c = s[1];
+
+			s += 2;
+			switch (c)
+			{
+				case '\\': appendStringInfoChar(&lit, '\\'); break;
+				case '\'': appendStringInfoString(&lit, "''"); break;
+				default:
+					appendStringInfoChar(&lit, '\\');
+					appendStringInfoChar(&lit, c);
+					break;
+			}
+			continue;
+		}
+		if (!raw && s[0] == '\\' && s + 1 < e)
 		{
 			char		c = s[1];
 
@@ -1299,14 +1392,89 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		}
 		if (c >= '0' && c <= '9')
 		{
-			while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.' ||
-							   s[i] == 'e' || s[i] == 'E' || s[i] == '_' ||
-							   ((s[i] == '+' || s[i] == '-') && i > 0 &&
-								(s[i - 1] == 'e' || s[i - 1] == 'E'))))
+			/*
+			 * Non-decimal integer literal (0x.. / 0o.. / 0b.., with optional '_'
+			 * group separators): convert to a decimal literal. plpgsql only
+			 * accepts non-decimal integer literals on PG16+, and plx supports
+			 * PG13+, so emitting decimal keeps generated code portable.
+			 */
+			if (s[i] == '0' && i + 1 < len &&
+				(s[i + 1] == 'x' || s[i + 1] == 'X' || s[i + 1] == 'o' ||
+				 s[i + 1] == 'O' || s[i + 1] == 'b' || s[i + 1] == 'B'))
+			{
+				char		pfx = s[i + 1];
+				int			base = (pfx == 'x' || pfx == 'X') ? 16 :
+					(pfx == 'o' || pfx == 'O') ? 8 : 2;
+				uint64		val = 0;
+				bool		ovf = false;
+				int			start = i;
+				int			ndig = 0;
+
+				i += 2;
+				for (; i < len; i++)
+				{
+					char		d = s[i];
+					int			dv;
+
+					if (d == '_')
+						continue;
+					if (d >= '0' && d <= '9')
+						dv = d - '0';
+					else if (d >= 'a' && d <= 'f')
+						dv = 10 + (d - 'a');
+					else if (d >= 'A' && d <= 'F')
+						dv = 10 + (d - 'A');
+					else
+						break;
+					if (dv >= base)
+						break;
+					if (val > (UINT64_MAX - dv) / base)
+						ovf = true;
+					val = val * base + dv;
+					ndig++;
+				}
+				/* no digits or overflow: leave the source text untouched */
+				if (ndig == 0 || ovf)
+					appendBinaryStringInfo(&out, s + start, i - start);
+				else
+					appendStringInfo(&out, UINT64_FORMAT, val);
+				continue;
+			}
+			/* decimal integer part */
+			while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
 			{
 				if (s[i] != '_')
 					appendStringInfoChar(&out, s[i]);
 				i++;
+			}
+			/* fractional part: a single '.' followed by a digit — never '..'
+			 * (a range/slice operator), so dotted range syntax is left intact */
+			if (i + 1 < len && s[i] == '.' && s[i + 1] >= '0' && s[i + 1] <= '9')
+			{
+				appendStringInfoChar(&out, '.');
+				i++;
+				while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
+				{
+					if (s[i] != '_')
+						appendStringInfoChar(&out, s[i]);
+					i++;
+				}
+			}
+			/* exponent */
+			if (i < len && (s[i] == 'e' || s[i] == 'E'))
+			{
+				appendStringInfoChar(&out, s[i]);
+				i++;
+				if (i < len && (s[i] == '+' || s[i] == '-'))
+				{
+					appendStringInfoChar(&out, s[i]);
+					i++;
+				}
+				while (i < len && s[i] >= '0' && s[i] <= '9')
+				{
+					appendStringInfoChar(&out, s[i]);
+					i++;
+				}
 			}
 			continue;
 		}
@@ -2425,8 +2593,8 @@ emit_leaf(Ctx *cx, int a, int b, int ind, bool toplevel)
 	}
 	{
 		Kw			mk = cx->t[m].kw;
-		char	   *cond = rewrite_expr(cx, span_text(cx, m + 1, b),
-										(int) strlen(span_text(cx, m + 1, b)), true);
+		char	   *ct = span_text(cx, m + 1, b);
+		char	   *cond = rewrite_expr(cx, ct, (int) strlen(ct), true);
 		bool		neg = (mk == KW_UNLESS || mk == KW_UNTIL);
 
 		/* next/break modifiers -> WHEN (optionally with a loop label) */

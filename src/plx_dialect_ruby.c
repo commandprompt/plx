@@ -36,6 +36,7 @@ static const PlxSurface ruby_surface = {
 	.cmt_slash = false,
 	.cmt_block = false,
 	.type_ann = "#::",
+	.sq_is_raw = true,			/* Ruby '...' is raw (backslashes literal) */
 	.interp_quote = '"',
 	.interp_hashbrace = true,
 	.interp_dollar = false,

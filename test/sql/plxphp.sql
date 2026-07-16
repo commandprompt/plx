@@ -120,3 +120,23 @@ CREATE TRIGGER php_trg_ins BEFORE INSERT ON php_trg
 INSERT INTO php_trg(id, qty, price) VALUES (7, 3, 10);
 SELECT id, total, tag FROM php_trg;
 DROP TABLE php_trg CASCADE;
+
+-- ${name} curly interpolation in double-quoted strings
+CREATE FUNCTION php_interp_curly(name text) RETURNS text LANGUAGE plxphp AS $$
+return "Hello ${name}!";
+$$;
+SELECT php_interp_curly('world');
+
+-- single-quoted strings are raw: backslash escapes stay literal ('\n' -> \ n)
+CREATE FUNCTION php_raw_squote() RETURNS text LANGUAGE plxphp AS $$
+return 'a\nb';
+$$;
+SELECT php_raw_squote() AS val,
+       length(php_raw_squote()) AS len,
+       php_raw_squote() = 'a' || chr(92) || 'nb' AS backslash_kept;
+
+-- double-quoted strings still process escapes ('\n' -> newline)
+CREATE FUNCTION php_dquote_esc() RETURNS int LANGUAGE plxphp AS $$
+return length("a\nb");
+$$;
+SELECT php_dquote_esc() AS newline_len;

@@ -96,16 +96,28 @@ make_expanded_sb(const char *data, int32 len, MemoryContext parent, int32 mincap
 static void
 sb_ensure(ExpandedSBHeader *sb, int32 need)
 {
-	if (sb->len + need <= sb->capacity)
-		return;
-	{
-		int32		newcap = sb->capacity * 2;
+	int64		required = (int64) sb->len + need;
+	int64		newcap;
 
-		while (newcap < sb->len + need)
-			newcap *= 2;
-		sb->buf = (char *) repalloc(sb->buf, newcap);
-		sb->capacity = newcap;
-	}
+	if (required <= sb->capacity)
+		return;
+
+	/*
+	 * Grow geometrically, but compute the new capacity in 64-bit arithmetic so
+	 * the doubling cannot overflow int32 and spin (a negative newcap made the
+	 * `while (newcap < required)` loop non-terminating and passed a bogus size
+	 * to repalloc). If doubling overshoots MaxAllocSize, fall back to the exact
+	 * requirement so repalloc bounds-checks against the real need and raises the
+	 * clean "invalid memory alloc request size" error rather than doubling past
+	 * the limit prematurely.
+	 */
+	newcap = (int64) sb->capacity * 2;
+	while (newcap < required)
+		newcap *= 2;
+	if (newcap > MaxAllocSize)
+		newcap = required;
+	sb->buf = (char *) repalloc(sb->buf, (Size) newcap);
+	sb->capacity = (int32) newcap;
 }
 
 PG_FUNCTION_INFO_V1(plx_sb_in);

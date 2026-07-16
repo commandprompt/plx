@@ -259,3 +259,32 @@ CREATE FUNCTION e_go_constval() RETURNS int LANGUAGE plxgo AS $$
 	const x int
 	return 1
 $$;
+
+-- Deep-nesting DoS guards. These generate pathological source and must fail with
+-- a clean error (never crash the backend). The bodies are built dynamically to
+-- avoid hundreds of literal lines; each error is caught and re-raised as its bare
+-- message so the .out does not echo the whole generated source.
+
+-- plxpython3: indentation nested past the lexer's fixed indent-stack limit
+DO $outer$
+DECLARE body text;
+BEGIN
+	SELECT 'def f():' || E'\n' ||
+		   string_agg(repeat('  ', g) || 'if True:', E'\n' ORDER BY g) || E'\n' ||
+		   repeat('  ', 200) || 'return 1'
+	  INTO body FROM generate_series(1, 199) g;
+	EXECUTE format('CREATE FUNCTION e_py_deepindent() RETURNS int LANGUAGE plxpython3 AS %L', body);
+	RAISE WARNING 'unexpected: creation succeeded';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING '%', SQLERRM;
+END $outer$;
+
+-- plxjs: statements/expressions nested past the parser recursion guard
+DO $outer$
+DECLARE body text; n int := 600;
+BEGIN
+	body := repeat('if (true) {' || E'\n', n) || 'return 1;' || E'\n' ||
+			repeat('}' || E'\n', n);
+	EXECUTE format('CREATE FUNCTION e_js_deeprec() RETURNS int LANGUAGE plxjs AS %L', body);
+	RAISE WARNING 'unexpected: creation succeeded';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING '%', SQLERRM;
+END $outer$;

@@ -263,3 +263,22 @@ rescue PG::UniqueViolation => e
 end
 $$;
 SELECT rb_diag(1);
+
+-- single-quoted strings are raw: backslash escapes stay literal ('\t' -> \ t)
+CREATE FUNCTION rb_raw_squote() RETURNS text LANGUAGE plxruby AS $$
+  return 'x\ty'
+$$;
+-- double-quoted strings still process escapes ("\n" -> newline)
+CREATE FUNCTION rb_dquote_esc() RETURNS text LANGUAGE plxruby AS $$
+  return "a\nb"
+$$;
+SELECT rb_raw_squote() AS raw_val,
+       length(rb_raw_squote()) AS raw_len,
+       rb_raw_squote() ~ E'\\\\' AS raw_backslash_kept,
+       length(rb_dquote_esc()) AS dquote_len;
+
+-- non-decimal integer literals convert to decimal
+CREATE FUNCTION rb_hex() RETURNS int LANGUAGE plxruby AS $$
+  return 0xff
+$$;
+SELECT rb_hex();

@@ -178,3 +178,35 @@ SELECT id, total, tag FROM php_trg;
 (1 row)
 
 DROP TABLE php_trg CASCADE;
+-- ${name} curly interpolation in double-quoted strings
+CREATE FUNCTION php_interp_curly(name text) RETURNS text LANGUAGE plxphp AS $$
+return "Hello ${name}!";
+$$;
+SELECT php_interp_curly('world');
+ php_interp_curly 
+------------------
+ Hello world!
+(1 row)
+
+-- single-quoted strings are raw: backslash escapes stay literal ('\n' -> \ n)
+CREATE FUNCTION php_raw_squote() RETURNS text LANGUAGE plxphp AS $$
+return 'a\nb';
+$$;
+SELECT php_raw_squote() AS val,
+       length(php_raw_squote()) AS len,
+       php_raw_squote() = 'a' || chr(92) || 'nb' AS backslash_kept;
+ val  | len | backslash_kept 
+------+-----+----------------
+ a\nb |   4 | t
+(1 row)
+
+-- double-quoted strings still process escapes ('\n' -> newline)
+CREATE FUNCTION php_dquote_esc() RETURNS int LANGUAGE plxphp AS $$
+return length("a\nb");
+$$;
+SELECT php_dquote_esc() AS newline_len;
+ newline_len 
+-------------
+           3
+(1 row)
+
