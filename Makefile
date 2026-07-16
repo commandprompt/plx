@@ -3,7 +3,7 @@ MODULE_big = plx
 OBJS = src/plx_core.o src/plx_transpile.o src/plx_strbuild.o src/plx_dialect_ruby.o src/plx_dialect_php.o src/plx_dialect_js.o src/plx_dialect_python.o src/plx_dialect_cobol.o src/plx_dialect_plsql.o src/plx_dialect_ts.o src/plx_dialect_tsql.o src/plx_dialect_go.o
 
 EXTENSION = plx
-DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql
+DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql
 
 # pg_regress suite (make installcheck). test/run_corpus.py is an additional
 # Ruby corpus runner.

@@ -4,6 +4,43 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [1.3.1] - 2026-07-16
+
+Code-only patch release (no catalog changes) carrying the memory-safety and
+robustness fixes from the full-repo transpiler audit (#1). Upgrade with
+`ALTER EXTENSION plx UPDATE TO '1.3.1'` after installing the new module.
+
+### Fixed
+
+- Missing capacity guard on the trailing `T_EOF` token write in `lex()`: a source
+  that lexed to exactly `cap-1` tokens overflowed the token array by one
+  (heap overflow / SIGSEGV). All token writes are now guarded.
+- `plx_strbuild` `sb_ensure()` doubled its capacity in `int32`, which could wrap
+  negative near ~1GB and spin forever while passing a bogus size to `repalloc`.
+  Growth is now computed in 64-bit and clamped to `MaxAllocSize`, so an
+  oversized request raises the standard allocation error cleanly.
+- The recursion-guarded transpiler entry points now call `check_stack_depth()`,
+  so deeply nested hostile input raises a clean error honoring `max_stack_depth`
+  instead of overflowing the C stack and crashing the backend.
+- The Python lexer raises a clean "indentation nested too deeply" error at the
+  indent-stack limit instead of emitting an unbalanced `T_INDENT` that mis-nested
+  every enclosing block.
+- Raw single-quoted strings in Ruby and PHP keep backslashes literal (`'\n'`,
+  `'C:\temp'`); only `\\` and `\'` are special. Double-quoted and Python/JS
+  single-quoted escapes are unchanged.
+- PHP `${name}` curly interpolation in double-quoted strings is now recognized
+  (was emitted verbatim).
+- Non-decimal integer literals (`0x`/`0o`/`0b`, with `_` group separators) are
+  lexed as a single token and rewritten to decimal, keeping generated plpgsql
+  portable to PG13-15 (which accept `0x/0o/0b` only on PG16+). A literal that
+  overflows 64 bits raises a clean "integer literal out of range" error rather
+  than emitting invalid SQL.
+
+### Other
+
+- Declare the built-in dialect descriptors in `plx.h`, clearing
+  `-Wmissing-variable-declarations` across the dialect translation units.
+
 ## [1.3.0] - 2026-07-15
 
 Trigger row mutation across dialects, plus the cookbook and limitations
