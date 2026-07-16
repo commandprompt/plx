@@ -1433,8 +1433,17 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					val = val * base + dv;
 					ndig++;
 				}
-				/* no digits or overflow: leave the source text untouched */
-				if (ndig == 0 || ovf)
+				/*
+				 * Overflow (> 64-bit): raise a clean error rather than
+				 * emitting the raw 0x.. text, which is invalid plpgsql on
+				 * PG13-15 and would only surface as an opaque parse failure
+				 * in the generated function body.
+				 */
+				if (ovf)
+					plx_err(cx, 0, "integer literal out of range: %.*s",
+							i - start, s + start);
+				/* no digits (malformed): leave the source text untouched */
+				if (ndig == 0)
 					appendBinaryStringInfo(&out, s + start, i - start);
 				else
 					appendStringInfo(&out, UINT64_FORMAT, val);

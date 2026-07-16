@@ -288,3 +288,9 @@ BEGIN
 	RAISE WARNING 'unexpected: creation succeeded';
 EXCEPTION WHEN OTHERS THEN RAISE WARNING '%', SQLERRM;
 END $outer$;
+
+-- non-decimal integer literal that overflows 64 bits: clean error, not invalid
+-- generated SQL (raw 0x.. is unparseable by plpgsql on PG13-15)
+CREATE FUNCTION e_js_hex_overflow() RETURNS numeric LANGUAGE plxjs AS $$
+return 0xFFFFFFFFFFFFFFFFFF;
+$$;
