@@ -1488,7 +1488,7 @@ tq_block(Tq *tq, int ind)
 		tq_stmt(tq, ind);
 }
 
-void
+static void
 plx_tsql_parse_body(Ctx *cx)
 {
 	Tq			tq;

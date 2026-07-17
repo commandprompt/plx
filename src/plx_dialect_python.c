@@ -566,7 +566,7 @@ parse_py_program(Ctx *cx)
 
 
 
-void
+static void
 plx_python_parse_body(Ctx *cx)
 {
 	plx_lex(cx);

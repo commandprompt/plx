@@ -507,7 +507,6 @@ plx_lex(Ctx *cx)
 		t[n].kind = T_EOF; t[n].line = line; t[n].s = tokstart; n++;
 	}
 	cx->t = t;
-	cx->nt = n;
 	cx->pos = 0;
 #undef PUSH
 }

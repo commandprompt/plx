@@ -19,6 +19,11 @@ version in `plx.control` (currently `1.0`).
   helper out of `src/plx_dialect_ruby.c` and back into the engine
   (`src/plx_transpile.c`), where its other callers (Python and the brace
   front end) already live. No functional change.
+- Tightened linkage and removed dead code left by the refactor: the six
+  single-dialect `plx_*_parse_body` front ends are now `static` (only the
+  shared `plx_brace_parse_body` keeps a prototype in `plx_engine.h`); dropped
+  the write-only `Ctx.nt` field; and corrected a stale COBOL comment about a
+  keyword table the surface does not carry. No functional change.
 
 ## [1.3.1] - 2026-07-16
 

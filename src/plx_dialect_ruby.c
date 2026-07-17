@@ -735,7 +735,7 @@ parse_stmt_inner(Ctx *cx, int ind, bool toplevel)
 }
 
 
-void
+static void
 plx_ruby_parse_body(Ctx *cx)
 {
 	plx_lex(cx);
