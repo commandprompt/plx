@@ -40,6 +40,8 @@ typedef enum
 	PLX_BLK_GO						/* Go: own tokenizer (with ASI), restructures */
 } PlxBlockStyle;
 
+struct PlxCtx;						/* the transpile context (see plx_engine.h) */
+
 typedef struct PlxSurface
 {
 	const char *lanname;			/* "plruby", "plphp", ... */
@@ -64,6 +66,16 @@ typedef struct PlxSurface
 	const PlxExcMap *excs;
 	int			nexcs;
 	int			flags;				/* PLX_TRUSTED, ... */
+
+	/*
+	 * Dialect front end (the vtable method). Transforms cx->body into cx->out
+	 * (the BEGIN..END body text); the shared driver then hoists DECLAREs and
+	 * assembles the final function. Text families call the shared plx_lex() +
+	 * their parser; standalone dialects run their own tokenizer + emitter.
+	 */
+	void		(*parse_body)(struct PlxCtx *cx);
+	bool		self_contained_block;	/* dialect emits its own DECLARE/BEGIN/END
+										 * (PL/SQL); skip the shared block wrap */
 } PlxSurface;
 
 /* Transpile a dialect body to a fully assembled plpgsql function body. The

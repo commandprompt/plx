@@ -3,7 +3,8 @@
  *
  * PHP surface (brace-delimited blocks, '$' variables, '.' concatenation,
  * "$var"/"{$expr}" interpolation, //, #, and block comments, try/catch/finally,
- * throw). The shared transpiler in plx_transpile.c does the lowering to plpgsql.
+ * throw). The brace parser is shared with plxjs/plxts in plx_parse_brace.c; the
+ * dialect-neutral engine (lowering to plpgsql) lives in plx_transpile.c.
  */
 #include "postgres.h"
 
@@ -12,6 +13,7 @@
 
 #include "plx.h"
 #include "plx_int.h"
+#include "plx_engine.h"
 
 PG_FUNCTION_INFO_V1(plx_php_validator);
 PG_FUNCTION_INFO_V1(plx_php_inline_handler);
@@ -47,6 +49,7 @@ static const PlxSurface php_surface = {
 	.excs = NULL,
 	.nexcs = 0,
 	.flags = PLX_TRUSTED,
+	.parse_body = plx_brace_parse_body,
 };
 
 static char *

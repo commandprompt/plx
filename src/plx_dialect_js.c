@@ -4,7 +4,8 @@
  * JavaScript surface: brace-delimited blocks, no variable sigil, let/const/var
  * declarations, template-literal interpolation with backticks and ${expr},
  * // and block comments, for-of over query(), C-style for, try/catch/finally,
- * throw. The shared transpiler in plx_transpile.c does the lowering to plpgsql.
+ * throw. The brace parser is shared with plxphp/plxts in plx_parse_brace.c; the
+ * dialect-neutral engine (lowering to plpgsql) lives in plx_transpile.c.
  */
 #include "postgres.h"
 
@@ -13,6 +14,7 @@
 
 #include "plx.h"
 #include "plx_int.h"
+#include "plx_engine.h"
 
 PG_FUNCTION_INFO_V1(plx_js_validator);
 PG_FUNCTION_INFO_V1(plx_js_inline_handler);
@@ -48,6 +50,7 @@ static const PlxSurface js_surface = {
 	.excs = NULL,
 	.nexcs = 0,
 	.flags = PLX_TRUSTED,
+	.parse_body = plx_brace_parse_body,
 };
 
 static char *

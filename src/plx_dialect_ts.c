@@ -3,10 +3,10 @@
  *
  * TypeScript is the plxjs (JavaScript) surface plus type annotations: a
  * declaration "let x: T = e" carries the type on the variable. The TS
- * preprocessor in plx_transpile.c (ts_types) rewrites those "id: T" annotations
- * into the JS leading-colon-colon block-comment form and maps the TypeScript
- * type to a SQL type, then the shared brace parser does the rest. Everything
- * else is plxjs.
+ * preprocessor (ts_types, in plx_parse_brace.c) rewrites those "id: T"
+ * annotations into the JS leading-colon-colon block-comment form and maps the
+ * TypeScript type to a SQL type, then the shared brace parser does the rest.
+ * Everything else is plxjs.
  */
 #include "postgres.h"
 
@@ -15,6 +15,7 @@
 
 #include "plx.h"
 #include "plx_int.h"
+#include "plx_engine.h"
 
 PG_FUNCTION_INFO_V1(plx_ts_validator);
 PG_FUNCTION_INFO_V1(plx_ts_inline_handler);
@@ -51,6 +52,7 @@ static const PlxSurface ts_surface = {
 	.excs = NULL,
 	.nexcs = 0,
 	.flags = PLX_TRUSTED,
+	.parse_body = plx_brace_parse_body,
 };
 
 static char *
