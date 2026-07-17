@@ -100,7 +100,7 @@ supplies. The surface describes what varies between languages:
 The transpiler is split into a dialect-neutral **engine** and per-dialect
 **front ends**, selected through the `parse_body` function pointer on the
 surface (a vtable method). `plx_transpile()` just calls
-`cx->surf->parse_body(cx)` and then runs one assemble tail — there is no
+`cx->surf->parse_body(cx)` and then runs one assemble tail; there is no
 per-dialect branching in the driver.
 
 - The **engine** lives in `plx_transpile.c` and is declared to the front ends
@@ -144,8 +144,8 @@ src/plx_dialect_tsql.c        the plxtsql surface + T-SQL front end
 Everything links into a single `plx.so`. A dialect is a `PlxSurface` (including
 its `parse_body` front end) plus small trampolines (validator, inline handler,
 and the shared call-handler binding), registered in `_PG_init`. Adding a dialect
-is a new `plx_dialect_X.c` — a surface with its `parse_body`, plus a few
-`CREATE LANGUAGE` lines — and does not touch the shared engine.
+is a new `plx_dialect_X.c` (a surface with its `parse_body`, plus a few
+`CREATE LANGUAGE` lines), and does not touch the shared engine.
 
 ## Trust
 

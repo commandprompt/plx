@@ -13,7 +13,7 @@ version in `plx.control` (currently `1.0`).
   dialect-neutral engine (declared in the new `src/plx_engine.h`) plus per-dialect
   front ends in `src/plx_dialect_*.c` and the shared `src/plx_parse_brace.c`;
   the hardcoded `block_style` dispatch is replaced by a per-dialect `parse_body`
-  function pointer. No functional change — generated plpgsql is byte-identical
+  function pointer. No functional change; generated plpgsql is byte-identical
   and all regression tests pass. Adding a dialect no longer touches shared code.
 - Follow-up to the above: relocated the dialect-neutral `plx_diag_prefix()`
   helper out of `src/plx_dialect_ruby.c` and back into the engine
