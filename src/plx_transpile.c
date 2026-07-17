@@ -507,7 +507,6 @@ plx_lex(Ctx *cx)
 		t[n].kind = T_EOF; t[n].line = line; t[n].s = tokstart; n++;
 	}
 	cx->t = t;
-	cx->nt = n;
 	cx->pos = 0;
 #undef PUSH
 }
@@ -1589,6 +1588,34 @@ plx_parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after)
 		plx_err(cx, cx->t[a].line, "too many arguments (maximum %d)", maxargs);
 	*after = p + 1;
 	return n;
+}
+
+/* GET STACKED DIAGNOSTICS lines for the fields used in a handler (see diag_mask) */
+char *
+plx_diag_prefix(int mask, int ind)
+{
+	static const struct { int bit; const char *fld; const char *item; } t[] = {
+		{PLX_DIAG_DETAIL, "detail", "PG_EXCEPTION_DETAIL"},
+		{PLX_DIAG_HINT, "hint", "PG_EXCEPTION_HINT"},
+		{PLX_DIAG_CONSTRAINT, "constraint", "CONSTRAINT_NAME"},
+		{PLX_DIAG_COLUMN, "column", "COLUMN_NAME"},
+		{PLX_DIAG_TABLE, "table", "TABLE_NAME"},
+		{PLX_DIAG_SCHEMA, "schema", "SCHEMA_NAME"},
+		{PLX_DIAG_DATATYPE, "datatype", "PG_DATATYPE_NAME"},
+	};
+	StringInfoData p;
+	int			i;
+
+	if (!mask)
+		return pstrdup("");
+	initStringInfo(&p);
+	for (i = 0; i < (int) (sizeof(t) / sizeof(t[0])); i++)
+		if (mask & t[i].bit)
+		{
+			appendStringInfoSpaces(&p, ind * 2);
+			appendStringInfo(&p, "GET STACKED DIAGNOSTICS __plx_%s = %s;\n", t[i].fld, t[i].item);
+		}
+	return p.data;
 }
 
 /* Emit a Ruby string token as raw SQL text (interp #{e} -> rewritten expr,

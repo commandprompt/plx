@@ -1913,7 +1913,7 @@ go_block(Go *g, int ind)
 	g->pos++;
 }
 
-void
+static void
 plx_go_parse_body(Ctx *cx)
 {
 	Go			g;

@@ -5,8 +5,8 @@
  * it does not fit the shared byte lexer's expression model (hyphenated words,
  * period sentence terminators, PICTURE clauses), so the COBOL front end (below)
  * uses its own tokenizer and recursive-descent parser and emits plpgsql
- * directly; the dialect-neutral engine lives in plx_transpile.c. The keyword
- * table is unused by the COBOL path but kept for consistency.
+ * directly; the dialect-neutral engine lives in plx_transpile.c. The COBOL
+ * front end does not use the shared keyword table (its surface carries none).
  */
 #include "postgres.h"
 
@@ -2184,7 +2184,7 @@ cob_block(Cb *cb, int ind)
 	cb->cx->depth--;
 }
 
-void
+static void
 plx_cobol_parse_body(Ctx *cx)
 {
 	Cb			cb;

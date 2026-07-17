@@ -84,7 +84,7 @@ typedef struct PlxCtx
 {
 	const char *body;
 	Tok		   *t;
-	int			nt, pos;
+	int			pos;
 	const PlxFuncMeta *meta;
 	const PlxSurface *surf;
 	StringInfoData out;			/* emitted BEGIN..END body */
@@ -137,14 +137,10 @@ PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */
-/* Each is wired into a PlxSurface.parse_body in the owning plx_dialect_*.c /
- * plx_parse_brace.c. They transform cx->body into cx->out. */
-void plx_ruby_parse_body(Ctx *cx);
+/* Each dialect wires a parse_body into its PlxSurface (see plx_dialect_*.c);
+ * the function transforms cx->body into cx->out. Only the brace front end is
+ * shared across translation units (php / js / ts) and so needs a prototype
+ * here; every other parse_body is static to its own dialect file. */
 void plx_brace_parse_body(Ctx *cx);		/* php / js / ts (ts sets ts_types) */
-void plx_python_parse_body(Ctx *cx);
-void plx_cobol_parse_body(Ctx *cx);
-void plx_plsql_parse_body(Ctx *cx);
-void plx_tsql_parse_body(Ctx *cx);
-void plx_go_parse_body(Ctx *cx);
 
 #endif							/* PLX_ENGINE_H */

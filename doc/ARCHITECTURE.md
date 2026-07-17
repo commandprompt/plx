@@ -1,8 +1,9 @@
 # plx Architecture
 
-plx lets a function body be written in a Ruby, PHP, JavaScript, or Python
-dialect and executed by the standard plpgsql interpreter. This document
-describes how that works in the extension as built.
+plx lets a function body be written in a Ruby, PHP, JavaScript, TypeScript,
+Python, Go, COBOL, Oracle PL/SQL, or Transact-SQL dialect and executed by the
+standard plpgsql interpreter. This document describes how that works in the
+extension as built.
 
 ## The core idea
 
@@ -85,16 +86,36 @@ It is dialect-pluggable through a `PlxSurface` (in `plx_int.h`) that each dialec
 supplies. The surface describes what varies between languages:
 
 - the keyword table, mapping each dialect's spellings to canonical keywords;
-- the block style: keyword-delimited (`end`), brace-delimited (`{ }`), or
-  indentation (INDENT/DEDENT);
+- the block style, used as a lexer hint (indentation-tokenized vs.
+  newline-tokenized);
 - comment syntax, the variable sigil (for example `$`), the string-concatenation
   operator, and how string interpolation is written (`#{}`, `$var` and `{$e}`,
-  `${}` template literals, or f-strings).
+  `${}` template literals, or f-strings);
+- `parse_body`, the front-end entry point (see below), and
+  `self_contained_block`, a flag for dialects that emit their own
+  `DECLARE`/`BEGIN`/`END` (PL/SQL).
 
-The shared code (`plx_transpile.c`) is dialect-neutral: the lexer, the three
-block parsers, the expression rewriter, DECLARE-hoisting and type inference, the
-statement lowering, and the intrinsics (`query`, `fetch_one`, `perform`,
-`execute`, `return_query`, cursors, and so on) are all driven by the surface.
+### Engine and front ends
+
+The transpiler is split into a dialect-neutral **engine** and per-dialect
+**front ends**, selected through the `parse_body` function pointer on the
+surface (a vtable method). `plx_transpile()` just calls
+`cx->surf->parse_body(cx)` and then runs one assemble tail; there is no
+per-dialect branching in the driver.
+
+- The **engine** lives in `plx_transpile.c` and is declared to the front ends
+  through `plx_engine.h`: the shared byte lexer (`plx_lex`), the expression
+  rewriter (`plx_rewrite_expr`), the leaf-statement emitter and intrinsics
+  (`query`, `fetch_one`, `perform`, `execute`, `return_query`, cursors, and so
+  on), the symbol table, string/interpolation decoding, and the final
+  DECLARE-hoisting + assemble. It contains no dialect-specific code.
+- Each **front end** owns its dialect's tokenizer, parser, and statement
+  lowering, and implements `parse_body` by transforming `cx->body` into
+  `cx->out`. The text-family dialects (`php`/`js`/`ts`) share a brace parser in
+  `plx_parse_brace.c`; Ruby (keyword-`end`) and Python (indentation) parse on
+  top of the shared lexer inside their own translation units; and the
+  standalone dialects (COBOL, PL/SQL, T-SQL, Go) run their own tokenizer and
+  emitter, calling back into the engine only for shared services.
 
 ## Files
 
@@ -102,19 +123,29 @@ statement lowering, and the intrinsics (`query`, `fetch_one`, `perform`,
 plx.control, plx--1.0.sql     extension control and install SQL
 src/plx.h                     public ABI (PlxDialect, PlxFuncMeta)
 src/plx_int.h                 internal ABI (PlxSurface, canonical keywords)
+src/plx_engine.h              engine interface: PlxCtx, tokens, symtab, and the
+                              plx_* entry points the front ends call
 src/plx_core.c                PL handler binding, registry, generic validator
                               and inline handler
-src/plx_transpile.c           the shared transpiler
-src/plx_dialect_ruby.c        the plxruby surface and trampolines
-src/plx_dialect_php.c         the plxphp surface and trampolines
-src/plx_dialect_js.c          the plxjs surface and trampolines
-src/plx_dialect_python.c      the plxpython3 surface and trampolines
+src/plx_transpile.c           the dialect-neutral engine + plx_transpile() driver
+src/plx_strbuild.c            string-builder intrinsic helpers
+src/plx_parse_brace.c         shared brace front end (php/js/ts) + TS preprocess
+src/plx_dialect_ruby.c        the plxruby surface + Ruby front end
+src/plx_dialect_php.c         the plxphp surface (parse_body -> brace front end)
+src/plx_dialect_js.c          the plxjs surface (parse_body -> brace front end)
+src/plx_dialect_ts.c          the plxts surface (parse_body -> brace front end)
+src/plx_dialect_python.c      the plxpython3 surface + Python front end
+src/plx_dialect_go.c          the plxgo surface + Go front end
+src/plx_dialect_cobol.c       the plxcobol surface + COBOL front end
+src/plx_dialect_plsql.c       the plxplsql surface + PL/SQL front end
+src/plx_dialect_tsql.c        the plxtsql surface + T-SQL front end
 ```
 
-Everything links into a single `plx.so`. A dialect is a `PlxSurface` plus three
-small trampolines (validator, inline handler, and the shared call-handler
-binding), registered in `_PG_init`. Adding a dialect is a new surface and a few
-`CREATE LANGUAGE` lines; it does not touch the shared transpiler.
+Everything links into a single `plx.so`. A dialect is a `PlxSurface` (including
+its `parse_body` front end) plus small trampolines (validator, inline handler,
+and the shared call-handler binding), registered in `_PG_init`. Adding a dialect
+is a new `plx_dialect_X.c` (a surface with its `parse_body`, plus a few
+`CREATE LANGUAGE` lines), and does not touch the shared engine.
 
 ## Trust
 
@@ -132,4 +163,6 @@ fuzzed (see `test/fuzz.py`).
 - [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification.
 - [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
 - The per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
-  [plxjs](plxjs.md), [plxpython3](plxpython3.md).
+  [plxjs](plxjs.md), [plxts](plxts.md), [plxpython3](plxpython3.md),
+  [plxgo](plxgo.md), [plxcobol](plxcobol.md), [plxplsql](plxplsql.md),
+  [plxtsql](plxtsql.md).

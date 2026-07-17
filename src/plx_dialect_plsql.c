@@ -270,7 +270,7 @@ pl_emit_raw(Pl *pl, int a, int b, StringInfo out)
 						   (int) (pl->t[b - 1].s + pl->t[b - 1].len - pl->t[a].s));
 }
 
-void
+static void
 plx_plsql_parse_body(Ctx *cx)
 {
 	Pl			pl;

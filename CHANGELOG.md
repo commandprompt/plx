@@ -4,6 +4,27 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Changed
+
+- Internal refactor of the transpiler behind a `PlxSurface.parse_body` vtable
+  (#2). The single ~11k-line `src/plx_transpile.c` is split into a
+  dialect-neutral engine (declared in the new `src/plx_engine.h`) plus per-dialect
+  front ends in `src/plx_dialect_*.c` and the shared `src/plx_parse_brace.c`;
+  the hardcoded `block_style` dispatch is replaced by a per-dialect `parse_body`
+  function pointer. No functional change; generated plpgsql is byte-identical
+  and all regression tests pass. Adding a dialect no longer touches shared code.
+- Follow-up to the above: relocated the dialect-neutral `plx_diag_prefix()`
+  helper out of `src/plx_dialect_ruby.c` and back into the engine
+  (`src/plx_transpile.c`), where its other callers (Python and the brace
+  front end) already live. No functional change.
+- Tightened linkage and removed dead code left by the refactor: the six
+  single-dialect `plx_*_parse_body` front ends are now `static` (only the
+  shared `plx_brace_parse_body` keeps a prototype in `plx_engine.h`); dropped
+  the write-only `Ctx.nt` field; and corrected a stale COBOL comment about a
+  keyword table the surface does not carry. No functional change.
+
 ## [1.3.1] - 2026-07-16
 
 Code-only patch release (no catalog changes) carrying the memory-safety and
