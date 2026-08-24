@@ -147,7 +147,11 @@ string is reproduced. Every Go verb renders its operand as text, which is what
 A `-` flag and a width are kept, so `%-8d` still pads to eight columns. Go's
 other flags and its precision field have no `format()` equivalent and are
 dropped, so `%.2f` prints the operand's full text rather than rounding it to
-two decimal places. A doubled `%%` stays a literal `%`.
+two decimal places. Verbs that change an operand's representation rather than
+its padding are affected the same way: `%x`, `%o`, `%b`, `%e` and `%q` all
+render what `%s` would, so `fmt.Sprintf("%x", 255)` yields `255` and not `ff`.
+A doubled `%%` stays a literal `%`, and a `%` that starts no directive is
+passed through as a literal percent.
 
 ### Types (in declarations)
 

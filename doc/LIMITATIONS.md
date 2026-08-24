@@ -117,9 +117,14 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - `+` for string concatenation (use `||` or build a slice and `array_to_string`).
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.
-- `fmt.Sprintf` keeps a `-` flag and a width, but drops Go's other flags and its
-  precision field, since SQL `format()` has no equivalent. `%.2f` therefore
-  prints the operand in full instead of rounding it to two decimal places.
+- `fmt.Sprintf` renders every operand in its SQL text form, because each Go verb
+  becomes `format()`'s `%s`. A `-` flag and a width are kept, so `%-8d` still
+  pads. Go's other flags and its precision field are dropped, so `%.2f` prints
+  the operand in full rather than rounding it. The verbs that change an
+  operand's representation rather than its padding do not do so here: `%x`,
+  `%o`, `%b`, `%e` and `%q` all produce the same text `%s` would, so
+  `fmt.Sprintf("%x", 255)` yields `255` and not `ff`. Convert explicitly (for
+  example `to_hex`) where the representation matters.
 
 ### plxcobol ([chapter](plxcobol.md))
 

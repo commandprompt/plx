@@ -416,7 +416,9 @@ go_emit_str(GoTok *tk, StringInfo out)
  * does, so every directive becomes %s. format() takes only a '-' flag and a
  * width, so Go's other flags and its precision field are dropped: the operand
  * still appears, just without the padding Go would have applied. A doubled
- * %% passes through, and a '%' that starts no directive is left alone.
+ * A doubled %% passes through, and a '%' that starts no directive is escaped
+ * to %%, so it reaches the caller as a literal percent instead of tripping
+ * format() at run time.
  */
 static void
 go_emit_format_str(GoTok *tk, StringInfo out)
@@ -470,7 +472,9 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 			!((raw.data[j] >= 'a' && raw.data[j] <= 'z') ||
 			  (raw.data[j] >= 'A' && raw.data[j] <= 'Z')))
 		{
-			appendStringInfoChar(out, c);	/* not a directive */
+			/* starts no directive: escape it, since a lone '%' is itself
+			 * an error to format() */
+			appendStringInfoString(out, "%%");
 			continue;
 		}
 

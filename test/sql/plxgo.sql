@@ -212,3 +212,21 @@ CREATE FUNCTION g_sprintf_prec(x float8) RETURNS text LANGUAGE plxgo AS $$
 	return fmt.Sprintf("%.2f|%8.3f", x, x)
 $$;
 SELECT g_sprintf_prec(1.5) AS prec;
+
+-- a '%' that starts no directive reaches the caller as a literal percent
+-- rather than tripping format() at run time
+CREATE FUNCTION g_sprintf_bare_pct() RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("100%")
+$$;
+SELECT g_sprintf_bare_pct() AS should_be_100_pct;
+
+CREATE FUNCTION g_sprintf_pct_punct(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%d%!", n)
+$$;
+SELECT g_sprintf_pct_punct(50) AS pct_then_punct;
+
+-- verbs that change an operand's representation render what %s renders
+CREATE FUNCTION g_sprintf_repr(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%x|%o|%b|%q", n, n, n, n)
+$$;
+SELECT g_sprintf_repr(255) AS repr_verbs_are_text;

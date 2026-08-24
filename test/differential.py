@@ -49,7 +49,12 @@ BEGIN
   IF r IS NULL THEN
     RETURN '<NULL>';
   END IF;
-  RETURN r;
+  IF r = '' THEN
+    RETURN '<EMPTY>';
+  END IF;
+  /* One probe must occupy exactly one output line: an embedded newline, or a
+   * value that is blank, would shift every later result onto the wrong probe. */
+  RETURN replace(replace(r, E'\r', '\\r'), E'\n', '\\n');
 EXCEPTION WHEN OTHERS THEN
   RETURN 'ERROR ' || SQLSTATE;
 END;
@@ -96,7 +101,7 @@ def probe_all(created_ok):
     if not selects:
         return {}
     out, err, _ = psql("\n".join(s + ";" for s in selects))
-    lines = [ln for ln in out.splitlines() if ln != ""]
+    lines = out.splitlines()
     if len(lines) != len(keys):
         sys.stderr.write("probe count mismatch: %d results for %d probes\n%s\n"
                          % (len(lines), len(keys), err))
