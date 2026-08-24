@@ -410,6 +410,81 @@ go_emit_str(GoTok *tk, StringInfo out)
 	appendStringInfoChar(out, '\'');
 }
 
+/* emit a Go format string as one SQL format() accepts.
+
+ * Go's verbs all render their operand as text, which is what format()'s %s
+ * does, so every directive becomes %s. format() takes only a '-' flag and a
+ * width, so Go's other flags and its precision field are dropped: the operand
+ * still appears, just without the padding Go would have applied. A doubled
+ * %% passes through, and a '%' that starts no directive is left alone.
+ */
+static void
+go_emit_format_str(GoTok *tk, StringInfo out)
+{
+	StringInfoData raw;
+	int			i;
+
+	initStringInfo(&raw);
+	go_emit_str(tk, &raw);		/* a quoted SQL literal, escapes decoded */
+
+	for (i = 0; i < raw.len; i++)
+	{
+		char		c = raw.data[i];
+		bool		dash = false;
+		int			j,
+					wstart,
+					wlen;
+
+		if (c != '%')
+		{
+			appendStringInfoChar(out, c);
+			continue;
+		}
+		if (i + 1 < raw.len && raw.data[i + 1] == '%')
+		{
+			appendStringInfoString(out, "%%");
+			i++;
+			continue;
+		}
+
+		j = i + 1;
+		while (j < raw.len && (raw.data[j] == '-' || raw.data[j] == '+' ||
+							   raw.data[j] == ' ' || raw.data[j] == '#' ||
+							   raw.data[j] == '0'))
+		{
+			if (raw.data[j] == '-')
+				dash = true;
+			j++;
+		}
+		wstart = j;
+		while (j < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+			j++;
+		wlen = j - wstart;
+		if (j < raw.len && raw.data[j] == '.')
+		{
+			j++;
+			while (j < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+				j++;
+		}
+		if (j >= raw.len ||
+			!((raw.data[j] >= 'a' && raw.data[j] <= 'z') ||
+			  (raw.data[j] >= 'A' && raw.data[j] <= 'Z')))
+		{
+			appendStringInfoChar(out, c);	/* not a directive */
+			continue;
+		}
+
+		appendStringInfoChar(out, '%');
+		if (dash)
+			appendStringInfoChar(out, '-');
+		if (wlen > 0)
+			appendBinaryStringInfo(out, raw.data + wstart, wlen);
+		appendStringInfoChar(out, 's');
+		i = j;
+	}
+	pfree(raw.data);
+}
+
 /* map a Go base type name to a PostgreSQL type; NULL if unknown */
 static const char *
 go_base_type(const char *s, int len)
@@ -580,6 +655,22 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 		close = go_match(g, lp, b);
 		if (close < 0)
 			return false;
+
+		/* fmt.Sprintf in expression position: reproduce the format string,
+		 * rewriting Go's verbs into the ones SQL format() understands */
+		if (go_ci(pkg, "fmt") && go_ci(meth, "Sprintf") &&
+			close > lp + 1 && g->t[lp + 1].kind == GO_STR)
+		{
+			go_sp(out);
+			appendStringInfoString(out, "format(");
+			go_emit_format_str(&g->t[lp + 1], out);
+			if (lp + 2 < close)
+				go_emit_range(g, lp + 2, close, out);
+			appendStringInfoChar(out, ')');
+			*ni = close + 1;
+			return true;
+		}
+
 		for (k = 0; r[k].pkg; k++)
 			if ((int) strlen(r[k].pkg) == pkg->len &&
 				strncmp(r[k].pkg, pkg->s, pkg->len) == 0 &&

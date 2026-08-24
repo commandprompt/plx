@@ -117,6 +117,9 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - `+` for string concatenation (use `||` or build a slice and `array_to_string`).
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.
+- `fmt.Sprintf` keeps a `-` flag and a width, but drops Go's other flags and its
+  precision field, since SQL `format()` has no equivalent. `%.2f` therefore
+  prints the operand in full instead of rounding it to two decimal places.
 
 ### plxcobol ([chapter](plxcobol.md))
 

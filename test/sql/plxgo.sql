@@ -193,3 +193,22 @@ CREATE FUNCTION g_circle(r float8) RETURNS float8 LANGUAGE plxgo AS $$
 	return pi * r * r
 $$;
 SELECT round(g_circle(2.0)::numeric, 5) AS should_be_12_56636;
+
+-- fmt.Sprintf in expression position: the format string is reproduced, and Go
+-- verbs are rewritten to the specifiers SQL format() understands
+CREATE FUNCTION g_sprintf(nm text, n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("user %s has %d items", nm, n)
+$$;
+SELECT g_sprintf('bob', 3) AS should_be_user_bob_has_3_items;
+
+-- %v (Go's default verb), a doubled %% literal, and a width field
+CREATE FUNCTION g_sprintf_verbs(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("[%v] [%5d] [%-4d] 100%% done", n, n, n)
+$$;
+SELECT g_sprintf_verbs(7) AS verbs;
+
+-- verbs with a precision field, which SQL format() has no equivalent for
+CREATE FUNCTION g_sprintf_prec(x float8) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%.2f|%8.3f", x, x)
+$$;
+SELECT g_sprintf_prec(1.5) AS prec;

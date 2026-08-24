@@ -158,6 +158,39 @@ load a full interpreter into the backend. The transpiler is C that parses
 untrusted input at `CREATE FUNCTION` time; it has a recursion-depth limit and is
 fuzzed (see `test/fuzz.py`).
 
+## Testing
+
+Four layers, each answering a different question.
+
+`make installcheck` runs the pg_regress suite in `test/sql`, one file per
+dialect plus the shared feature, output, string-builder and error files. This
+is the record of what each dialect accepts and what plpgsql it produces.
+
+`test/run_corpus.py` replays a corpus of Ruby programs and compares their
+output to a recorded expectation, including the programs that are supposed to
+be rejected.
+
+`test/fuzz.py` feeds mutated and pathological sources to every front end. It
+asserts nothing about the output; it asserts that the transpiler does not
+crash, hang, or exhaust memory on input written to break it.
+
+`make differentialcheck` runs `test/differential.py`, which answers the
+question the other three cannot. Each case is one small program written once
+as a plpgsql reference and once per dialect, then called with the same
+arguments. The reference is the plpgsql a PostgreSQL developer would have
+written for the same logic, so it acts as an oracle: plx claims a dialect body
+transpiles to plpgsql that behaves the same way, and a disagreement is a defect
+rather than a difference of opinion. Values are compared by their text form,
+with NULL distinguished from the empty string, and a case that raises must
+raise the same SQLSTATE.
+
+Some divergences are intended, and a case records them in a `documented` entry
+naming the dialects, the calls, and the reason. Those are reported separately
+rather than failing. The check also fails when a recorded divergence stops
+happening, so a limitation cannot quietly outlive the documentation that
+describes it. Where a case cannot cover a dialect, the run prints the gap
+instead of passing over it.
+
 ## Related documents
 
 - [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification.

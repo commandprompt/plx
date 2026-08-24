@@ -6,6 +6,27 @@ version in `plx.control` (currently `1.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- `plxgo`: `fmt.Sprintf` in expression position passed its Go format string
+  straight into SQL `format()`, so any verb other than `%s` raised
+  `unrecognized format() type specifier` when the function was called. The
+  transpile succeeded and the failure only appeared at run time, which made
+  `fmt.Sprintf("%d", n)`, the ordinary way to format an integer in Go, produce
+  a function that could not run. Go's verbs are now rewritten to the `%s` that
+  `format()` understands, keeping a `-` flag and a width and dropping the
+  flags and precision `format()` has no equivalent for. Found by the new
+  differential check.
+
+### Added
+
+- `make differentialcheck` (`test/differential.py`): each case is one program
+  written as a plpgsql reference and once per dialect, called with the same
+  arguments and required to agree with the reference on both values and error
+  SQLSTATEs. Intended divergences are recorded per case with a reason and
+  reported separately, and the check fails if a recorded divergence stops
+  happening, so a documented limitation cannot outlive its documentation.
+
 ### Changed
 
 - Internal refactor of the transpiler behind a `PlxSurface.parse_body` vtable
