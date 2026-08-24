@@ -54,6 +54,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - User guide: USERGUIDE.md
+  - Migrating to PostgreSQL: MIGRATION.md
   - Dialects:
       - Ruby (plxruby): plxruby.md
       - PHP (plxphp): plxphp.md
