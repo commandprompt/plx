@@ -4,7 +4,11 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
-## [Unreleased]
+## [1.3.2] - 2026-08-24
+
+Code-only patch release (no catalog changes) carrying a plxgo fix for
+`fmt.Sprintf` and the differential check that found it. Upgrade with
+`ALTER EXTENSION plx UPDATE TO '1.3.2'` after installing the new module.
 
 ### Fixed
 
@@ -14,9 +18,15 @@ version in `plx.control` (currently `1.0`).
   transpile succeeded and the failure only appeared at run time, which made
   `fmt.Sprintf("%d", n)`, the ordinary way to format an integer in Go, produce
   a function that could not run. Go's verbs are now rewritten to the `%s` that
-  `format()` understands, keeping a `-` flag and a width and dropping the
-  flags and precision `format()` has no equivalent for. Found by the new
-  differential check.
+  `format()` understands, keeping a `-` flag and a width and dropping the flags
+  and precision `format()` has no equivalent for. A `%` that starts no
+  directive is escaped rather than passed through, since a lone `%` is itself
+  an error to `format()`. Found by the new differential check.
+
+  Note that the verbs which change an operand's representation rather than its
+  padding render what `%s` renders, so `fmt.Sprintf("%x", 255)` yields `255`
+  and not `ff`. Convert explicitly where the representation matters. This is
+  recorded in `doc/plxgo.md` and `doc/LIMITATIONS.md`.
 
 ### Added
 
@@ -26,6 +36,9 @@ version in `plx.control` (currently `1.0`).
   SQLSTATEs. Intended divergences are recorded per case with a reason and
   reported separately, and the check fails if a recorded divergence stops
   happening, so a documented limitation cannot outlive its documentation.
+- `doc/MIGRATION.md`, a migration-led page comparing plx against rewriting by
+  hand, an embedded PL, `ora2pg`, and leaving the logic in the application,
+  including how to leave plx while keeping the generated plpgsql.
 
 ### Changed
 
