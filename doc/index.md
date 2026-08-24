@@ -53,6 +53,14 @@ and [feature parity](PARITY.md) is the construct-by-construct matrix.
 - **Familiar syntax, plpgsql performance.** Write in the dialect your team
   knows; run with plpgsql's execution and trust model.
 
+## Migrating
+
+If you are moving procedural code into PostgreSQL from Oracle, SQL Server, a
+mainframe, or an application codebase, [migrating to
+PostgreSQL](MIGRATION.md) covers how plx compares to the alternatives, what the
+migration looks like, and how to leave plx afterwards while keeping the
+generated plpgsql.
+
 ## Install
 
 Build from source against your PostgreSQL installation:
