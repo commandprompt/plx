@@ -272,3 +272,64 @@ SELECT round(g_circle(2.0)::numeric, 5) AS should_be_12_56636;
            12.56636
 (1 row)
 
+-- fmt.Sprintf in expression position: the format string is reproduced, and Go
+-- verbs are rewritten to the specifiers SQL format() understands
+CREATE FUNCTION g_sprintf(nm text, n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("user %s has %d items", nm, n)
+$$;
+SELECT g_sprintf('bob', 3) AS should_be_user_bob_has_3_items;
+ should_be_user_bob_has_3_items 
+--------------------------------
+ user bob has 3 items
+(1 row)
+
+-- %v (Go's default verb), a doubled %% literal, and a width field
+CREATE FUNCTION g_sprintf_verbs(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("[%v] [%5d] [%-4d] 100%% done", n, n, n)
+$$;
+SELECT g_sprintf_verbs(7) AS verbs;
+            verbs             
+------------------------------
+ [7] [    7] [7   ] 100% done
+(1 row)
+
+-- verbs with a precision field, which SQL format() has no equivalent for
+CREATE FUNCTION g_sprintf_prec(x float8) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%.2f|%8.3f", x, x)
+$$;
+SELECT g_sprintf_prec(1.5) AS prec;
+     prec     
+--------------
+ 1.5|     1.5
+(1 row)
+
+-- a '%' that starts no directive reaches the caller as a literal percent
+-- rather than tripping format() at run time
+CREATE FUNCTION g_sprintf_bare_pct() RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("100%")
+$$;
+SELECT g_sprintf_bare_pct() AS should_be_100_pct;
+ should_be_100_pct 
+-------------------
+ 100%
+(1 row)
+
+CREATE FUNCTION g_sprintf_pct_punct(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%d%!", n)
+$$;
+SELECT g_sprintf_pct_punct(50) AS pct_then_punct;
+ pct_then_punct 
+----------------
+ 50%!
+(1 row)
+
+-- verbs that change an operand's representation render what %s renders
+CREATE FUNCTION g_sprintf_repr(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%x|%o|%b|%q", n, n, n, n)
+$$;
+SELECT g_sprintf_repr(255) AS repr_verbs_are_text;
+ repr_verbs_are_text 
+---------------------
+ 255|255|255|255
+(1 row)
+

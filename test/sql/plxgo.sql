@@ -193,3 +193,40 @@ CREATE FUNCTION g_circle(r float8) RETURNS float8 LANGUAGE plxgo AS $$
 	return pi * r * r
 $$;
 SELECT round(g_circle(2.0)::numeric, 5) AS should_be_12_56636;
+
+-- fmt.Sprintf in expression position: the format string is reproduced, and Go
+-- verbs are rewritten to the specifiers SQL format() understands
+CREATE FUNCTION g_sprintf(nm text, n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("user %s has %d items", nm, n)
+$$;
+SELECT g_sprintf('bob', 3) AS should_be_user_bob_has_3_items;
+
+-- %v (Go's default verb), a doubled %% literal, and a width field
+CREATE FUNCTION g_sprintf_verbs(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("[%v] [%5d] [%-4d] 100%% done", n, n, n)
+$$;
+SELECT g_sprintf_verbs(7) AS verbs;
+
+-- verbs with a precision field, which SQL format() has no equivalent for
+CREATE FUNCTION g_sprintf_prec(x float8) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%.2f|%8.3f", x, x)
+$$;
+SELECT g_sprintf_prec(1.5) AS prec;
+
+-- a '%' that starts no directive reaches the caller as a literal percent
+-- rather than tripping format() at run time
+CREATE FUNCTION g_sprintf_bare_pct() RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("100%")
+$$;
+SELECT g_sprintf_bare_pct() AS should_be_100_pct;
+
+CREATE FUNCTION g_sprintf_pct_punct(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%d%!", n)
+$$;
+SELECT g_sprintf_pct_punct(50) AS pct_then_punct;
+
+-- verbs that change an operand's representation render what %s renders
+CREATE FUNCTION g_sprintf_repr(n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%x|%o|%b|%q", n, n, n, n)
+$$;
+SELECT g_sprintf_repr(255) AS repr_verbs_are_text;

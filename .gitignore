@@ -7,6 +7,10 @@
 test/results/
 regression.diffs
 regression.out
+# Python bytecode from the test runners
+__pycache__/
+*.pyc
+
 # editor
 *.swp
 *~

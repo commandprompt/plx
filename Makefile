@@ -6,7 +6,8 @@ EXTENSION = plx
 DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql
 
 # pg_regress suite (make installcheck). test/run_corpus.py is an additional
-# Ruby corpus runner.
+# Ruby corpus runner, and test/differential.py checks each dialect against a
+# plpgsql reference (make differentialcheck).
 REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_output plx_strbuild plx_errors
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
@@ -18,3 +19,12 @@ include $(PGXS)
 # PGXS does not track header dependencies; declare them so a header change
 # rebuilds every object (the shared enum/struct layout must stay consistent).
 $(OBJS): src/plx.h src/plx_int.h src/plx_engine.h
+
+PLX_PYTHON ?= python3
+
+# Differential check: run every dialect's version of a program against the
+# plpgsql the same program would have been written in, and require them to
+# agree. Needs the extension installed and a running server, like installcheck.
+.PHONY: differentialcheck
+differentialcheck:
+	$(PLX_PYTHON) test/differential.py
