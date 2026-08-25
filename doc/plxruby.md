@@ -294,8 +294,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   comparison with the literal `nil` becomes `IS NULL` / `IS NOT NULL`. A positive
   `if`/`while` condition treats NULL as false.
 - `String#+` remains SQL numeric `+`. Use interpolation for concatenation.
-- Interpolating a NULL renders as an empty string (`"x=#{nil}"` is `'x='`), not
-  the Ruby empty string of `nil.to_s`. The whole string is never made NULL.
+- Interpolating a NULL propagates it, so `"x=#{v}"` is NULL when `v` is NULL,
+  rather than the `'x='` that Ruby's `nil.to_s` would give. In a message being
+  built for `raise` the value falls back to an empty string instead, so one
+  NULL cannot swallow the message.
 - Comparisons use SQL type resolution, not Ruby's. `1 == "1"` compares an integer
   to a string literal, which SQL coerces and treats as equal; in Ruby it is
   false. Compare like-typed values.

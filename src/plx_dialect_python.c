@@ -436,8 +436,14 @@ emit_py_raise(Ctx *cx, int a, int b, int ind)
 		n = plx_parse_args(cx, call, sa, se, 8, &after);
 		plx_indent(&cx->out, ind);
 		if (n >= 1)
-			appendStringInfo(&cx->out, "RAISE EXCEPTION '%%', %s;\n",
-							 plx_rw_range(cx, sa[0], se[0], false));
+		{
+			char	   *m;
+
+			cx->diag_msg = true;
+			m = plx_rw_range(cx, sa[0], se[0], false);
+			cx->diag_msg = false;
+			appendStringInfo(&cx->out, "RAISE EXCEPTION '%%', %s;\n", m);
+		}
 		else
 			appendStringInfoString(&cx->out, "RAISE EXCEPTION 'exception';\n");
 	}

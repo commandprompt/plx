@@ -96,6 +96,7 @@ typedef struct PlxCtx
 	const char *exc_var;		/* current rescue exception var name */
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
+	bool		diag_msg;		/* rewriting a RAISE message: interpolate NULL as '' */
 	bool		retset;
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;

@@ -36,8 +36,13 @@ These follow from running as plpgsql and are not specific to any one dialect.
   so a comparison involving NULL is unknown rather than false, and `==`/`===`
   become `=`. Integer division and modulo truncate toward zero. Conditions must
   be boolean expressions; source-language "truthiness" (a bare value used as a
-  condition) is not emulated. Interpolating a NULL yields an empty string, and
-  never turns the whole string NULL.
+  condition) is not emulated. Interpolating a NULL propagates it: the value is
+  concatenated as-is, so the whole string becomes NULL the way SQL `||` does.
+  Two exceptions. A message being built for `RAISE` keeps each interpolated
+  value as an empty string, so one NULL cannot swallow the message. And
+  `plxgo`'s `fmt.Sprintf` and `plxcobol`'s `STRING-APPEND` do not propagate,
+  because they build their string through SQL `format()` and the `plx_strbuild`
+  accumulator respectively, neither of which treats a NULL operand as NULL.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
   (Ruby/PHP/Python/JS/TS), `||`, or `CONCAT(...)`.

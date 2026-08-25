@@ -272,8 +272,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - `===` and `!==` do not preserve PHP strict-type semantics; they behave like
   `==` and `!=` and use SQL type resolution. `"1" === 1` is false in PHP but
   compares as equal here. Compare like-typed values.
-- Interpolating a NULL renders as an empty string; the whole string is never
-  made NULL.
+- Interpolating a NULL propagates it, so the whole string becomes NULL rather
+  than rendering the value as an empty string. In a message being built for
+  `throw` the value falls back to an empty string instead, so one NULL cannot
+  swallow the message.
 - Integer division and modulo follow SQL (truncate toward zero).
 - PHP truthiness is not emulated. A condition must be a boolean expression. A
   non-boolean condition is an error reported by plpgsql when the function runs.
