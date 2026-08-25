@@ -28,3 +28,10 @@ PLX_PYTHON ?= python3
 .PHONY: differentialcheck
 differentialcheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
+
+# Check META.json against the PGXN Meta Spec. PGXN validates at upload time,
+# which is after a release is tagged and published, so check it before then.
+# Needs no server.
+.PHONY: metacheck
+metacheck:
+	$(PLX_PYTHON) test/check_meta.py

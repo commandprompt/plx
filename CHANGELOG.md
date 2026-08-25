@@ -4,6 +4,32 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [2.0.1] - 2026-08-25
+
+Packaging only. **The extension is unchanged at 2.0.0**, so there is no
+`ALTER EXTENSION plx UPDATE` for this release and nothing to install if you are
+already on 2.0.0. Only the distribution metadata changed, which is why the
+distribution version moved and the extension version did not.
+
+### Fixed
+
+- `META.json` listed the tag `pl/sql`, which PGXN rejects: a Tag may not contain
+  a slash. It is now `plsql`. This was found only when PGXN refused the 2.0.0
+  upload, since the check happens at upload time, after a release has been
+  tagged and published.
+
+### Added
+
+- `make metacheck` (`test/check_meta.py`) validates `META.json` against the
+  PGXN Meta Specification v1 before a release rather than at upload time, and
+  runs in CI. It reproduces the rejection above.
+
+  Worth recording, because the prose and the schema disagree and the prose is
+  the trap: the spec text says a Tag may contain no "slash, backslash, control,
+  or space" characters, but that sentence describes a *Term*. The Tag schema is
+  `^[^/\\\p{Cntrl}]{2,}$`, which permits spaces. So `sql server` is a valid
+  tag and an invalid term, and only the slash in `pl/sql` was ever a problem.
+
 ## [2.0.0] - 2026-08-24
 
 Major release for one behaviour change: interpolating a NULL now propagates it
