@@ -13,8 +13,9 @@ value or raises, and both outcomes are compared: values by their text form
 (NULL is distinguished from the empty string), errors by SQLSTATE, so that a
 dialect is required to fail the same way the reference fails.
 
-Run inside the container:
-    incus exec plexcellent -- python3 /root/plxsrc/test/differential.py
+Run it with `make differentialcheck`, which points PLX_PSQL at the psql
+belonging to PG_CONFIG. It needs the extension installed and a running server,
+the same preconditions as installcheck.
 """
 import os
 import subprocess
@@ -25,15 +26,27 @@ sys.path.insert(0, HERE)
 
 from differential_cases import CASES, DIALECTS, SETUP  # noqa: E402
 
-PSQL = os.environ.get("PLX_PSQL", "/usr/local/pgsql/bin/psql")
+PSQL = os.environ.get("PLX_PSQL", "psql")
 DB = os.environ.get("PLX_DB", "contrib_regression")
 
 
 def psql(sql, stop_on_error=False):
-    """Run SQL as the postgres user, returning (stdout, stderr, rc)."""
-    argv = ["runuser", "-u", "postgres", "--", PSQL, "-U", "postgres", "-d", DB,
-            "-X", "-q", "-A", "-t", "-v",
+    """Run SQL, returning (stdout, stderr, rc).
+
+    Two environments have to work. In the development container this runs as
+    root, which the server will not accept a connection from, so it drops to
+    the postgres account. In CI it runs as an unprivileged user who already
+    owns a superuser role, and dropping privileges would be wrong. PLX_PGUSER
+    overrides the role either way.
+    """
+    argv = [PSQL, "-d", DB, "-X", "-q", "-A", "-t", "-v",
             "ON_ERROR_STOP=" + ("1" if stop_on_error else "0")]
+    user = os.environ.get("PLX_PGUSER")
+    if os.geteuid() == 0:
+        argv = (["runuser", "-u", "postgres", "--"] + argv +
+                ["-U", user or "postgres"])
+    elif user:
+        argv += ["-U", user]
     p = subprocess.run(argv, input=sql, capture_output=True, text=True)
     return p.stdout, p.stderr, p.returncode
 

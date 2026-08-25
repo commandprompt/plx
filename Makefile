@@ -27,4 +27,4 @@ PLX_PYTHON ?= python3
 # agree. Needs the extension installed and a running server, like installcheck.
 .PHONY: differentialcheck
 differentialcheck:
-	$(PLX_PYTHON) test/differential.py
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
