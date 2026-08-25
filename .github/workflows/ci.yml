@@ -48,6 +48,11 @@ jobs:
           echo "PGHOST=/var/run/postgresql" >> "$GITHUB_ENV"
           echo "PGPORT=$port" >> "$GITHUB_ENV"
 
+      # No server needed, and it guards the release process rather than the
+      # code, so it runs before anything else can fail.
+      - name: Check META.json against the PGXN spec
+        run: make metacheck PG_CONFIG="$PG_CONFIG"
+
       - name: Run the regression suite
         run: make installcheck PG_CONFIG="$PG_CONFIG"
 
