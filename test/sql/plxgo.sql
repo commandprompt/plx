@@ -230,3 +230,19 @@ CREATE FUNCTION g_sprintf_repr(n int) RETURNS text LANGUAGE plxgo AS $$
 	return fmt.Sprintf("%x|%o|%b|%q", n, n, n, n)
 $$;
 SELECT g_sprintf_repr(255) AS repr_verbs_are_text;
+
+-- fmt.Sprintf concatenates, so a NULL operand propagates rather than rendering
+-- as an empty string
+CREATE FUNCTION g_sprintf_null(nm text, n int) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("user %s has %d items", nm, n)
+$$;
+SELECT g_sprintf_null('bob', 3) AS ok,
+       g_sprintf_null(NULL, 3) IS NULL AS null_name,
+       g_sprintf_null('bob', NULL) IS NULL AS null_count;
+
+-- but a panic message keeps its literal text when an operand is NULL
+CREATE FUNCTION g_panic_msg(who text) RETURNS int LANGUAGE plxgo AS $$
+	panic(fmt.Sprintf("bad user %s here", who))
+$$;
+DO $d$ BEGIN PERFORM g_panic_msg(NULL);
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'caught: [%]', SQLERRM; END $d$;

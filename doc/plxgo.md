@@ -141,15 +141,28 @@ placeholder per value argument (space-separated); there the format string's
 literal text and directives are not reproduced, since SQL `RAISE` has no printf
 verbs.
 
-`fmt.Sprintf` in an expression becomes SQL `format()`, and there the format
-string is reproduced. Every Go verb renders its operand as text, which is what
-`format()`'s `%s` does, so `%d`, `%v`, `%f`, `%q` and the rest all become `%s`.
-A `-` flag and a width are kept, so `%-8d` still pads to eight columns. Go's
-other flags and its precision field have no `format()` equivalent and are
-dropped, so `%.2f` prints the operand's full text rather than rounding it to
-two decimal places. Verbs that change an operand's representation rather than
-its padding are affected the same way: `%x`, `%o`, `%b`, `%e` and `%q` all
-render what `%s` would, so `fmt.Sprintf("%x", 255)` yields `255` and not `ff`.
+`fmt.Sprintf` in an expression becomes a SQL concatenation, with the format
+string's literal text reproduced between the operands:
+
+```go
+fmt.Sprintf("user %s has %d items", nm, n)
+```
+```sql
+'user ' || (nm)::text || ' has ' || (n)::text || ' items'
+```
+
+Concatenating rather than calling `format()` is what lets a NULL operand
+propagate, so the whole string is NULL instead of the operand quietly rendering
+as empty. A message built for `panic` is the exception and keeps each operand's
+empty-string fallback, so one NULL cannot swallow the message.
+
+Every verb renders its operand as text. A `-` flag and a width are kept and
+become `rpad`/`lpad`, so `%-8d` still pads to eight columns. Go's other flags
+and its precision field are dropped, so `%.2f` prints the operand's full text
+rather than rounding it to two decimal places. Verbs that change an operand's
+representation rather than its padding are affected the same way: `%x`, `%o`,
+`%b`, `%e` and `%q` all render the operand's text, so `fmt.Sprintf("%x", 255)`
+yields `255` and not `ff`.
 A doubled `%%` stays a literal `%`, and a `%` that starts no directive is
 passed through as a literal percent.
 

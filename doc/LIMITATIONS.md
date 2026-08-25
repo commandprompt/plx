@@ -40,9 +40,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
   concatenated as-is, so the whole string becomes NULL the way SQL `||` does.
   Two exceptions. A message being built for `RAISE` keeps each interpolated
   value as an empty string, so one NULL cannot swallow the message. And
-  `plxgo`'s `fmt.Sprintf` and `plxcobol`'s `STRING-APPEND` do not propagate,
-  because they build their string through SQL `format()` and the `plx_strbuild`
-  accumulator respectively, neither of which treats a NULL operand as NULL.
+  `plxcobol`'s `STRING-APPEND` does not propagate, because it builds its string
+  through the `plx_strbuild` accumulator, whose append treats a NULL as nothing
+  to append by design.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
   (Ruby/PHP/Python/JS/TS), `||`, or `CONCAT(...)`.
@@ -130,13 +130,12 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - `+` for string concatenation (use `||` or build a slice and `array_to_string`).
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.
-- `fmt.Sprintf` renders every operand in its SQL text form, because each Go verb
-  becomes `format()`'s `%s`. A `-` flag and a width are kept, so `%-8d` still
-  pads. Go's other flags and its precision field are dropped, so `%.2f` prints
-  the operand in full rather than rounding it. The verbs that change an
-  operand's representation rather than its padding do not do so here: `%x`,
-  `%o`, `%b`, `%e` and `%q` all produce the same text `%s` would, so
-  `fmt.Sprintf("%x", 255)` yields `255` and not `ff`. Convert explicitly (for
+- `fmt.Sprintf` renders every operand in its SQL text form. A `-` flag and a
+  width are kept, so `%-8d` still pads. Go's other flags and its precision field
+  are dropped, so `%.2f` prints the operand in full rather than rounding it. The
+  verbs that change an operand's representation rather than its padding do not
+  do so either: `%x`, `%o`, `%b`, `%e` and `%q` all produce the operand's text,
+  so `fmt.Sprintf("%x", 255)` yields `255` and not `ff`. Convert explicitly (for
   example `to_hex`) where the representation matters.
 
 ### plxcobol ([chapter](plxcobol.md))
