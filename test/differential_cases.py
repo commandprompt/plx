@@ -667,4 +667,361 @@ END;
 """,
         },
     },
+
+    # -------------------------------------------------------------- safediv
+    # Catching a raised error and returning a fallback. Division by zero is
+    # the error every dialect can provoke identically, and a NULL operand must
+    # produce NULL rather than entering the handler.
+    #
+    # plxgo and plxcobol are absent on purpose: Go's panic maps to RAISE with
+    # no recover(), and COBOL has no handler construct, so neither can express
+    # catching at all.
+    {
+        "name": "safediv",
+        "args": "a int, b int",
+        "returns": "int",
+        "calls": ["10, 2", "10, 0", "-9, 2", "NULL, 2", "0, 0"],
+        "reference": """
+BEGIN
+  RETURN a / b;
+EXCEPTION WHEN OTHERS THEN
+  RETURN -1;
+END;
+""",
+        "bodies": {
+            "plxruby": """
+begin
+  return a / b
+rescue => e
+  return -1
+end
+""",
+            "plxphp": """
+try { return $a / $b; }
+catch (Exception $e) { return -1; }
+""",
+            "plxjs": """
+try { return a / b; }
+catch (e) { return -1; }
+""",
+            "plxts": """
+try { return a / b; }
+catch (e) { return -1; }
+""",
+            "plxpython3": """
+try:
+    return a / b
+except Exception as e:
+    return -1
+""",
+            "plxplsql": """
+BEGIN
+  RETURN a / b;
+EXCEPTION WHEN OTHERS THEN
+  RETURN -1;
+END;
+""",
+            "plxtsql": """
+  DECLARE @r int;
+  BEGIN TRY
+    SET @r = @a / @b;
+  END TRY
+  BEGIN CATCH
+    SET @r = -1;
+  END CATCH
+  RETURN @r;
+""",
+        },
+    },
+
+    # ------------------------------------------------------------- arraysum
+    # Iterating an array. An empty array must leave the total untouched, a
+    # NULL element must poison it, and a NULL array itself must raise the same
+    # way the reference does rather than quietly iterating nothing.
+    #
+    # plxtsql is absent: it has no FOREACH form over an array.
+    {
+        "name": "arraysum",
+        "args": "a int[]",
+        "returns": "bigint",
+        "calls": ["ARRAY[1,2,3]", "ARRAY[5]", "ARRAY[]::int[]",
+                  "ARRAY[1,NULL,3]", "NULL::int[]"],
+        "reference": """
+DECLARE
+  total bigint := 0;
+  v int;
+BEGIN
+  FOREACH v IN ARRAY a LOOP
+    total := total + v;
+  END LOOP;
+  RETURN total;
+END;
+""",
+        "bodies": {
+            "plxruby": """
+total = 0 #:: bigint
+v #:: int
+a.each do |v|
+  total = total + v
+end
+return total
+""",
+            "plxphp": """
+$total = 0 /*:: bigint */;
+$v = 0 /*:: int */;
+foreach ($a as $v) {
+  $total = $total + $v;
+}
+return $total;
+""",
+            "plxjs": """
+let total = 0 /*:: bigint */;
+let v = 0 /*:: int */;
+for (const v of a) {
+  total = total + v;
+}
+return total;
+""",
+            "plxts": """
+let total: bigint = 0;
+let v: number = 0;
+for (const v of a) {
+  total = total + v;
+}
+return total;
+""",
+            "plxpython3": """
+total = 0 #:: bigint
+v #:: int
+for v in a:
+    total = total + v
+return total
+""",
+            "plxgo": """
+	var total int64 = 0
+	var v int
+	for _, v := range a {
+		total = total + int64(v)
+	}
+	return total
+""",
+            "plxcobol": """
+WORKING-STORAGE SECTION.
+01 WS-TOTAL PIC S9(18) VALUE 0.
+01 WS-V PIC S9(9).
+PROCEDURE DIVISION.
+    PERFORM WS-V OVER ARRAY A
+        ADD WS-V TO WS-TOTAL
+    END-PERFORM
+    GOBACK RETURNING WS-TOTAL.
+""",
+            "plxplsql": """
+  total bigint := 0;
+  v int;
+BEGIN
+  FOREACH v IN ARRAY a LOOP
+    total := total + v;
+  END LOOP;
+  RETURN total;
+END;
+""",
+        },
+    },
+
+    # ------------------------------------------------------------------ cmp
+    # Equality and inequality, where a dialect's == and != have to become SQL
+    # comparisons rather than anything stricter. With a NULL operand both
+    # comparisons are unknown, so neither branch is taken.
+    {
+        "name": "cmp",
+        "args": "a int, b int",
+        "returns": "text",
+        "calls": ["3, 3", "3, 4", "-1, -1", "NULL, 3", "NULL, NULL", "0, 0"],
+        "reference": """
+BEGIN
+  IF a = b THEN
+    RETURN 'eq';
+  END IF;
+  IF a <> b THEN
+    RETURN 'ne';
+  END IF;
+  RETURN 'unknown';
+END;
+""",
+        "bodies": {
+            "plxruby": """
+if a == b
+  return "eq"
+end
+if a != b
+  return "ne"
+end
+return "unknown"
+""",
+            "plxphp": """
+if ($a == $b) { return "eq"; }
+if ($a != $b) { return "ne"; }
+return "unknown";
+""",
+            "plxjs": """
+if (a === b) { return "eq"; }
+if (a !== b) { return "ne"; }
+return "unknown";
+""",
+            "plxts": """
+if (a === b) { return "eq"; }
+if (a !== b) { return "ne"; }
+return "unknown";
+""",
+            "plxpython3": """
+if a == b:
+    return "eq"
+if a != b:
+    return "ne"
+return "unknown"
+""",
+            "plxgo": """
+	if a == b {
+		return "eq"
+	}
+	if a != b {
+		return "ne"
+	}
+	return "unknown"
+""",
+            "plxcobol": """
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(7).
+PROCEDURE DIVISION.
+    MOVE "unknown" TO WS-R
+    IF A = B
+        MOVE "eq" TO WS-R
+    ELSE
+        IF A NOT = B
+            MOVE "ne" TO WS-R
+        END-IF
+    END-IF
+    GOBACK RETURNING WS-R.
+""",
+            "plxplsql": """
+BEGIN
+  IF a = b THEN
+    RETURN 'eq';
+  END IF;
+  IF a <> b THEN
+    RETURN 'ne';
+  END IF;
+  RETURN 'unknown';
+END;
+""",
+            "plxtsql": """
+  IF @a = @b
+    RETURN 'eq';
+  IF @a <> @b
+    RETURN 'ne';
+  RETURN 'unknown';
+""",
+        },
+    },
+
+    # ------------------------------------------------------------- strupper
+    # The per-dialect uppercase idiom has to reach SQL upper(). A NULL input
+    # must stay NULL rather than becoming the empty string.
+    {
+        "name": "strupper",
+        "args": "s text",
+        "returns": "text",
+        "calls": ["'hello'", "'Hello World'", "''", "NULL"],
+        "reference": """
+BEGIN
+  RETURN upper(s);
+END;
+""",
+        "bodies": {
+            "plxruby": """
+return upper(s)
+""",
+            "plxphp": """
+return upper($s);
+""",
+            "plxjs": """
+return upper(s);
+""",
+            "plxts": """
+return upper(s);
+""",
+            "plxpython3": """
+return upper(s)
+""",
+            "plxgo": """
+	return strings.ToUpper(s)
+""",
+            "plxcobol": """
+WORKING-STORAGE SECTION.
+01 WS-S PIC X(100).
+PROCEDURE DIVISION.
+    COMPUTE WS-S = upper(S)
+    GOBACK RETURNING WS-S.
+""",
+            "plxplsql": """
+BEGIN
+  RETURN UPPER(s);
+END;
+""",
+            "plxtsql": """
+  RETURN UPPER(@s);
+""",
+        },
+    },
+
+    # ------------------------------------------------------- strupper_native
+    # The same program written with each language's own uppercase idiom rather
+    # than a SQL call. plxgo maps a subset of the Go standard library, so
+    # strings.ToUpper reaches upper() and agrees with the reference. No other
+    # dialect maps its standard library: the method form is passed through and
+    # fails when the function is called, which is the documented design and not
+    # a defect. This case exists so that stays true on purpose. If a dialect
+    # ever gains the mapping, the check reports a stale exemption and the
+    # documentation gets updated with it.
+    {
+        "name": "strupper_native",
+        "args": "s text",
+        "returns": "text",
+        "calls": ["'hello'", "''", "NULL"],
+        "reference": """
+BEGIN
+  RETURN upper(s);
+END;
+""",
+        "bodies": {
+            "plxruby": """
+return s.upcase
+""",
+            "plxphp": """
+return strtoupper($s);
+""",
+            "plxjs": """
+return s.toUpperCase();
+""",
+            "plxts": """
+return s.toUpperCase();
+""",
+            "plxpython3": """
+return s.upper()
+""",
+            "plxgo": """
+	return strings.ToUpper(s)
+""",
+        },
+        "documented": [
+            {
+                "dialects": ["plxruby", "plxphp", "plxjs", "plxts",
+                             "plxpython3"],
+                "calls": ["'hello'", "''", "NULL"],
+                "reason": "only plxgo maps standard-library calls; elsewhere a "
+                          "method or library call is passed through to SQL and "
+                          "must name a real function (doc/LIMITATIONS.md)",
+            },
+        ],
+    },
 ]

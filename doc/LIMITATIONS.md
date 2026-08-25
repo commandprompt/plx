@@ -63,6 +63,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   cursors, dynamic SQL, `RAISE`, exception handling, triggers, `GET
   DIAGNOSTICS`). See [PARITY.md](PARITY.md) for the construct-by-construct matrix.
 
+A dialect gives you its syntax over SQL semantics, not its standard library.
+With the exception of the `fmt`/`strings`/`math`/`strconv` subset plxgo maps, a
+method or library call in a body is passed through and has to name a function
+PostgreSQL actually has. `s.upcase`, `s.toUpperCase()`, `s.upper()` and
+`strtoupper($s)` all transpile without complaint and then fail when the
+function is called; write `upper(s)` instead. The same applies to any other
+library call you would reach for out of habit.
+
 ## What each dialect does not support
 
 The per-dialect chapter is authoritative; this is a quick reference.
