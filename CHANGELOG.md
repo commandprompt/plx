@@ -4,6 +4,66 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [2.0.0] - 2026-08-24
+
+Major release for one behaviour change: interpolating a NULL now propagates it
+instead of rendering an empty string. Upgrade with
+`ALTER EXTENSION plx UPDATE TO '2.0.0'` after installing the new module.
+
+### Changed
+
+- **Interpolating a NULL propagates it.** An interpolated value is concatenated
+  as-is, so the whole string becomes NULL the way SQL `||` does. Previously
+  every interpolated value was wrapped in `COALESCE((x)::text, '')`, so a
+  missing value silently became a plausible-looking string:
+
+  ```sql
+  -- return "#{country}-#{region}-#{code}" with a NULL region
+  --   before: 'US--123'   a string that inserts, indexes and joins like data
+  --   now:    NULL
+  ```
+
+  This affects `plxruby`, `plxphp`, `plxjs`, `plxts`, `plxpython3` and
+  `plxgo`. `plxplsql` and `plxtsql` already propagated and are unchanged.
+  `plxcobol` builds strings through the `plx_strbuild` accumulator, whose
+  append treats a NULL as nothing to append by design, and is unchanged.
+
+  A message built for `RAISE` is the exception and keeps each interpolated
+  value's empty-string fallback, so one NULL cannot swallow a diagnostic and
+  the literal text of the message survives.
+
+- `plxgo`: `fmt.Sprintf` is lowered to a SQL concatenation rather than
+  `format()`, which is what allows the propagation, since `format()` renders a
+  NULL operand as empty and cannot be made to do otherwise. Observable output
+  is otherwise unchanged: verbs render their operand as text, a `-` flag and a
+  width still pad (now through `rpad`/`lpad`), other flags and the precision
+  field are still dropped, and `%%` is still a literal percent.
+
+### Upgrading
+
+`ALTER EXTENSION plx UPDATE TO '2.0.0'` does not change any function that
+already exists. plx transpiles at `CREATE FUNCTION` time and stores the result
+in `pg_proc.prosrc`, so a function in the catalog keeps the plpgsql it was
+created with. The new behaviour arrives the next time that function's DDL is
+run, which for most installations means the next deployment.
+
+To find the functions a redeployment will change:
+
+```sql
+SELECT p.oid::regprocedure
+  FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+ WHERE l.lanname LIKE 'plx%'
+   AND EXISTS (SELECT 1
+                 FROM regexp_split_to_table(p.prosrc, E'\n') AS ln
+                WHERE ln LIKE '%COALESCE((%)::text, ''''%'
+                  AND ln NOT LIKE '%RAISE %')
+ ORDER BY 1;
+```
+
+Each result interpolates a value that will become NULL when the value is NULL.
+Where the old rendering was wanted, make it explicit with `coalesce(x, '')` in
+the body.
+
 ## [1.3.2] - 2026-08-24
 
 Code-only patch release (no catalog changes) carrying a plxgo fix for
