@@ -51,6 +51,11 @@ jobs:
       - name: Run the regression suite
         run: make installcheck PG_CONFIG="$PG_CONFIG"
 
+      # Runs after installcheck, which is what creates contrib_regression and
+      # leaves the extension installed in it.
+      - name: Run the differential check
+        run: make differentialcheck PG_CONFIG="$PG_CONFIG"
+
       - name: Show diffs on failure
         if: failure()
         run: |
