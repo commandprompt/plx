@@ -391,16 +391,16 @@ END;
   RETURN 'user ' || @nm || ' has ' || @n || ' items';
 """,
         },
-        # Interpolation now propagates NULL in every dialect that has it, so
-        # the reference holds. plxgo builds this string through SQL format()
-        # and plxcobol through the plx_strbuild accumulator, neither of which
-        # propagates, so those two still diverge.
+        # Interpolation propagates NULL in every dialect that has it, so the
+        # reference holds. plxcobol builds this string through the plx_strbuild
+        # accumulator, whose append is deliberately not strict, so it still
+        # renders a NULL operand as empty.
         "documented": [
             {
-                "dialects": ["plxgo", "plxcobol"],
+                "dialects": ["plxcobol"],
                 "calls": ["NULL, 3", "'bob', NULL"],
-                "reason": "format() and the strbuild accumulator render a NULL "
-                          "operand as empty (doc/LIMITATIONS.md)",
+                "reason": "the plx_strbuild accumulator appends a NULL as "
+                          "nothing by design (doc/LIMITATIONS.md)",
             },
         ],
     },

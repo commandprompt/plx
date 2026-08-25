@@ -489,6 +489,184 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 	pfree(raw.data);
 }
 
+/* fmt.Sprintf with a literal format string, lowered to a || chain.
+
+ * format() renders a NULL operand as the empty string and cannot be made to do
+ * otherwise, so a Sprintf lowered to format() silently turns a missing value
+ * into a plausible-looking one. Concatenating instead lets NULL propagate the
+ * way SQL || does. Width survives as lpad/rpad; the operand still renders as
+ * text, so Go's representation verbs are unaffected by the change.
+ *
+ * A diagnostic message keeps a COALESCE per operand, so one NULL cannot swallow
+ * the message. Returns false when the directives and arguments do not line up,
+ * leaving the caller to fall back to format().
+ */
+static bool
+go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
+{
+	StringInfoData raw,
+				lit;
+	int			as[16],
+				ae[16];
+	int			nargs = 0,
+				ndir = 0,
+				ai = 0,
+				i,
+				d,
+				seg;
+	bool		first = true;
+	bool		diag = g->cx->diag_msg;
+
+	/* arguments follow the format literal and its comma */
+	i = lp + 2;
+	if (i < close && g->t[i].kind == GO_COMMA)
+	{
+		i++;
+		seg = i;
+		d = 0;
+		for (; i < close; i++)
+		{
+			GoKind		k = g->t[i].kind;
+
+			if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+				d++;
+			else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+				d--;
+			else if (k == GO_COMMA && d == 0)
+			{
+				if (nargs >= 16)
+					return false;
+				as[nargs] = seg;
+				ae[nargs] = i;
+				nargs++;
+				seg = i + 1;
+			}
+		}
+		if (seg < close)
+		{
+			if (nargs >= 16)
+				return false;
+			as[nargs] = seg;
+			ae[nargs] = close;
+			nargs++;
+		}
+	}
+
+	initStringInfo(&raw);
+	go_emit_str(&g->t[lp + 1], &raw);		/* quoted, escapes decoded */
+
+	/* count directives so a mismatch can fall back before emitting anything */
+	for (i = 1; i + 1 < raw.len; i++)
+	{
+		if (raw.data[i] != '%')
+			continue;
+		if (raw.data[i + 1] == '%')
+		{
+			i++;
+			continue;
+		}
+		ndir++;
+	}
+	if (ndir != nargs)
+	{
+		pfree(raw.data);
+		return false;
+	}
+
+	initStringInfo(&lit);
+	go_sp(out);
+	appendStringInfoChar(out, '(');
+	for (i = 1; i + 1 < raw.len; i++)
+	{
+		char		c = raw.data[i];
+		bool		dash = false;
+		int			j,
+					wstart,
+					wlen;
+
+		if (c != '%')
+		{
+			appendStringInfoChar(&lit, c);
+			continue;
+		}
+		if (raw.data[i + 1] == '%')
+		{
+			appendStringInfoChar(&lit, '%');	/* a literal percent needs no
+												 * escape outside format() */
+			i++;
+			continue;
+		}
+
+		j = i + 1;
+		while (j + 1 < raw.len && (raw.data[j] == '-' || raw.data[j] == '+' ||
+								   raw.data[j] == ' ' || raw.data[j] == '#' ||
+								   raw.data[j] == '0'))
+		{
+			if (raw.data[j] == '-')
+				dash = true;
+			j++;
+		}
+		wstart = j;
+		while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+			j++;
+		wlen = j - wstart;
+		if (j + 1 < raw.len && raw.data[j] == '.')
+		{
+			j++;
+			while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+				j++;
+		}
+
+		/* flush the literal run before the value */
+		if (lit.len > 0)
+		{
+			if (!first)
+				appendStringInfoString(out, " || ");
+			appendStringInfoChar(out, '\'');
+			appendBinaryStringInfo(out, lit.data, lit.len);
+			appendStringInfoChar(out, '\'');
+			resetStringInfo(&lit);
+			first = false;
+		}
+
+		if (!first)
+			appendStringInfoString(out, " || ");
+		if (diag)
+			appendStringInfoString(out, "COALESCE(");
+		if (wlen > 0)
+			appendStringInfoString(out, dash ? "rpad(" : "lpad(");
+		appendStringInfoChar(out, '(');
+		go_emit_range(g, as[ai], ae[ai], out);
+		appendStringInfoString(out, ")::text");
+		if (wlen > 0)
+		{
+			appendStringInfoString(out, ", ");
+			appendBinaryStringInfo(out, raw.data + wstart, wlen);
+			appendStringInfoChar(out, ')');
+		}
+		if (diag)
+			appendStringInfoString(out, ", '')");
+		first = false;
+		ai++;
+		i = j;
+	}
+	if (lit.len > 0)
+	{
+		if (!first)
+			appendStringInfoString(out, " || ");
+		appendStringInfoChar(out, '\'');
+		appendBinaryStringInfo(out, lit.data, lit.len);
+		appendStringInfoChar(out, '\'');
+		first = false;
+	}
+	if (first)								/* an empty format string */
+		appendStringInfoString(out, "''");
+	appendStringInfoChar(out, ')');
+	pfree(raw.data);
+	pfree(lit.data);
+	return true;
+}
+
 /* map a Go base type name to a PostgreSQL type; NULL if unknown */
 static const char *
 go_base_type(const char *s, int len)
@@ -665,6 +843,11 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 		if (go_ci(pkg, "fmt") && go_ci(meth, "Sprintf") &&
 			close > lp + 1 && g->t[lp + 1].kind == GO_STR)
 		{
+			if (go_emit_sprintf_concat(g, lp, close, out))
+			{
+				*ni = close + 1;
+				return true;
+			}
 			go_sp(out);
 			appendStringInfoString(out, "format(");
 			go_emit_format_str(&g->t[lp + 1], out);
@@ -1176,7 +1359,9 @@ go_simple(Go *g, int ind, int stop)
 			if (close > lp + 1)
 			{
 				appendStringInfoString(&g->cx->out, "RAISE EXCEPTION '%',");
+				g->cx->diag_msg = true;
 				go_emit_range(g, lp + 1, close, &g->cx->out);
+				g->cx->diag_msg = false;
 				appendStringInfoString(&g->cx->out, ";\n");
 			}
 			else
