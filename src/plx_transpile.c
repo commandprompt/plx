@@ -780,12 +780,22 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			if (nparts++)
 				appendStringInfoString(out, " || ");
 			/*
-			 * COALESCE to '' so an interpolated NULL renders as an empty string
-			 * rather than propagating NULL through || and annihilating the whole
-			 * string. This matches how the source languages render nil/null in
-			 * interpolation (a value, never the absence of the whole string).
+			 * A value is concatenated as-is, so an interpolated NULL propagates
+			 * through || and the whole string becomes NULL, which is what the
+			 * plpgsql a PostgreSQL developer would write does. Silently
+			 * substituting '' for a missing value is how a NULL ends up stored
+			 * as a plausible-looking string nobody notices.
+			 *
+			 * A diagnostic message is the exception. There the string is not
+			 * data, it is something a human has to read, and propagating NULL
+			 * would replace the whole message with nothing at the moment it is
+			 * most needed. In that position each value keeps the COALESCE so
+			 * the literal text of the message survives one NULL operand.
 			 */
-			appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
+			if (cx->diag_msg)
+				appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
+			else
+				appendStringInfo(out, "(%s)::text", rw);
 			continue;
 		}
 		if (raw && s[0] == '\\' && s + 1 < e)
@@ -1948,7 +1958,9 @@ plx_emit_raise_call(Ctx *cx, int a, int ind)
 			}
 	}
 	mt = plx_span_text(cx, as[mi], ae[mi]);
+	cx->diag_msg = true;
 	msg = plx_rewrite_expr(cx, mt, (int) strlen(mt), false);
+	cx->diag_msg = false;
 	plx_indent(&cx->out, ind);
 	appendStringInfo(&cx->out, "RAISE %s '%%', %s;\n", level, msg);
 }
@@ -2015,7 +2027,9 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 	{
 		char	   *mt = plx_span_text(cx, mstart, mend);
 
+		cx->diag_msg = true;
 		msg = plx_rewrite_expr(cx, mt, (int) strlen(mt), false);
+		cx->diag_msg = false;
 	}
 	/* options: , key: value ... -> USING KEY = value */
 	initStringInfo(&using);

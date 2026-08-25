@@ -391,18 +391,16 @@ END;
   RETURN 'user ' || @nm || ' has ' || @n || ' items';
 """,
         },
-        # doc/LIMITATIONS.md: "Interpolating a NULL yields an empty string, and
-        # never turns the whole string NULL." The dialects that build the
-        # string through interpolation or a builder therefore keep going where
-        # SQL concatenation would have produced NULL. plxplsql and plxtsql use
-        # || directly and so are held to the reference.
+        # Interpolation now propagates NULL in every dialect that has it, so
+        # the reference holds. plxgo builds this string through SQL format()
+        # and plxcobol through the plx_strbuild accumulator, neither of which
+        # propagates, so those two still diverge.
         "documented": [
             {
-                "dialects": ["plxruby", "plxphp", "plxjs", "plxts",
-                             "plxpython3", "plxgo", "plxcobol"],
+                "dialects": ["plxgo", "plxcobol"],
                 "calls": ["NULL, 3", "'bob', NULL"],
-                "reason": "interpolating NULL yields an empty string "
-                          "(doc/LIMITATIONS.md)",
+                "reason": "format() and the strbuild accumulator render a NULL "
+                          "operand as empty (doc/LIMITATIONS.md)",
             },
         ],
     },

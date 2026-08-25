@@ -270,8 +270,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   like `==` and `!=` and use SQL type resolution. `1 === "1"` is false in
   JavaScript but compares as equal here. Compare like-typed values.
 - `+` is numeric addition; use template literals for string building.
-- Interpolating a NULL in a template literal renders as an empty string, not the
-  JavaScript string `"null"`; the whole string is never made NULL.
+- Interpolating a NULL in a template literal propagates it, so the whole string
+  is NULL. It is neither the JavaScript string `"null"` nor an empty string. In
+  a message being built for `throw` the value falls back to an empty string
+  instead, so one NULL cannot swallow the message.
 - Integer division and modulo follow SQL (truncate toward zero).
 - JavaScript truthiness is not emulated. A condition must be a boolean
   expression. A non-boolean condition is an error reported by plpgsql when the

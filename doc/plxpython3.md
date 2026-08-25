@@ -254,8 +254,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Integer division follows SQL rules, not Python's `/` (float) and `//` (floor).
   Division and modulo truncate toward zero: `-7 // 2` is `-4` in Python but the
   SQL result here is `-3`, and `-7 % 2` is `1` in Python but `-1` here.
-- Interpolating a NULL in an f-string renders as an empty string, not the Python
-  string `"None"`; the whole string is never made NULL.
+- Interpolating a NULL in an f-string propagates it, so the whole string is
+  NULL. It is neither the Python string `"None"` nor an empty string. In a
+  message being built for `raise` the value falls back to an empty string
+  instead, so one NULL cannot swallow the message.
 - Comparisons use SQL type resolution. `1 == "1"` compares an integer to a string
   literal, which SQL coerces and treats as equal; in Python it is false.
 - Python truthiness is not emulated. A condition must be a boolean expression. A

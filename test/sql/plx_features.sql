@@ -91,14 +91,26 @@ DO LANGUAGE plxpython3 $$
 raise('notice', f'py do {2 * 3}')
 $$;
 
--- interpolating a NULL value renders an empty string in every dialect
+-- interpolating a NULL propagates it, so the whole value is NULL in every
+-- dialect, the way SQL || behaves
 CREATE FUNCTION f_interp_rb(x int) RETURNS text LANGUAGE plxruby AS $$ return "[#{x}]" $$;
 CREATE FUNCTION f_interp_php(x int) RETURNS text LANGUAGE plxphp AS $$ return "[{$x}]"; $$;
 CREATE FUNCTION f_interp_js(x int) RETURNS text LANGUAGE plxjs AS $$ return `[${x}]`; $$;
 CREATE FUNCTION f_interp_py(x int) RETURNS text LANGUAGE plxpython3 AS $$ return f"[{x}]" $$;
-SELECT f_interp_rb(NULL) AS rb, f_interp_php(NULL) AS php,
-       f_interp_js(NULL) AS js, f_interp_py(NULL) AS py;
+SELECT f_interp_rb(NULL) IS NULL AS rb, f_interp_php(NULL) IS NULL AS php,
+       f_interp_js(NULL) IS NULL AS js, f_interp_py(NULL) IS NULL AS py;
 SELECT f_interp_rb(7) AS rb7;
+
+-- but a message built for RAISE keeps each value as an empty string, so one
+-- NULL cannot swallow the text the message was written to carry
+CREATE FUNCTION f_msg_rb(x int) RETURNS void LANGUAGE plxruby AS $$
+raise notice: "value is [#{x}] here"
+$$;
+CREATE FUNCTION f_msg_py(x int) RETURNS void LANGUAGE plxpython3 AS $$
+raise('notice', f'value is [{x}] here')
+$$;
+SELECT f_msg_rb(7), f_msg_rb(NULL);
+SELECT f_msg_py(7), f_msg_py(NULL);
 
 -- OUT / INOUT parameters (audit): supported across dialects
 CREATE FUNCTION f_out(a int, OUT b int, OUT c int) LANGUAGE plxruby AS $$
