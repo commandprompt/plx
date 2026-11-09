@@ -77,7 +77,10 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	CHECK_FOR_INTERRUPTS();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "expression nested too deeply");
-	r = rewrite_expr_inner(cx, s, len, boolctx);
+	if (cx->surf->rewrite_expr)
+		r = cx->surf->rewrite_expr(cx, s, len, boolctx);
+	else
+		r = rewrite_expr_inner(cx, s, len, boolctx);
 	cx->depth--;
 	return r;
 }
@@ -328,6 +331,57 @@ interp_close(const PlxSurface *surf, const char *p, const char *e)
 	return e;
 }
 
+/*
+ * Lua long brackets. p is at '['; returns the level (the number of '='
+ * between the two brackets) when [=*[ opens a long bracket, else -1.
+ */
+static int
+lua_long_open(const char *p, const char *end)
+{
+	const char *q = p + 1;
+	int			lvl = 0;
+
+	while (q < end && *q == '=')
+	{
+		q++;
+		lvl++;
+	}
+	return (q < end && *q == '[') ? lvl : -1;
+}
+
+/*
+ * Scan from q (just past an opening long bracket of level lvl) for the
+ * matching ]=*]. Returns the position just past it, or NULL when the input
+ * ends first. Newlines are counted into *line. Linear: a run of '=' that does
+ * not close the bracket is stepped over whole, so no byte is examined twice.
+ */
+static const char *
+lua_long_close(const char *q, const char *end, int lvl, int *line)
+{
+	while (q < end)
+	{
+		if (*q == ']')
+		{
+			const char *r = q + 1;
+			int			k = 0;
+
+			while (r < end && *r == '=')
+			{
+				r++;
+				k++;
+			}
+			if (k == lvl && r < end && *r == ']')
+				return r + 1;
+			q = r;
+			continue;
+		}
+		if (*q == '\n')
+			(*line)++;
+		q++;
+	}
+	return NULL;
+}
+
 void
 plx_lex(Ctx *cx)
 {
@@ -534,6 +588,26 @@ plx_lex(Ctx *cx)
 			p = close ? close + 2 : end;
 			continue;
 		}
+		/* Lua: -- line comment, or a --[[ ... ]] / --[==[ ... ]==] long comment */
+		if (surf->cmt_dashdash && p[0] == '-' && p[1] == '-')
+		{
+			int			lvl;
+
+			if (surf->long_brackets && p[2] == '[' &&
+				(lvl = lua_long_open(p + 2, end)) >= 0)
+			{
+				int			startline = line;
+				const char *q = lua_long_close(p + 2 + lvl + 2, end, lvl, &line);
+
+				if (!q)
+					plx_err(cx, startline, "unfinished long comment");
+				p = q;
+				continue;
+			}
+			while (p < end && *p != '\n')
+				p++;
+			continue;
+		}
 		if (surf->cmt_hash && *p == '#')
 		{
 			while (p < end && *p != '\n')
@@ -632,6 +706,11 @@ plx_lex(Ctx *cx)
 				while (p < end && ((*p >= '0' && *p <= '9') || *p == '_'))
 					p++;
 			}
+			else if (surf->lua_ops && *p == '.' && p[1] != '.')
+			{
+				isflt = true;	/* Lua "3." is the float 3.0 */
+				p++;
+			}
 			if (*p == 'e' || *p == 'E')
 			{
 				isflt = true;
@@ -644,7 +723,43 @@ plx_lex(Ctx *cx)
 			PUSH(isflt ? T_FLOAT : T_INT);
 			continue;
 		}
-		if (*p == '\'' || *p == '"' || *p == '`')
+		/* Lua long string [[ ... ]] / [==[ ... ]==] (raw, may span lines) */
+		if (surf->long_brackets && *p == '[')
+		{
+			int			lvl = lua_long_open(p, end);
+
+			if (lvl >= 0)
+			{
+				int			startline = line;
+				const char *q = lua_long_close(p + lvl + 2, end, lvl, &line);
+
+				if (!q)
+					plx_err(cx, startline, "unfinished long string");
+				p = q;
+				PUSH(T_STRING);
+				t[n - 1].line = startline;
+				t[n - 1].quote = '[';
+				continue;
+			}
+		}
+		/* Lua: ".5" is a number */
+		if (surf->lua_ops && *p == '.' && p[1] >= '0' && p[1] <= '9')
+		{
+			p++;
+			while (p < end && *p >= '0' && *p <= '9')
+				p++;
+			if (*p == 'e' || *p == 'E')
+			{
+				p++;
+				if (*p == '+' || *p == '-')
+					p++;
+				while (p < end && *p >= '0' && *p <= '9')
+					p++;
+			}
+			PUSH(T_FLOAT);
+			continue;
+		}
+		if (*p == '\'' || *p == '"' || (*p == '`' && !surf->lua_ops))
 		{
 			char		q = *p;
 			bool		triple = (surf->fstrings && p + 2 < end &&
@@ -655,6 +770,15 @@ plx_lex(Ctx *cx)
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
 			t[n - 1].triple = triple;
+			if (surf->lua_ops)
+			{
+				/* keep later line numbers right after an escaped newline */
+				const char *c;
+
+				for (c = tokstart; c < p; c++)
+					if (*c == '\n')
+						line++;
+			}
 			continue;
 		}
 		switch (*p)
@@ -663,8 +787,18 @@ plx_lex(Ctx *cx)
 			case ')': p++; PUSH(T_RPAREN); if (paren > 0) paren--; continue;
 			case '[': p++; PUSH(T_LBRACKET); paren++; continue;
 			case ']': p++; PUSH(T_RBRACKET); if (paren > 0) paren--; continue;
-			case '{': p++; PUSH(T_LBRACE); continue;
-			case '}': p++; PUSH(T_RBRACE); continue;
+			case '{':
+				p++;
+				PUSH(T_LBRACE);
+				if (surf->lua_ops)
+					paren++;	/* a Lua table constructor may span lines */
+				continue;
+			case '}':
+				p++;
+				PUSH(T_RBRACE);
+				if (surf->lua_ops && paren > 0)
+					paren--;
+				continue;
 			case ',': p++; PUSH(T_COMMA); continue;
 			case ';': p++; PUSH(T_SEMI); continue;
 			case '.':
@@ -680,6 +814,33 @@ plx_lex(Ctx *cx)
 				PUSH(T_DOT);
 				continue;
 			default: break;
+		}
+		/* Lua operators, one at a time (maximal munch, not operator runs) */
+		if (surf->lua_ops)
+		{
+			static const char *const two[] = {
+				"==", "~=", "<=", ">=", "//", "::", "<<", ">>"
+			};
+			int			k;
+			bool		hit = false;
+
+			for (k = 0; k < (int) lengthof(two); k++)
+				if (p[0] == two[k][0] && p[1] == two[k][1])
+				{
+					p += 2;
+					hit = true;
+					break;
+				}
+			if (!hit && strchr("+-*/%^#&~|<>=:", *p))
+			{
+				p++;
+				hit = true;
+			}
+			if (hit)
+			{
+				PUSH(T_OP);
+				continue;
+			}
 		}
 		if (*p == '|')
 		{
@@ -1178,11 +1339,14 @@ plx_skip_seps(Ctx *cx)
  * as two variables. Merging them into one plpgsql variable silently changes
  * what the program computes, so a body that spells one name two ways is
  * rejected instead. COBOL, T-SQL and PL/SQL ignore case themselves, so for
- * them two spellings are one name, as in plpgsql.
+ * them two spellings are one name, as in plpgsql. A front end that sets
+ * own_name_case (Lua) gives each spelling its own plpgsql name itself.
  */
 static bool
 names_fold_case(Ctx *cx)
 {
+	if (cx->surf->own_name_case)
+		return true;
 	switch (cx->surf->block_style)
 	{
 		case PLX_BLK_COBOL:
@@ -4149,9 +4313,11 @@ plx_parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after)
 	{
 		TokKind		k = cx->t[p].kind;
 
-		if (k == T_LPAREN || k == T_LBRACKET)
+		/* a Lua table constructor {a, b} is one argument */
+		if (k == T_LPAREN || k == T_LBRACKET ||
+			(k == T_LBRACE && cx->surf->lua_ops))
 			depth++;
-		else if (k == T_RBRACKET)
+		else if (k == T_RBRACKET || (k == T_RBRACE && cx->surf->lua_ops))
 			depth--;
 		else if (k == T_RPAREN)
 		{
@@ -4269,6 +4435,24 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 	int			n = 0,
 				cap = 0;
 	StringInfoData lit;
+
+	/* a dialect without interpolation decodes its own literals (Lua) */
+	if (cx->surf->str_value)
+	{
+		char	   *v = cx->surf->str_value(cx, tk->s, tk->len);
+		int			vl = (int) strlen(v);
+
+		segs = palloc(sizeof(PlxTplSeg));
+		if (vl > 0)
+		{
+			segs[0].interp = false;
+			segs[0].s = v;
+			segs[0].len = vl;
+			n = 1;
+		}
+		*segs_out = segs;
+		return n;
+	}
 
 	initStringInfo(&lit);
 #define TPL_PUSH(isint, str, l) do { \
@@ -5168,12 +5352,18 @@ plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
 
 /* first non-space word of a SQL string is a row-returning verb? */
 static bool
-sql_is_row_returning(Tok *tk)
+sql_is_row_returning(Ctx *cx, Tok *tk)
 {
 	const char *s = tk->s + str_open_len(tk);
 	const char *e = tk->s + tk->len - str_close_len(tk);
 	static const char *verbs[] = {"select", "with", "values", "table", NULL};
 	int			i;
+
+	if (cx->surf->str_value)
+	{
+		s = cx->surf->str_value(cx, tk->s, tk->len);
+		e = s + strlen(s);
+	}
 
 	while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '('))
 		s++;
@@ -5326,7 +5516,7 @@ emit_perform(Ctx *cx, int a, int ind)
 		if (plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
 			appendStringInfo(&cx->out, binds ? "EXECUTE %s USING %s;\n" : "EXECUTE %s;\n",
 							 sqlv, binds);
-		else if (sql_is_row_returning(&cx->t[as[0]]))
+		else if (sql_is_row_returning(cx, &cx->t[as[0]]))
 			appendStringInfo(&cx->out, "PERFORM * FROM (%s) AS __plx_p_%d;\n",
 							 sqlv, ++cx->subq);
 		else
@@ -5426,6 +5616,12 @@ plx_emit_raise_call(Ctx *cx, int a, int ind)
 		Tok		   *st = &cx->t[as[0]];
 		const char *c = st->s + 1;
 		int			cl = st->len - 2, k;
+
+		if (cx->surf->str_value)
+		{
+			c = cx->surf->str_value(cx, st->s, st->len);
+			cl = (int) strlen(c);
+		}
 
 		for (k = 0; k < (int) (sizeof(lv) / sizeof(lv[0])); k++)
 			if ((int) strlen(lv[k].w) == cl && pg_strncasecmp(lv[k].w, c, cl) == 0)
@@ -5682,7 +5878,10 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				/* an f-string's prefix would be unquoted as part of the name */
 				if (pn->fstr || pn->triple)
 					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
-				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
+				if (cx->surf->str_value)
+					appendStringInfoString(o, cx->surf->str_value(cx, pn->s, pn->len));
+				else
+					appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}
 			else
 				appendStringInfoString(o, plx_rw_range(cx, as[0], ae[0], false));

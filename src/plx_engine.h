@@ -155,6 +155,8 @@ typedef struct PlxCtx
 	struct HTAB *appended;		/* plxphp: names that are the target of a .=
 								 * somewhere in the body (see php_appended) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
+	void	   *fe;				/* front-end private state; NULL unless the
+								 * dialect's parse_body sets it */
 } Ctx;
 
 /* ------------------------------------------------------ engine entry points */

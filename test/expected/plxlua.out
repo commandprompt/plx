@@ -8,3 +8,1591 @@ SELECT lanname, lanpltrusted FROM pg_language WHERE lanname = 'plxlua';
  plxlua  | t
 (1 row)
 
+-- the generated plpgsql, without the sentinel hash and the embedded original
+CREATE FUNCTION lua_src(nm text) RETURNS text LANGUAGE sql AS $$
+  SELECT regexp_replace(regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g'),
+                        '^/\*plx:v1:plxlua:[0-9a-f]+\*/\n', '')
+  FROM pg_proc WHERE proname = nm $$;
+CREATE TABLE lua_orders(grp int, amount bigint);
+INSERT INTO lua_orders VALUES (1, 10), (1, 20), (1, 30), (2, 5), (3, NULL);
+CREATE TABLE lua_emp(id int PRIMARY KEY, name text, sal numeric);
+INSERT INTO lua_emp VALUES (1, 'ann', 100), (2, 'bob', 200);
+CREATE TABLE lua_log(id serial, msg text);
+-- the SQLSTATE, message, detail and hint a call raises
+CREATE FUNCTION lua_caught(q text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text; hnt text;
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT,
+                          det = PG_EXCEPTION_DETAIL, hnt = PG_EXCEPTION_HINT;
+  RETURN st || ' ' || msg || ' / ' || det || ' / ' || hnt;
+END $$;
+-- ================================================================ basics
+CREATE FUNCTION lua_add(a int, b int) RETURNS int LANGUAGE plxlua AS $$
+return a + b * 2
+$$;
+SELECT lua_add(3, 4);
+ lua_add 
+---------
+      11
+(1 row)
+
+-- locals: literal inference, top-level folding, annotations, <const>
+CREATE FUNCTION lua_locals(x numeric) RETURNS text LANGUAGE plxlua AS $$
+local n = 42
+local label = "count"
+local ratio = 0.5
+local on = true
+local big = 3000000000
+local amount --:: numeric
+amount = x * ratio
+local rate <const> = 0.25
+local base <const> = 100 --:: numeric
+local copy = n
+return label .. " " .. n .. " " .. amount .. " " .. tostring(on) .. " " .. big .. " " .. base * rate .. " " .. copy
+$$;
+SELECT lua_locals(10);
+              lua_locals               
+---------------------------------------
+ count 42 5.0 true 3000000000 25.00 42
+(1 row)
+
+SELECT lua_src('lua_locals');
+                                                                       lua_src                                                                        
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                                             +
+   n integer := 42;                                                                                                                                  +
+   label text := 'count';                                                                                                                            +
+   ratio numeric := 0.5;                                                                                                                             +
+   on_2 boolean := true;                                                                                                                             +
+   big bigint := 3000000000;                                                                                                                         +
+   amount numeric;                                                                                                                                   +
+   rate CONSTANT numeric := 0.25;                                                                                                                    +
+   base CONSTANT numeric := 100;                                                                                                                     +
+   copy integer;                                                                                                                                     +
+ BEGIN                                                                                                                                               +
+   amount := x * ratio;                                                                                                                              +
+   copy := n;                                                                                                                                        +
+   RETURN label || ' ' || n::text || ' ' || amount::text || ' ' || on_2::text || ' ' || big::text || ' ' || (base * rate)::text || ' ' || copy::text;+
+ END;                                                                                                                                                +
+ 
+(1 row)
+
+-- an untyped local takes the type of its first value
+CREATE FUNCTION lua_late() RETURNS text LANGUAGE plxlua AS $$
+local g
+if true then g = "set later" end
+return g
+$$;
+SELECT lua_late();
+ lua_late  
+-----------
+ set later
+(1 row)
+
+-- ================================================================ control flow
+CREATE FUNCTION lua_grade(score int) RETURNS text LANGUAGE plxlua AS $$
+if score >= 90 then
+  return "A"
+elseif score >= 80 then
+  return "B"
+else
+  return "F"
+end
+$$;
+SELECT lua_grade(95), lua_grade(85), lua_grade(10), lua_grade(NULL);
+ lua_grade | lua_grade | lua_grade | lua_grade 
+-----------+-----------+-----------+-----------
+ A         | B         | F         | F
+(1 row)
+
+SELECT lua_src('lua_grade');
+         lua_src          
+--------------------------
+ BEGIN                   +
+   IF score >= 90 THEN   +
+     RETURN 'A';         +
+   ELSIF score >= 80 THEN+
+     RETURN 'B';         +
+   ELSE                  +
+     RETURN 'F';         +
+   END IF;               +
+ END;                    +
+ 
+(1 row)
+
+-- one statement per line is not required
+CREATE FUNCTION lua_fact(n int) RETURNS bigint LANGUAGE plxlua AS $$ if n <= 1 then return 1 end local r = 1 --:: bigint
+for i = 2, n do r = r * i end return r $$;
+SELECT lua_fact(1), lua_fact(10);
+ lua_fact | lua_fact 
+----------+----------
+        1 |  3628800
+(1 row)
+
+-- while, and repeat ... until whose condition sees the body's locals
+CREATE FUNCTION lua_loops(n int) RETURNS text LANGUAGE plxlua AS $$
+local i, total = 0, 0
+while i < n do
+  i = i + 1
+  total = total + i
+end
+local j = 0
+repeat
+  local k = j * 2
+  j = j + 1
+until k >= 6
+return total .. " " .. j
+$$;
+SELECT lua_loops(4);
+ lua_loops 
+-----------
+ 10 4
+(1 row)
+
+SELECT lua_src('lua_loops');
+                 lua_src                 
+-----------------------------------------
+ DECLARE                                +
+   i integer := 0;                      +
+   total integer := 0;                  +
+   j integer := 0;                      +
+   k integer;                           +
+ BEGIN                                  +
+   WHILE i < n LOOP                     +
+     i := i + 1;                        +
+     total := total + i;                +
+   END LOOP;                            +
+   LOOP                                 +
+     k := j * 2;                        +
+     j := j + 1;                        +
+     EXIT WHEN k >= 6;                  +
+   END LOOP;                            +
+   RETURN total::text || ' ' || j::text;+
+ END;                                   +
+ 
+(1 row)
+
+-- numeric for: literal steps become FOR [REVERSE] ... BY; a variable step
+-- counts iterations so a step of either sign is right
+CREATE FUNCTION lua_steps(a int, b int, st int) RETURNS text LANGUAGE plxlua AS $$
+local up = {} --:: int[]
+for i = 1, 10, 3 do up[#up + 1] = i end
+local down = {} --:: int[]
+for i = 10, 1, -3 do down[#down + 1] = i end
+local var = {} --:: int[]
+for i = a, b, st do table.insert(var, i) end
+local fl = {} --:: numeric[]
+for x = 0, 1, 0.25 do table.insert(fl, x) end
+return table.concat(up, ",") .. " | " .. table.concat(down, ",") .. " | " ..
+       table.concat(var, ",") .. " | " .. table.concat(fl, ",")
+$$;
+SELECT lua_steps(1, 10, 4), lua_steps(10, 1, -4), lua_steps(1, 0, 1);
+                       lua_steps                        |                        lua_steps                        |                     lua_steps                     
+--------------------------------------------------------+---------------------------------------------------------+---------------------------------------------------
+ 1,4,7,10 | 10,7,4,1 | 1,5,9 | 0.00,0.25,0.50,0.75,1.00 | 1,4,7,10 | 10,7,4,1 | 10,6,2 | 0.00,0.25,0.50,0.75,1.00 | 1,4,7,10 | 10,7,4,1 |  | 0.00,0.25,0.50,0.75,1.00
+(1 row)
+
+SELECT lua_src('lua_steps');
+                                                                       lua_src                                                                        
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                                             +
+   up int[] := '{}';                                                                                                                                 +
+   down int[] := '{}';                                                                                                                               +
+   var int[] := '{}';                                                                                                                                +
+   __plx_a_4 integer;                                                                                                                                +
+   __plx_s_5 integer;                                                                                                                                +
+   i integer;                                                                                                                                        +
+   fl numeric[] := '{}';                                                                                                                             +
+   __plx_a_8 numeric;                                                                                                                                +
+   __plx_s_9 numeric;                                                                                                                                +
+   x numeric;                                                                                                                                        +
+ BEGIN                                                                                                                                               +
+   FOR i IN 1..10 BY 3 LOOP                                                                                                                          +
+     up[cardinality(up) + 1] := i;                                                                                                                   +
+   END LOOP;                                                                                                                                         +
+   FOR i IN REVERSE 10..1 BY 3 LOOP                                                                                                                  +
+     down[cardinality(down) + 1] := i;                                                                                                               +
+   END LOOP;                                                                                                                                         +
+   __plx_a_4 := a;                                                                                                                                   +
+   __plx_s_5 := st;                                                                                                                                  +
+   FOR __plx_k_6 IN 0..floor(((b) - __plx_a_4)::numeric / __plx_s_5) LOOP                                                                            +
+     i := __plx_a_4 + __plx_k_6 * __plx_s_5;                                                                                                         +
+     var := array_append(var, i);                                                                                                                    +
+   END LOOP;                                                                                                                                         +
+   __plx_a_8 := 0;                                                                                                                                   +
+   __plx_s_9 := 0.25;                                                                                                                                +
+   FOR __plx_k_10 IN 0..floor(((1) - __plx_a_8)::numeric / __plx_s_9) LOOP                                                                           +
+     x := __plx_a_8 + __plx_k_10 * __plx_s_9;                                                                                                        +
+     fl := array_append(fl, x);                                                                                                                      +
+   END LOOP;                                                                                                                                         +
+   RETURN array_to_string(up, ',') || ' | ' || array_to_string(down, ',') || ' | ' || array_to_string(var, ',') || ' | ' || array_to_string(fl, ',');+
+ END;                                                                                                                                                +
+ 
+(1 row)
+
+-- a non-integer limit is floored, as Lua does
+CREATE FUNCTION lua_flimit(lim numeric) RETURNS int LANGUAGE plxlua AS $$
+local n = 0
+for i = 1, lim do n = n + 1 end
+return n
+$$;
+SELECT lua_flimit(2.9);
+ lua_flimit 
+------------
+          2
+(1 row)
+
+-- break, and the continue idiom (goto continue with ::continue:: at the end)
+CREATE FUNCTION lua_loopctl(n int) RETURNS int LANGUAGE plxlua AS $$
+local total = 0
+for i = 1, n do
+  if i == 3 then goto continue end
+  if i > 7 then break end
+  total = total + i
+  ::continue::
+end
+return total
+$$;
+SELECT lua_loopctl(0), lua_loopctl(5), lua_loopctl(10);
+ lua_loopctl | lua_loopctl | lua_loopctl 
+-------------+-------------+-------------
+           0 |          12 |          25
+(1 row)
+
+-- continue in a repeat loop still runs the until test
+CREATE FUNCTION lua_repcont() RETURNS text LANGUAGE plxlua AS $$
+local out, k = "", 0
+repeat
+  k = k + 1
+  if k == 2 then goto continue end
+  out = out .. k
+  ::continue::
+until k >= 4
+return out
+$$;
+SELECT lua_repcont();
+ lua_repcont 
+-------------
+ 134
+(1 row)
+
+SELECT lua_src('lua_repcont');
+                     lua_src                      
+--------------------------------------------------
+ DECLARE                                         +
+   out public.plx_strbuild := '';                +
+   k integer := 0;                               +
+ BEGIN                                           +
+   LOOP                                          +
+     <<__plx_rb_1>>                              +
+     BEGIN                                       +
+       k := k + 1;                               +
+       IF k = 2 THEN                             +
+         EXIT __plx_rb_1;                        +
+       END IF;                                   +
+       out := public.plx_sb_append(out, k::text);+
+     END;                                        +
+     EXIT WHEN k >= 4;                           +
+   END LOOP;                                     +
+   RETURN out;                                   +
+ END;                                            +
+ 
+(1 row)
+
+-- break out of an outer loop (a label right after it), continue an outer loop
+CREATE FUNCTION lua_nested(n int) RETURNS text LANGUAGE plxlua AS $$
+local out = ""
+for i = 1, n do
+  for j = 1, n do
+    if j > i then goto next_i end
+    if i * j > 6 then goto done end
+    out = out .. i .. j .. " "
+  end
+  ::next_i::
+end
+::done::
+local w = 0
+while w < 3 do
+  w = w + 1
+  for q = 1, 3 do
+    if w == 2 and q == 2 then goto skip end
+  end
+  out = out .. "w" .. w
+  ::skip::
+end
+return out
+$$;
+SELECT lua_nested(4);
+     lua_nested      
+---------------------
+ 11 21 22 31 32 w1w3
+(1 row)
+
+SELECT lua_src('lua_nested');
+                              lua_src                               
+--------------------------------------------------------------------
+ DECLARE                                                           +
+   out public.plx_strbuild := '';                                  +
+   w integer := 0;                                                 +
+ BEGIN                                                             +
+   <<__plx_lp_1>>                                                  +
+   FOR i IN 1..n LOOP                                              +
+     FOR j IN 1..n LOOP                                            +
+       IF j > i THEN                                               +
+         EXIT;                                                     +
+       END IF;                                                     +
+       IF i * j > 6 THEN                                           +
+         EXIT __plx_lp_1;                                          +
+       END IF;                                                     +
+       out := public.plx_sb_append(out, i::text || j::text || ' ');+
+     END LOOP;                                                     +
+   END LOOP;                                                       +
+   <<__plx_lp_3>>                                                  +
+   WHILE w < 3 LOOP                                                +
+     w := w + 1;                                                   +
+     FOR q IN 1..3 LOOP                                            +
+       IF w = 2 AND q = 2 THEN                                     +
+         CONTINUE __plx_lp_3;                                      +
+       END IF;                                                     +
+     END LOOP;                                                     +
+     out := public.plx_sb_append(out, 'w' || w::text);             +
+   END LOOP;                                                       +
+   RETURN out;                                                     +
+ END;                                                              +
+ 
+(1 row)
+
+-- do ... end is a block
+CREATE FUNCTION lua_doblock() RETURNS int LANGUAGE plxlua AS $$
+local x = 1
+do
+  local x = 2
+  x = x + 1
+end
+return x
+$$;
+SELECT lua_doblock();
+ lua_doblock 
+-------------
+           1
+(1 row)
+
+-- ================================================================ expressions
+-- .. concatenates (and propagates NULL); ~= is <>; nil is NULL
+CREATE FUNCTION lua_greet(nm text, n int) RETURNS text LANGUAGE plxlua AS $$
+return "user " .. nm .. " has " .. n .. " items"
+$$;
+SELECT lua_greet('bob', 3), lua_greet(NULL, 3) IS NULL AS null_propagates;
+      lua_greet       | null_propagates 
+----------------------+-----------------
+ user bob has 3 items | t
+(1 row)
+
+CREATE FUNCTION lua_cmp(a int, b int) RETURNS text LANGUAGE plxlua AS $$
+if a == nil or b == nil then return "missing" end
+if a ~= b then return "differ" end
+return "same"
+$$;
+SELECT lua_cmp(1, 1), lua_cmp(1, 2), lua_cmp(NULL, 2);
+ lua_cmp | lua_cmp | lua_cmp 
+---------+---------+---------
+ same    | differ  | missing
+(1 row)
+
+-- # is length() for a string and cardinality() for an array
+CREATE FUNCTION lua_len(s text, a int[]) RETURNS text LANGUAGE plxlua AS $$
+local t = {1, 2, 3}
+return #s .. " " .. #a .. " " .. #t .. " " .. #"literal"
+$$;
+SELECT lua_len('hello', ARRAY[4, 5]);
+ lua_len 
+---------
+ 5 2 3 7
+(1 row)
+
+-- table constructors are arrays (1-based, like PostgreSQL's); nesting is
+-- a multidimensional array; t["f"] on a record is the field f
+CREATE FUNCTION lua_tables() RETURNS text LANGUAGE plxlua AS $$
+local t = {10, 20, 30}
+local m = {{1, 2}, {3, 4}}
+local r = fetch_one("SELECT 7 AS f")
+t[2] = 25
+return t[1] .. " " .. t[2] .. " " .. m[2][1] .. " " .. r["f"] .. " " .. #m
+$$;
+SELECT lua_tables();
+ lua_tables  
+-------------
+ 10 25 3 7 4
+(1 row)
+
+-- arithmetic: // is floor division, % and / are SQL's, ^ is right associative
+CREATE FUNCTION lua_arith(a int, b int) RETURNS text LANGUAGE plxlua AS $$
+return a // b .. " " .. a / b .. " " .. a % b .. " " .. 2 ^ 3 ^ 2 .. " " .. -a ^ 2 .. " " .. 7 / 2.0
+$$;
+SELECT lua_arith(7, 2), lua_arith(-7, 2);
+            lua_arith             |              lua_arith              
+----------------------------------+-------------------------------------
+ 3 3 1 512 -49 3.5000000000000000 | -4 -3 -1 512 -49 3.5000000000000000
+(1 row)
+
+SELECT lua_src('lua_arith');
+                                                                                      lua_src                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ BEGIN                                                                                                                                                                            +
+   RETURN floor(a::numeric / b)::integer::text || ' ' || (a / b)::text || ' ' || (a % b)::text || ' ' || (2 ^ (3 ^ 2))::text || ' ' || (-(a ^ 2))::text || ' ' || (7 / 2.0)::text;+
+ END;                                                                                                                                                                             +
+ 
+(1 row)
+
+CREATE FUNCTION lua_bits(a int, b int) RETURNS text LANGUAGE plxlua AS $$
+return (a & b) .. " " .. (a | b) .. " " .. (a ~ b) .. " " .. (a << 2) .. " " .. (a >> 1) .. " " .. ~a
+$$;
+SELECT lua_bits(12, 10);
+    lua_bits     
+-----------------
+ 8 14 6 48 6 -13
+(1 row)
+
+-- conversions
+CREATE FUNCTION lua_conv(s text, n int) RETURNS text LANGUAGE plxlua AS $$
+return tostring(n) .. "|" .. tonumber(s) + 1 .. "|" .. tostring(n > 0)
+$$;
+SELECT lua_conv('2.5', 3);
+  lua_conv  
+------------
+ 3|3.5|true
+(1 row)
+
+-- string library and methods
+CREATE FUNCTION lua_strs(s text) RETURNS text LANGUAGE plxlua AS $$
+local a = s:upper() .. "|" .. string.lower(s) .. "|" .. s:len() .. "|" .. s:reverse()
+local b = s:sub(2, 4) .. "|" .. s:sub(-3) .. "|" .. string.sub(s, 2) .. "|" .. s:sub(3, 2) .. "|" .. ("ab"):rep(3)
+local c = string.byte("A") .. "|" .. string.char(72, 105) .. "|" .. s:byte(-1)
+return a .. " / " .. b .. " / " .. c
+$$;
+SELECT lua_strs('Hello');
+                        lua_strs                        
+--------------------------------------------------------
+ HELLO|hello|5|olleH / ell|llo|ello||ababab / 65|Hi|111
+(1 row)
+
+SELECT lua_src('lua_strs');
+                                                          lua_src                                                           
+----------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                   +
+   a text;                                                                                                                 +
+   b text;                                                                                                                 +
+   c text;                                                                                                                 +
+ BEGIN                                                                                                                     +
+   a := upper(s) || '|' || lower(s) || '|' || length(s)::text || '|' || reverse(s);                                        +
+   b := substr(s, 2, 3) || '|' || right(s, 3) || '|' || substr(s, 2) || '|' || substr(s, 1, 0) || '|' || repeat(('ab'), 3);+
+   c := ascii('A')::text || '|' || chr(72) || chr(105) || '|' || ascii(right(s, 1))::text;                                 +
+   RETURN a || ' / ' || b || ' / ' || c;                                                                                   +
+ END;                                                                                                                      +
+ 
+(1 row)
+
+-- string.sub with variable indexes follows Lua's rules
+CREATE FUNCTION lua_sub(s text, i int, j int) RETURNS text LANGUAGE plxlua AS $$
+return s:sub(i, j)
+$$;
+SELECT lua_sub('hello', 2, 3), lua_sub('hello', -3, -2), lua_sub('hello', 0, 10),
+       lua_sub('hello', -100, 2), lua_sub('hello', 4, 2), lua_sub('hello', 6, 9);
+ lua_sub | lua_sub | lua_sub | lua_sub | lua_sub | lua_sub 
+---------+---------+---------+---------+---------+---------
+ el      | ll      | hello   | he      |         | 
+(1 row)
+
+-- string.format lowers to concatenation, so a NULL operand propagates
+CREATE FUNCTION lua_fmt(n int, s text) RETURNS text LANGUAGE plxlua AS $$
+return string.format("[%5d][%-6s][%.2f][%x][%X][%s][%3s][%c]%%", n, s, 3.14159, 255, 255, s, "toolong", 65)
+$$;
+SELECT lua_fmt(42, 'hi'), lua_fmt(NULL, 'hi') IS NULL AS null_propagates;
+                    lua_fmt                     | null_propagates 
+------------------------------------------------+-----------------
+ [   42][hi    ][3.14][ff][FF][hi][toolong][A]% | t
+(1 row)
+
+SELECT lua_src('lua_fmt');
+                                                                                                                                                           lua_src                                                                                                                                                           
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ BEGIN                                                                                                                                                                                                                                                                                                                      +
+   RETURN '[' || lpad(n::text, GREATEST(5, length(n::text))) || '][' || rpad(s, GREATEST(6, length(s))) || '][' || round(3.14159::numeric, 2)::text || '][' || to_hex(255::bigint) || '][' || upper(to_hex(255::bigint)) || '][' || s || '][' || lpad('toolong', GREATEST(3, length('toolong'))) || '][' || chr(65) || ']%';+
+ END;                                                                                                                                                                                                                                                                                                                       +
+ 
+(1 row)
+
+CREATE FUNCTION lua_math(x numeric, a int, b int) RETURNS text LANGUAGE plxlua AS $$
+return math.floor(x) .. " " .. math.ceil(x) .. " " .. math.abs(-a) .. " " .. math.max(a, b, 3) .. " " ..
+       math.min(a, b) .. " " .. math.fmod(a, b) .. " " .. math.sqrt(16) .. " " .. string.format("%.4f", math.pi) ..
+       " " .. tostring(math.huge) .. " " .. math.maxinteger
+$$;
+SELECT lua_math(3.7, 7, 2), lua_math(-3.7, -7, 2);
+                     lua_math                      |                       lua_math                        
+---------------------------------------------------+-------------------------------------------------------
+ 3 4 7 7 2 1 4 3.1416 Infinity 9223372036854775807 | -4 -3 7 3 -7 -1 4 3.1416 Infinity 9223372036854775807
+(1 row)
+
+-- and/or: in a condition they are AND/OR with Lua truthiness (a variable of
+-- a non-boolean type is true when it is not nil); in a value, "x or d" is
+-- COALESCE, "c and a or b" is CASE, and "c and v or d" picks v or d
+CREATE FUNCTION lua_idioms(name text, n int) RETURNS text LANGUAGE plxlua AS $$
+local who = name or "anon"
+local sign = n > 0 and "pos" or "nonpos"
+local size = n == 1 and "one" or n == 2 and "two" or "many"
+local dbl = n and n * 2 or 0
+local both = name ~= nil and n ~= nil
+if name then who = who .. "!" end
+if not name then who = who .. "?" end
+return who .. " " .. sign .. " " .. size .. " " .. dbl .. " " .. tostring(both)
+$$;
+SELECT lua_idioms('bob', 2), lua_idioms(NULL, 1), lua_idioms(NULL, NULL);
+     lua_idioms      |      lua_idioms       |        lua_idioms         
+---------------------+-----------------------+---------------------------
+ bob! pos two 4 true | anon? pos one 2 false | anon? nonpos many 0 false
+(1 row)
+
+SELECT lua_src('lua_idioms');
+                                           lua_src                                            
+----------------------------------------------------------------------------------------------
+ DECLARE                                                                                     +
+   who public.plx_strbuild;                                                                  +
+   sign text;                                                                                +
+   size text;                                                                                +
+   dbl integer;                                                                              +
+   both_2 boolean;                                                                           +
+ BEGIN                                                                                       +
+   who := COALESCE(name, 'anon');                                                            +
+   sign := CASE WHEN n > 0 THEN 'pos' ELSE 'nonpos' END;                                     +
+   size := CASE WHEN n = 1 THEN 'one' WHEN n = 2 THEN 'two' ELSE 'many' END;                 +
+   dbl := COALESCE(CASE WHEN n IS NOT NULL THEN n * 2 END, 0);                               +
+   both_2 := name IS NOT NULL AND n IS NOT NULL;                                             +
+   IF name IS NOT NULL THEN                                                                  +
+     who := public.plx_sb_append(who, '!');                                                  +
+   END IF;                                                                                   +
+   IF name IS NULL THEN                                                                      +
+     who := public.plx_sb_append(who, '?');                                                  +
+   END IF;                                                                                   +
+   RETURN who::text || ' ' || sign || ' ' || size || ' ' || dbl::text || ' ' || both_2::text;+
+ END;                                                                                        +
+ 
+(1 row)
+
+-- SQL functions are called by name; a qualified name works too
+CREATE FUNCTION lua_sqlfn(s text) RETURNS text LANGUAGE plxlua AS $$
+return pg_catalog.upper(coalesce(s, "none")) .. " " .. strpos(s, "l")
+$$;
+SELECT lua_sqlfn('hello');
+ lua_sqlfn 
+-----------
+ HELLO 3
+(1 row)
+
+-- ================================================================ strings
+CREATE FUNCTION lua_esc() RETURNS text LANGUAGE plxlua AS $$
+local a = "tab\tnl\\n q\"' \65\x42\u{263A} \z
+      joined"
+local b = 'it\'s'
+local c = [==[back\slash ]] stays]==]
+local d = [[
+first newline dropped]]
+-- a comment
+--[[ a long
+     comment ]]
+return a .. "|" .. b .. "|" .. c .. "|" .. d
+$$;
+SELECT lua_esc();
+                                  lua_esc                                   
+----------------------------------------------------------------------------
+ tab     nl\n q"' AB☺ joined|it's|back\slash ]] stays|first newline dropped
+(1 row)
+
+SELECT lua_src('lua_esc');
+                     lua_src                     
+-------------------------------------------------
+ DECLARE                                        +
+   a text := E'tab\tnl\\n q"'' AB☺ joined';     +
+   b text := 'it''s';                           +
+   c text := E'back\\slash ]] stays';           +
+   d text := 'first newline dropped';           +
+ BEGIN                                          +
+   RETURN a || '|' || b || '|' || c || '|' || d;+
+ END;                                           +
+ 
+(1 row)
+
+-- backslashes survive standard_conforming_strings = off
+SET standard_conforming_strings = off;
+CREATE FUNCTION lua_bs() RETURNS text LANGUAGE plxlua AS $$ return [[C:\dir\]] $$;
+RESET standard_conforming_strings;
+SELECT lua_bs();
+ lua_bs  
+---------
+ C:\dir\
+(1 row)
+
+CREATE FUNCTION lua_nums() RETURNS text LANGUAGE plxlua AS $$
+return 0xFF .. " " .. 1e3 .. " " .. .5 .. " " .. 3. .. " " .. 3000000000
+$$;
+SELECT lua_nums();
+         lua_nums          
+---------------------------
+ 255 1000 0.5 3 3000000000
+(1 row)
+
+-- ================================================================ scoping
+-- locals are block scoped: a shadowing local, a same-scope redeclaration of
+-- another type, and a name that differs only in case get their own variable
+CREATE FUNCTION lua_scopes(n int) RETURNS text LANGUAGE plxlua AS $$
+local x = 1
+local out = ""
+do
+  local x = "inner"
+  out = out .. x
+end
+for i = 1, 2 do
+  local x = i * 10
+  out = out .. "," .. x
+end
+local X = 5
+local n = n * 100
+local y = 1
+local y = "now text"
+return out .. "," .. x .. "," .. X .. "," .. n .. "," .. y
+$$;
+SELECT lua_scopes(3);
+          lua_scopes          
+------------------------------
+ inner,10,20,1,5,300,now text
+(1 row)
+
+SELECT lua_src('lua_scopes');
+                                           lua_src                                           
+---------------------------------------------------------------------------------------------
+ DECLARE                                                                                    +
+   x integer := 1;                                                                          +
+   out public.plx_strbuild := '';                                                           +
+   x_2 text;                                                                                +
+   x_3 integer;                                                                             +
+   n_2 integer;                                                                             +
+   y integer := 1;                                                                          +
+   y_2 text := 'now text';                                                                  +
+ BEGIN                                                                                      +
+   x_2 := 'inner';                                                                          +
+   out := public.plx_sb_append(out, x_2);                                                   +
+   FOR i IN 1..2 LOOP                                                                       +
+     x_3 := i * 10;                                                                         +
+     out := public.plx_sb_append(out, ',' || x_3::text);                                    +
+   END LOOP;                                                                                +
+   x_3 := 5;                                                                                +
+   n_2 := n * 100;                                                                          +
+   RETURN out::text || ',' || x::text || ',' || x_3::text || ',' || n_2::text || ',' || y_2;+
+ END;                                                                                       +
+ 
+(1 row)
+
+-- a local in a loop body is nil again on every iteration
+CREATE FUNCTION lua_fresh() RETURNS text LANGUAGE plxlua AS $$
+local out = ""
+for i = 1, 3 do
+  local seen --:: int
+  if i == 2 then seen = i end
+  out = out .. tostring(seen ~= nil)
+end
+return out
+$$;
+SELECT lua_fresh();
+   lua_fresh    
+----------------
+ falsetruefalse
+(1 row)
+
+-- names plpgsql cannot take as variables are renamed
+CREATE FUNCTION lua_reserved() RETURNS text LANGUAGE plxlua AS $$
+local user = "u"
+local left, right = 1, 2
+local limit = 10
+for loop = 1, 2 do limit = limit + loop end
+return user .. left .. right .. limit
+$$;
+SELECT lua_reserved();
+ lua_reserved 
+--------------
+ u1213
+(1 row)
+
+SELECT lua_src('lua_reserved');
+                              lua_src                               
+--------------------------------------------------------------------
+ DECLARE                                                           +
+   user_2 text := 'u';                                             +
+   left_2 integer := 1;                                            +
+   right_2 integer := 2;                                           +
+   limit_2 integer := 10;                                          +
+ BEGIN                                                             +
+   FOR loop_2 IN 1..2 LOOP                                         +
+     limit_2 := limit_2 + loop_2;                                  +
+   END LOOP;                                                       +
+   RETURN user_2 || left_2::text || right_2::text || limit_2::text;+
+ END;                                                              +
+ 
+(1 row)
+
+-- an assignment to an undeclared name makes a function-wide local
+CREATE FUNCTION lua_global(n int) RETURNS int LANGUAGE plxlua AS $$
+if n > 0 then
+  result = n * 2
+else
+  result = 0
+end
+return result
+$$;
+SELECT lua_global(4);
+ lua_global 
+------------
+          8
+(1 row)
+
+-- multiple assignment evaluates every value first
+CREATE FUNCTION lua_swap(a int, b int) RETURNS text LANGUAGE plxlua AS $$
+local x, y = a, b
+x, y = y, x
+local p, q = 1 --:: int
+local t = {1, 2}
+t[1], t[2] = 10, 20
+return x .. "," .. y .. "," .. p .. "," .. tostring(q == nil) .. "," .. t[1] + t[2]
+$$;
+SELECT lua_swap(1, 2);
+   lua_swap    
+---------------
+ 2,1,1,true,30
+(1 row)
+
+SELECT lua_src('lua_swap');
+                                                     lua_src                                                     
+-----------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                        +
+   x integer;                                                                                                   +
+   y integer;                                                                                                   +
+   __plx_t_1 integer;                                                                                           +
+   __plx_t_2 integer;                                                                                           +
+   p int := 1;                                                                                                  +
+   q int;                                                                                                       +
+   t integer[] := ARRAY[1, 2];                                                                                  +
+ BEGIN                                                                                                          +
+   x := a;                                                                                                      +
+   y := b;                                                                                                      +
+   __plx_t_1 := y;                                                                                              +
+   __plx_t_2 := x;                                                                                              +
+   x := __plx_t_1;                                                                                              +
+   y := __plx_t_2;                                                                                              +
+   t[1] := 10;                                                                                                  +
+   t[2] := 20;                                                                                                  +
+   RETURN x::text || ',' || y::text || ',' || p::text || ',' || (q IS NULL)::text || ',' || (t[1] + t[2])::text;+
+ END;                                                                                                           +
+ 
+(1 row)
+
+-- ================================================================ string building
+-- s = s .. e on a string local appends through plx_strbuild
+CREATE FUNCTION lua_build(n int) RETURNS text LANGUAGE plxlua AS $$
+local s = ""
+for i = 1, n do
+  s = s .. i .. ","
+end
+return s
+$$;
+SELECT lua_build(5);
+ lua_build  
+------------
+ 1,2,3,4,5,
+(1 row)
+
+SELECT lua_src('lua_build');
+                      lua_src                      
+---------------------------------------------------
+ DECLARE                                          +
+   s public.plx_strbuild := '';                   +
+ BEGIN                                            +
+   FOR i IN 1..n LOOP                             +
+     s := public.plx_sb_append(s, i::text || ',');+
+   END LOOP;                                      +
+   RETURN s;                                      +
+ END;                                             +
+ 
+(1 row)
+
+-- ================================================================ SQL access
+CREATE FUNCTION lua_qsum(g int) RETURNS bigint LANGUAGE plxlua AS $$
+local total = 0 --:: bigint
+for row in query("SELECT amount FROM lua_orders WHERE grp = $1", g) do
+  total = total + row.amount
+end
+return total
+$$;
+SELECT lua_qsum(1), lua_qsum(2), lua_qsum(3), lua_qsum(4);
+ lua_qsum | lua_qsum | lua_qsum | lua_qsum 
+----------+----------+----------+----------
+       60 |        5 |          |        0
+(1 row)
+
+SELECT lua_src('lua_qsum');
+                                     lua_src                                      
+----------------------------------------------------------------------------------
+ DECLARE                                                                         +
+   total bigint := 0;                                                            +
+   row RECORD;                                                                   +
+ BEGIN                                                                           +
+   FOR row IN EXECUTE 'SELECT amount FROM lua_orders WHERE grp = $1' USING g LOOP+
+     total := total + row.amount;                                                +
+   END LOOP;                                                                     +
+   RETURN total;                                                                 +
+ END;                                                                            +
+ 
+(1 row)
+
+-- static SQL (no bind arguments) refers to variables by name
+CREATE FUNCTION lua_qstatic(g int) RETURNS bigint LANGUAGE plxlua AS $$
+local total = 0 --:: bigint
+for row in query("SELECT amount FROM lua_orders WHERE grp = g AND amount IS NOT NULL") do
+  total = total + row.amount
+end
+return total
+$$;
+SELECT lua_qstatic(1);
+ lua_qstatic 
+-------------
+          60
+(1 row)
+
+SELECT lua_src('lua_qstatic');
+                                       lua_src                                        
+--------------------------------------------------------------------------------------
+ DECLARE                                                                             +
+   total bigint := 0;                                                                +
+   row RECORD;                                                                       +
+ BEGIN                                                                               +
+   FOR row IN SELECT amount FROM lua_orders WHERE grp = g AND amount IS NOT NULL LOOP+
+     total := total + row.amount;                                                    +
+   END LOOP;                                                                         +
+   RETURN total;                                                                     +
+ END;                                                                                +
+ 
+(1 row)
+
+-- dynamic SQL built with .. and quote_ident
+CREATE FUNCTION lua_dyn(tbl text) RETURNS bigint LANGUAGE plxlua AS $$
+local sql = "SELECT count(*) AS c FROM " .. quote_ident(tbl)
+local n = 0 --:: bigint
+for r in query(sql) do n = r.c end
+local r2 = fetch_one(sql)
+return n + r2.c
+$$;
+SELECT lua_dyn('lua_emp');
+ lua_dyn 
+---------
+       4
+(1 row)
+
+-- fetch_one returns an all-NULL row when nothing matches; fetch_one! raises.
+-- found() follows static SQL; after a call with bind arguments (EXECUTE),
+-- row_count() tells
+CREATE FUNCTION lua_fetch(k int) RETURNS text LANGUAGE plxlua AS $$
+local e = fetch_one("SELECT name FROM lua_emp WHERE id = k")
+if not found() then return "none" end
+local e2 = fetch_one("SELECT name FROM lua_emp WHERE id = $1", k)
+local n = row_count()
+return e.name .. " " .. e2.name .. " " .. n
+$$;
+SELECT lua_fetch(1), lua_fetch(9);
+ lua_fetch | lua_fetch 
+-----------+-----------
+ ann ann 1 | none
+(1 row)
+
+CREATE FUNCTION lua_fetchx(k int) RETURNS text LANGUAGE plxlua AS $$
+local e --:: lua_emp%ROWTYPE
+e = fetch_one!("SELECT * FROM lua_emp WHERE id = $1", k)
+local s --:: lua_emp.sal%TYPE
+s = e.sal * 2
+return e.name .. ":" .. s
+$$;
+SELECT lua_fetchx(2);
+ lua_fetchx 
+------------
+ bob:400
+(1 row)
+
+SELECT lua_fetchx(9);
+ERROR:  query returned no rows
+CONTEXT:  PL/pgSQL function lua_fetchx(integer) line 6 at EXECUTE
+SELECT lua_src('lua_fetchx');
+                                lua_src                                 
+------------------------------------------------------------------------
+ DECLARE                                                               +
+   e lua_emp%ROWTYPE;                                                  +
+   s lua_emp.sal%TYPE;                                                 +
+ BEGIN                                                                 +
+   EXECUTE 'SELECT * FROM lua_emp WHERE id = $1' INTO STRICT e USING k;+
+   s := e.sal * 2;                                                     +
+   RETURN e.name::text || ':' || s::text;                              +
+ END;                                                                  +
+ 
+(1 row)
+
+-- execute, perform, row_count
+CREATE FUNCTION lua_dml(note text) RETURNS bigint LANGUAGE plxlua AS $$
+execute("INSERT INTO lua_log(msg) VALUES ($1)", note .. "!")
+perform([[INSERT INTO lua_log(msg) VALUES ('second')]])
+perform("SELECT 1")
+execute("UPDATE lua_log SET msg = upper(msg) WHERE msg = $1", note .. "!")
+local n = row_count()
+return n
+$$;
+SELECT lua_dml('first');
+ lua_dml 
+---------
+       1
+(1 row)
+
+SELECT msg FROM lua_log ORDER BY id;
+  msg   
+--------
+ FIRST!
+ second
+(2 rows)
+
+SELECT lua_src('lua_dml');
+                                      lua_src                                      
+-----------------------------------------------------------------------------------
+ DECLARE                                                                          +
+   n bigint;                                                                      +
+ BEGIN                                                                            +
+   EXECUTE 'INSERT INTO lua_log(msg) VALUES ($1)' USING note || '!';              +
+   INSERT INTO lua_log(msg) VALUES ('second');                                    +
+   PERFORM * FROM (SELECT 1) AS __plx_p_1;                                        +
+   EXECUTE 'UPDATE lua_log SET msg = upper(msg) WHERE msg = $1' USING note || '!';+
+   GET DIAGNOSTICS n = ROW_COUNT;                                                 +
+   RETURN n;                                                                      +
+ END;                                                                             +
+ 
+(1 row)
+
+-- cursors
+CREATE FUNCTION lua_cursor() RETURNS bigint LANGUAGE plxlua AS $$
+local total = 0 --:: bigint
+local c = open_cursor("SELECT sal FROM lua_emp ORDER BY id")
+local row = fetch_from(c)
+while found() do
+  total = total + row.sal
+  row = fetch_from(c)
+end
+close_cursor(c)
+local c2 = open_cursor("SELECT id FROM lua_emp ORDER BY id")
+move_cursor(c2)
+local r = fetch_from(c2)
+close_cursor(c2)
+return total + r.id
+$$;
+SELECT lua_cursor();
+ lua_cursor 
+------------
+        302
+(1 row)
+
+SELECT lua_src('lua_cursor');
+                      lua_src                      
+---------------------------------------------------
+ DECLARE                                          +
+   total bigint := 0;                             +
+   c refcursor;                                   +
+   row RECORD;                                    +
+   c2 refcursor;                                  +
+   r RECORD;                                      +
+ BEGIN                                            +
+   OPEN c FOR SELECT sal FROM lua_emp ORDER BY id;+
+   FETCH FROM c INTO row;                         +
+   WHILE FOUND LOOP                               +
+     total := total + row.sal;                    +
+     FETCH FROM c INTO row;                       +
+   END LOOP;                                      +
+   CLOSE c;                                       +
+   OPEN c2 FOR SELECT id FROM lua_emp ORDER BY id;+
+   MOVE FROM c2;                                  +
+   FETCH FROM c2 INTO r;                          +
+   CLOSE c2;                                      +
+   RETURN total + r.id;                           +
+ END;                                             +
+ 
+(1 row)
+
+-- any other function call is run with PERFORM
+CREATE FUNCTION lua_perfcall() RETURNS text LANGUAGE plxlua AS $$
+set_config("application_name", "plxlua_test", true)
+return current_setting("application_name")
+$$;
+SELECT lua_perfcall();
+ lua_perfcall 
+--------------
+ plxlua_test
+(1 row)
+
+-- procedures: call(), commit()
+CREATE PROCEDURE lua_proc_inner(m text) LANGUAGE plxlua AS $$
+execute("INSERT INTO lua_log(msg) VALUES ($1)", m)
+$$;
+CREATE PROCEDURE lua_proc(m text) LANGUAGE plxlua AS $$
+call("lua_proc_inner", m)
+commit()
+$$;
+CALL lua_proc('from a procedure');
+SELECT count(*) FROM lua_log WHERE msg = 'from a procedure';
+ count 
+-------
+     1
+(1 row)
+
+-- ================================================================ results
+CREATE FUNCTION lua_squares(n int) RETURNS SETOF int LANGUAGE plxlua AS $$
+for i = 1, n do
+  emit(i * i)
+end
+return
+$$;
+SELECT * FROM lua_squares(4);
+ lua_squares 
+-------------
+           1
+           4
+           9
+          16
+(4 rows)
+
+CREATE FUNCTION lua_table_fn(n int) RETURNS TABLE(k int, label text) LANGUAGE plxlua AS $$
+for i = 1, n do
+  emit(i, "item " .. i)
+end
+$$;
+SELECT * FROM lua_table_fn(3);
+ k | label  
+---+--------
+ 1 | item 1
+ 2 | item 2
+ 3 | item 3
+(3 rows)
+
+SELECT lua_src('lua_table_fn');
+             lua_src              
+----------------------------------
+ BEGIN                           +
+   FOR i IN 1..n LOOP            +
+     k := i;                     +
+     label := 'item ' || i::text;+
+     RETURN NEXT;                +
+   END LOOP;                     +
+ END;                            +
+ 
+(1 row)
+
+CREATE FUNCTION lua_rows() RETURNS SETOF lua_emp LANGUAGE plxlua AS $$
+for r in query("SELECT * FROM lua_emp ORDER BY id") do
+  return_next(r)
+end
+$$;
+SELECT * FROM lua_rows();
+ id | name | sal 
+----+------+-----
+  1 | ann  | 100
+  2 | bob  | 200
+(2 rows)
+
+CREATE FUNCTION lua_rq(minsal numeric) RETURNS SETOF lua_emp LANGUAGE plxlua AS $$
+return_query("SELECT * FROM lua_emp WHERE sal >= $1 ORDER BY id", minsal)
+$$;
+SELECT * FROM lua_rq(150);
+ id | name | sal 
+----+------+-----
+  2 | bob  | 200
+(1 row)
+
+-- return with OUT parameters assigns them
+CREATE FUNCTION lua_divmod(a int, b int, OUT q int, OUT r int) LANGUAGE plxlua AS $$
+return a // b, a - (a // b) * b
+$$;
+SELECT * FROM lua_divmod(17, 5);
+ q | r 
+---+---
+ 3 | 2
+(1 row)
+
+SELECT * FROM lua_divmod(-7, 2);
+ q  | r 
+----+---
+ -4 | 1
+(1 row)
+
+CREATE FUNCTION lua_outswap(INOUT a int, INOUT b int) LANGUAGE plxlua AS $$
+return b, a
+$$;
+SELECT * FROM lua_outswap(1, 2);
+ a | b 
+---+---
+ 2 | 1
+(1 row)
+
+-- ================================================================ errors
+CREATE FUNCTION lua_err(n int) RETURNS int LANGUAGE plxlua AS $$
+if n < 0 then error("negative: " .. n) end
+if n == 0 then error("zero", 2) end
+if n > 100 then
+  error{message = "too big", sqlstate = "22023", detail = "n is " .. n, hint = "use 100 or less"}
+end
+return n
+$$;
+SELECT lua_err(5);
+ lua_err 
+---------
+       5
+(1 row)
+
+SELECT lua_err(-1);
+ERROR:  negative: -1
+CONTEXT:  PL/pgSQL function lua_err(integer) line 4 at RAISE
+SELECT lua_err(0);
+ERROR:  zero
+CONTEXT:  PL/pgSQL function lua_err(integer) line 7 at RAISE
+SELECT lua_caught('SELECT lua_err(500)');
+                 lua_caught                 
+--------------------------------------------
+ 22023 too big / n is 500 / use 100 or less
+(1 row)
+
+CREATE FUNCTION lua_msgs(n int) RETURNS int LANGUAGE plxlua AS $$
+print("n is", n, nil)
+print()
+raise("warning", "careful: " .. n)
+assert(n > 0, "n must be positive, got " .. n)
+return n
+$$;
+SET client_min_messages = notice;
+SELECT lua_msgs(3);
+NOTICE:  n is	3	<NULL>
+NOTICE:  
+WARNING:  careful: 3
+ lua_msgs 
+----------
+        3
+(1 row)
+
+SELECT lua_msgs(-1);
+NOTICE:  n is	-1	<NULL>
+NOTICE:  
+WARNING:  careful: -1
+ERROR:  n must be positive, got -1
+CONTEXT:  PL/pgSQL function lua_msgs(integer) line 6 at ASSERT
+SELECT lua_msgs(NULL);
+NOTICE:  n is	<NULL>	<NULL>
+NOTICE:  
+WARNING:  careful: 
+ERROR:  n must be positive, got 
+CONTEXT:  PL/pgSQL function lua_msgs(integer) line 6 at ASSERT
+SET client_min_messages = warning;
+SELECT lua_src('lua_msgs');
+                               lua_src                                
+----------------------------------------------------------------------
+ BEGIN                                                               +
+   RAISE NOTICE E'%\t%\t%', 'n is', n, NULL;                         +
+   RAISE NOTICE '';                                                  +
+   RAISE WARNING '%', 'careful: ' || COALESCE(n::text, '');          +
+   ASSERT n > 0, 'n must be positive, got ' || COALESCE(n::text, '');+
+   RETURN n;                                                         +
+ END;                                                                +
+ 
+(1 row)
+
+-- pcall(function() ... end): ok, err; err.sqlstate and the other fields
+CREATE FUNCTION lua_safediv(a int, b int) RETURNS int LANGUAGE plxlua AS $$
+local r --:: int
+local ok, err = pcall(function()
+  r = a // b
+end)
+if not ok then
+  return -1
+end
+return r
+$$;
+SELECT lua_safediv(10, 3), lua_safediv(1, 0), lua_safediv(NULL, 2);
+ lua_safediv | lua_safediv | lua_safediv 
+-------------+-------------+-------------
+           3 |          -1 |            
+(1 row)
+
+SELECT lua_src('lua_safediv');
+                 lua_src                  
+------------------------------------------
+ DECLARE                                 +
+   r int;                                +
+   ok boolean;                           +
+   err text;                             +
+ BEGIN                                   +
+   BEGIN                                 +
+     r := floor(a::numeric / b)::integer;+
+     ok := true;                         +
+     err := NULL;                        +
+   EXCEPTION WHEN OTHERS THEN            +
+     ok := false;                        +
+     err := SQLERRM;                     +
+   END;                                  +
+   IF NOT ok THEN                        +
+     RETURN -1;                          +
+   END IF;                               +
+   RETURN r;                             +
+ END;                                    +
+ 
+(1 row)
+
+CREATE TABLE lua_uniq(id int PRIMARY KEY);
+CREATE FUNCTION lua_ins(k int) RETURNS text LANGUAGE plxlua AS $$
+local ok, err = pcall(function()
+  execute("INSERT INTO lua_uniq VALUES ($1)", k)
+end)
+if ok then return "inserted" end
+if err.sqlstate == "23505" then
+  return "duplicate on " .. err.constraint .. ": " .. err
+end
+error(err)
+$$;
+SELECT lua_ins(1), lua_ins(1);
+ lua_ins  |                                          lua_ins                                           
+----------+--------------------------------------------------------------------------------------------
+ inserted | duplicate on lua_uniq_pkey: duplicate key value violates unique constraint "lua_uniq_pkey"
+(1 row)
+
+SELECT lua_src('lua_ins');
+                                                                                       lua_src                                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                                                                            +
+   ok boolean;                                                                                                                                                                      +
+   err text;                                                                                                                                                                        +
+   __plx_e1_sqlstate text;                                                                                                                                                          +
+   __plx_e1_detail text;                                                                                                                                                            +
+   __plx_e1_hint text;                                                                                                                                                              +
+   __plx_e1_constraint text;                                                                                                                                                        +
+ BEGIN                                                                                                                                                                              +
+   BEGIN                                                                                                                                                                            +
+     EXECUTE 'INSERT INTO lua_uniq VALUES ($1)' USING k;                                                                                                                            +
+     ok := true;                                                                                                                                                                    +
+     err := NULL;                                                                                                                                                                   +
+     __plx_e1_sqlstate := NULL; __plx_e1_detail := NULL; __plx_e1_hint := NULL; __plx_e1_constraint := NULL;                                                                        +
+   EXCEPTION WHEN OTHERS THEN                                                                                                                                                       +
+     ok := false;                                                                                                                                                                   +
+     err := SQLERRM;                                                                                                                                                                +
+     GET STACKED DIAGNOSTICS __plx_e1_sqlstate = RETURNED_SQLSTATE, __plx_e1_detail = PG_EXCEPTION_DETAIL, __plx_e1_hint = PG_EXCEPTION_HINT, __plx_e1_constraint = CONSTRAINT_NAME;+
+   END;                                                                                                                                                                             +
+   IF ok THEN                                                                                                                                                                       +
+     RETURN 'inserted';                                                                                                                                                             +
+   END IF;                                                                                                                                                                          +
+   IF __plx_e1_sqlstate = '23505' THEN                                                                                                                                              +
+     RETURN 'duplicate on ' || __plx_e1_constraint || ': ' || err;                                                                                                                  +
+   END IF;                                                                                                                                                                          +
+   IF __plx_e1_detail <> '' AND __plx_e1_hint <> '' THEN RAISE EXCEPTION USING ERRCODE = __plx_e1_sqlstate, MESSAGE = err, DETAIL = __plx_e1_detail, HINT = __plx_e1_hint;          +
+   ELSIF __plx_e1_detail <> '' THEN RAISE EXCEPTION USING ERRCODE = __plx_e1_sqlstate, MESSAGE = err, DETAIL = __plx_e1_detail;                                                     +
+   ELSIF __plx_e1_hint <> '' THEN RAISE EXCEPTION USING ERRCODE = __plx_e1_sqlstate, MESSAGE = err, HINT = __plx_e1_hint;                                                           +
+   ELSE RAISE EXCEPTION USING ERRCODE = __plx_e1_sqlstate, MESSAGE = err;                                                                                                           +
+   END IF;                                                                                                                                                                          +
+ END;                                                                                                                                                                               +
+ 
+(1 row)
+
+-- error(err) raises the caught error again with its SQLSTATE, detail and hint
+CREATE FUNCTION lua_rethrow() RETURNS text LANGUAGE plxlua AS $$
+local ok, err = pcall(function()
+  error{message = "bad input", sqlstate = "22023", hint = "try again"}
+end)
+if err.sqlstate ~= "22023" then return "other" end
+error(err)
+$$;
+SELECT lua_caught('SELECT lua_rethrow()');
+           lua_caught           
+--------------------------------
+ 22023 bad input /  / try again
+(1 row)
+
+SELECT lua_caught('SELECT lua_ins(NULL)');
+                                                      lua_caught                                                       
+-----------------------------------------------------------------------------------------------------------------------
+ 23502 null value in column "id" of relation "lua_uniq" violates not-null constraint / Failing row contains (null). / 
+(1 row)
+
+-- if not pcall(...) then, a pcall statement, return inside the function,
+-- and the database work of a failed call is rolled back
+CREATE FUNCTION lua_pcforms(n int) RETURNS text LANGUAGE plxlua AS $$
+local out = "start"
+if not pcall(function() perform("SELECT 1/0") end) then
+  out = out .. ",caught"
+end
+pcall(function() execute("INSERT INTO lua_uniq VALUES ($1)", 1) end)
+local ok = pcall(function()
+  if n > 0 then return end
+  execute("INSERT INTO lua_uniq VALUES ($1)", 100)
+  error("negative")
+end)
+return out .. "," .. tostring(ok)
+$$;
+SELECT lua_pcforms(1), lua_pcforms(-1);
+    lua_pcforms    |    lua_pcforms     
+-------------------+--------------------
+ start,caught,true | start,caught,false
+(1 row)
+
+SELECT count(*) AS rolled_back FROM lua_uniq WHERE id = 100;
+ rolled_back 
+-------------
+           0
+(1 row)
+
+SELECT lua_src('lua_pcforms');
+                          lua_src                          
+-----------------------------------------------------------
+ DECLARE                                                  +
+   out public.plx_strbuild := 'start';                    +
+   __plx_ok_1 boolean;                                    +
+   ok boolean;                                            +
+ BEGIN                                                    +
+   BEGIN                                                  +
+     PERFORM * FROM (SELECT 1/0) AS __plx_p_1;            +
+     __plx_ok_1 := true;                                  +
+   EXCEPTION WHEN OTHERS THEN                             +
+     __plx_ok_1 := false;                                 +
+   END;                                                   +
+   IF NOT __plx_ok_1 THEN                                 +
+     out := public.plx_sb_append(out, ',caught');         +
+   END IF;                                                +
+   BEGIN                                                  +
+     EXECUTE 'INSERT INTO lua_uniq VALUES ($1)' USING 1;  +
+   EXCEPTION WHEN OTHERS THEN                             +
+     NULL;                                                +
+   END;                                                   +
+   <<__plx_pc_4>>                                         +
+   BEGIN                                                  +
+     IF n > 0 THEN                                        +
+       ok := true;                                        +
+       EXIT __plx_pc_4;                                   +
+     END IF;                                              +
+     EXECUTE 'INSERT INTO lua_uniq VALUES ($1)' USING 100;+
+     RAISE EXCEPTION '%', 'negative';                     +
+     ok := true;                                          +
+   EXCEPTION WHEN OTHERS THEN                             +
+     ok := false;                                         +
+   END;                                                   +
+   RETURN out::text || ',' || ok::text;                   +
+ END;                                                     +
+ 
+(1 row)
+
+-- ================================================================ triggers
+CREATE TABLE lua_items(id int, tag text, qty int);
+CREATE FUNCTION lua_stamp() RETURNS trigger LANGUAGE plxlua AS $$
+if TG_OP == "INSERT" then
+  NEW.tag = "row " .. NEW.id
+elseif NEW.qty < 0 then
+  error("negative quantity for " .. NEW.id)
+end
+return NEW
+$$;
+CREATE TRIGGER lua_items_stamp BEFORE INSERT OR UPDATE ON lua_items
+  FOR EACH ROW EXECUTE FUNCTION lua_stamp();
+INSERT INTO lua_items VALUES (1, NULL, 5), (2, 'x', 3);
+SELECT * FROM lua_items ORDER BY id;
+ id |  tag  | qty 
+----+-------+-----
+  1 | row 1 |   5
+  2 | row 2 |   3
+(2 rows)
+
+UPDATE lua_items SET qty = -1 WHERE id = 1;
+ERROR:  negative quantity for 1
+CONTEXT:  PL/pgSQL function lua_stamp() line 6 at RAISE
+SELECT lua_src('lua_stamp');
+                                     lua_src                                      
+----------------------------------------------------------------------------------
+ BEGIN                                                                           +
+   IF TG_OP = 'INSERT' THEN                                                      +
+     NEW.tag := 'row ' || NEW.id::text;                                          +
+   ELSIF NEW.qty < 0 THEN                                                        +
+     RAISE EXCEPTION '%', 'negative quantity for ' || COALESCE(NEW.id::text, '');+
+   END IF;                                                                       +
+   RETURN NEW;                                                                   +
+ END;                                                                            +
+ 
+(1 row)
+
+-- ================================================================ DO blocks
+SET client_min_messages = notice;
+DO LANGUAGE plxlua $$
+local s = 0
+for _, v in ipairs({1, 2, 3}) do s = s + v end
+print("sum", s)
+$$;
+NOTICE:  sum	6
+SET client_min_messages = warning;
+-- ================================================================ ipairs
+CREATE FUNCTION lua_ipairs(a int[]) RETURNS text LANGUAGE plxlua AS $$
+local total, idx = 0, 0
+for i, v in ipairs(a) do
+  total = total + v
+  idx = idx + i
+end
+local names = {"x", "y"}
+local s = ""
+for _, nm in ipairs(names) do s = s .. nm end
+local cnt = 0
+for i in ipairs(a) do cnt = cnt + 1 end
+local u = {} --:: text[]
+for _, w in ipairs(u) do --:: text
+  s = s .. w
+end
+return total .. "/" .. idx .. "/" .. s .. "/" .. cnt
+$$;
+SELECT lua_ipairs(ARRAY[1, 2, 3]);
+ lua_ipairs 
+------------
+ 6/6/xy/3
+(1 row)
+
+SELECT lua_src('lua_ipairs');
+                                     lua_src                                     
+---------------------------------------------------------------------------------
+ DECLARE                                                                        +
+   total integer := 0;                                                          +
+   idx integer := 0;                                                            +
+   i integer;                                                                   +
+   v integer;                                                                   +
+   names text[] := ARRAY['x', 'y'];                                             +
+   s public.plx_strbuild := '';                                                 +
+   nm text;                                                                     +
+   cnt integer := 0;                                                            +
+   u text[] := '{}';                                                            +
+   w text;                                                                      +
+ BEGIN                                                                          +
+   i := 0;                                                                      +
+   FOREACH v IN ARRAY a LOOP                                                    +
+     i := i + 1;                                                                +
+     total := total + v;                                                        +
+     idx := idx + i;                                                            +
+   END LOOP;                                                                    +
+   FOREACH nm IN ARRAY names LOOP                                               +
+     s := public.plx_sb_append(s, nm);                                          +
+   END LOOP;                                                                    +
+   FOR i IN 1..cardinality(a) LOOP                                              +
+     cnt := cnt + 1;                                                            +
+   END LOOP;                                                                    +
+   FOREACH w IN ARRAY u LOOP                                                    +
+     s := public.plx_sb_append(s, w);                                           +
+   END LOOP;                                                                    +
+   RETURN total::text || '/' || idx::text || '/' || s::text || '/' || cnt::text;+
+ END;                                                                           +
+ 
+(1 row)
+
+-- ================================================================ rejected
+\set VERBOSITY terse
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local function f() return 1 end return f() $$;
+ERROR:  plxlua: local function definitions are not supported
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local f = function() return 1 end return 1 $$;
+ERROR:  plxlua: functions are not supported (only the pcall(function() ... end) form)
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local t = {a = 1} return 1 $$;
+ERROR:  plxlua: a table with keys is a map, which is not supported; only an array constructor {a, b, c} is
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ for k, v in pairs(x) do end return 1 $$;
+ERROR:  plxlua: pairs() iterates a table as a map, which is not supported; use ipairs() for an array
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ goto skip return 1 ::skip:: return 2 $$;
+ERROR:  plxlua: goto skip: goto is only supported for continue (::skip:: as the last statement of the loop body) and for break (::skip:: right after the loop)
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ ::top:: return 1 $$;
+ERROR:  plxlua: labels are only supported for the loop idioms: ::continue:: as the last statement of a loop body, or a break target right after a loop
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return ("abc"):find("b") $$;
+ERROR:  plxlua: Lua patterns (string.find) are not supported; use strpos(), regexp_match() or regexp_replace()
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return 1, 2 $$;
+ERROR:  plxlua: multiple return values are not supported (declare OUT parameters to return several values)
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local x = setmetatable({}, {}) return 1 $$;
+ERROR:  plxlua: setmetatable() is not supported
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local co = coroutine.create(1) return 1 $$;
+ERROR:  plxlua: the Lua coroutine library is not available in plxlua
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local x = ... return 1 $$;
+ERROR:  plxlua: varargs (...) are not supported
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ break $$;
+ERROR:  plxlua: break outside a loop
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ while true do local ok = pcall(function() break end) end $$;
+ERROR:  plxlua: break outside a loop
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local x = pcall(f) return 1 $$;
+ERROR:  plxlua: pcall is only supported as pcall(function() ... end)
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local ok = pcall(function() return 1 end) return 1 $$;
+ERROR:  plxlua: returning a value from the function given to pcall is not supported
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local x return x $$;
+ERROR:  plxlua: cannot infer a PostgreSQL type for local variable "x"
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local r = fetch_one("select 1 as a") if r then return 1 end return 0 $$;
+ERROR:  plxlua: a record cannot be used as a condition; test found() after fetching it
+CREATE FUNCTION lua_bad() RETURNS SETOF int LANGUAGE plxlua AS $$ return 5 $$;
+ERROR:  plxlua: use emit(...) to produce rows in a set-returning function, and a bare return to end it
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ emit(1) $$;
+ERROR:  plxlua: emit() is only valid in a set-returning function
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return string.format("%q", "a") $$;
+ERROR:  plxlua: string.format: the %q directive is not supported (use %s, %d, %i, %f, %x, %X or %c)
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local k <const> = 1 k = 2 return k $$;
+ERROR:  plxlua: attempt to assign to const variable "k"
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local a <close> = 1 return 1 $$;
+ERROR:  plxlua: the <close> attribute is not supported
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ for i = 1, 10, 0 do end return 1 $$;
+ERROR:  plxlua: 'for' step is zero
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return query("select 1") $$;
+ERROR:  plxlua: query() is only valid as a for loop iterator: for r in query(...) do
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return os.time() $$;
+ERROR:  plxlua: the Lua os library is not available in plxlua
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return "a\q" $$;
+ERROR:  plxlua: invalid escape sequence '\q'
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return "a\0b" $$;
+ERROR:  plxlua: a string cannot contain a NUL character in PostgreSQL
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return x != y $$;
+ERROR:  plxlua: unexpected '!='
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ local __plx_x = 1 return 1 $$;
+ERROR:  plxlua: names beginning with __plx are reserved
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ if x then return 1 $$;
+ERROR:  plxlua: 'end' expected, found end of input
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ end $$;
+ERROR:  plxlua: unexpected 'end'
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ x, t.y = 1, x $$;
+ERROR:  plxlua: this multiple assignment reads a variable it also assigns, and the type of "t.y" is not known; assign the values one at a time
+CREATE PROCEDURE lua_badp() LANGUAGE plxlua AS $$ return 1 $$;
+ERROR:  plxlua: a procedure cannot return a value
+-- hostile input: unterminated strings and comments, deep nesting, long chains
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return "unterminated $$;
+ERROR:  plxlua: unfinished string
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ return [==[ never closed ]=] $$;
+ERROR:  plxlua: unfinished long string
+CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS $$ --[[ never closed
+return 1 $$;
+ERROR:  plxlua: unfinished long comment
+DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS '
+  || quote_literal(repeat('if x then ', 3000) || 'y = 1 ' || repeat('end ', 3000)); END $$;
+ERROR:  plxlua: expression nested too deeply
+DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS '
+  || quote_literal('return ' || repeat('(', 5000) || '1' || repeat(')', 5000)); END $$;
+ERROR:  plxlua: expression nested too deeply
+DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS '
+  || quote_literal('return 1' || repeat(' == 1', 5000)); END $$;
+ERROR:  plxlua: expression nested too deeply
+DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS '
+  || quote_literal('return [' || repeat('=', 50000) || '[x]' || repeat('=', 49999) || ']'); END $$;
+ERROR:  plxlua: unfinished long string
+\set VERBOSITY default
+-- a long left-associative chain is fine, and its text stays linear
+DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_longchain() RETURNS bigint LANGUAGE plxlua AS '
+  || quote_literal('return 0' || repeat(' + 1', 20000)); END $$;
+SELECT length(prosrc) < 300000 AS linear FROM pg_proc WHERE proname = 'lua_longchain';
+ linear 
+--------
+ t
+(1 row)
+
