@@ -1471,6 +1471,15 @@ plx_span_text(Ctx *cx, int a, int b)
 {
 	const char *st, *en;
 
+	/*
+	 * Type-annotation tokens carry no source span (s == NULL), so trim them
+	 * off both ends; a span that began on one used to compute its length
+	 * from a NULL pointer and crash the backend in pnstrdup.
+	 */
+	while (a < b && cx->t[a].s == NULL)
+		a++;
+	while (b > a && cx->t[b - 1].s == NULL)
+		b--;
 	if (b <= a)
 		return pstrdup("");
 	st = cx->t[a].s;
@@ -1510,6 +1519,68 @@ plx_indent(StringInfo o, int n)
 
 	for (i = 0; i < n; i++)
 		appendStringInfoString(o, "  ");
+}
+
+/*
+ * Enter a finally/ensure body. The lowering below emits that body twice (once
+ * per exit path), so a finally nested inside a finally doubles per level: a
+ * few hundred bytes of source could otherwise demand gigabytes of output. The
+ * caller decrements cx->ensuredepth after parsing the body.
+ */
+void
+plx_ensure_enter(Ctx *cx, int line)
+{
+	if (++cx->ensuredepth > PLX_MAX_ENSURE_DEPTH)
+		plx_err(cx, line, "finally/ensure blocks nested too deeply inside one another");
+}
+
+/*
+ * Emit a try/rescue[/finally] statement (shared by every front end):
+ *
+ *   BEGIN                          -- only when there is a finally body
+ *     BEGIN body EXCEPTION arms END;
+ *   EXCEPTION WHEN OTHERS THEN
+ *     finally; RAISE;
+ *   END;
+ *   finally;                       -- normal path, outside the handler
+ *
+ * The normal-path copy runs after the protected block rather than inside it,
+ * so an error raised by the finally body itself is not caught and does not
+ * run the finally body a second time.
+ */
+void
+plx_emit_try(StringInfo o, int ind, const char *body, int nrescue,
+			 const char *arms, const char *ensure_body)
+{
+	int			in = ensure_body ? ind + 1 : ind;
+
+	if (ensure_body)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "BEGIN\n");
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "BEGIN\n");
+	appendStringInfoString(o, body);
+	if (nrescue)
+	{
+		plx_indent(o, in);
+		appendStringInfoString(o, "EXCEPTION\n");
+		appendStringInfoString(o, arms);
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "END;\n");
+	if (ensure_body)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
+		appendStringInfoString(o, ensure_body);
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "RAISE;\n");
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+		appendStringInfoString(o, ensure_body);
+	}
 }
 
 /* ---------------------------------------------------------------- leaves */

@@ -138,3 +138,10 @@ if x is not None:
 return "?"
 $$;
 SELECT py_isnull(NULL), py_isnull(5);
+
+-- a type annotation inside a call argument list is ignored (it used to give a
+-- span with no source text and crash the backend)
+DO LANGUAGE plxpython3 $p$
+assert(#:: int
+  1 > 0)
+$p$;

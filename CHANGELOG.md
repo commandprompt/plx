@@ -4,6 +4,43 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+Security fixes from a code audit. Code-only: no SQL objects change, so a new
+build and a server restart (or new sessions) pick them up without
+`ALTER EXTENSION`. Every fix concerns input to `CREATE FUNCTION` or `DO`, which
+any role with USAGE on a plx language can send (the languages are trusted, so
+PUBLIC has USAGE by default).
+
+### Security
+
+- **Backend crash on a type annotation at the start of an expression.** A
+  `/*:: T */` or `#:: T` annotation as the first token of an `if`/`while`
+  condition, a call argument, or a statement made the transpiler copy a span
+  from a NULL pointer, killing the backend with SIGSEGV (and resetting every
+  session on the server). Affected plxjs, plxts, plxphp, plxruby, plxpython3,
+  including DO blocks. Annotations are now skipped at span edges.
+- **Stack-overflow crash on deeply nested expressions in plxtsql, plxgo and
+  plxcobol.** Their expression emitters recursed once per nested call,
+  subscript or literal without `check_stack_depth()`, so a body like
+  `ISNULL(ISNULL(...))` or `int(int(...))` some 50,000 levels deep crashed the
+  backend. They now raise `expression nested too deeply`, like the shared
+  rewriter already did.
+- **Exponential output from nested `finally`/`ensure`.** Each finally body is
+  emitted once per exit path, so a finally nested inside a finally doubled the
+  output per level: a 668-byte function stored a 94 MB body, and a slightly
+  deeper one drove a backend to gigabytes of memory. Nesting a finally inside a
+  finally is now limited to 8 levels.
+- **plxgo `fmt.Sprintf` directive without a letter verb.** A `%` followed by a
+  quote consumed half of the escaped `''` pair, so text inside a Go string
+  literal could end up as SQL in the generated body. Such directives now fall
+  back to the `format()` lowering, which keeps the text literal.
+
+### Fixed
+
+- A `finally`/`ensure` body that raised an error on the normal path ran a
+  second time from the error path. It now runs once.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

@@ -27,6 +27,8 @@
 #endif
 
 #define PLX_MAX_DEPTH 500			/* recursion cap (parsers + expr rewriter) */
+#define PLX_MAX_ENSURE_DEPTH 8		/* finally-in-finally cap; each level doubles
+									 * the inner body (see plx_emit_try) */
 
 /* stacked-diagnostics field bits (e.detail, e.hint, ...); used by the engine's
  * diagnostics emitter and by the dialect rescue/try parsers. */
@@ -92,6 +94,7 @@ typedef struct PlxCtx
 	int			loopdepth;
 	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */
+	int			ensuredepth;	/* finally/ensure nested inside finally/ensure */
 	int			subq;			/* __plx_fo_N / __plx_p_N counter */
 	const char *exc_var;		/* current rescue exception var name */
 	int			exc_varlen;
@@ -133,6 +136,9 @@ bool plx_tok_is(Tok *tk, const char *op);
 bool plx_name_eq(Tok *tk, const char *w);
 int plx_stmt_end(Ctx *cx, int from);
 void plx_indent(StringInfo o, int n);
+void plx_ensure_enter(Ctx *cx, int line);
+void plx_emit_try(StringInfo o, int ind, const char *body, int nrescue,
+				  const char *arms, const char *ensure_body);
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
 bool plx_is_param(Ctx *cx, const char *name, int len);

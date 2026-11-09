@@ -147,3 +147,9 @@ CREATE TRIGGER tq_trg_ins BEFORE INSERT ON tq_trg
 INSERT INTO tq_trg(id, qty, price) VALUES (7, 3, 10);
 SELECT id, total, tag FROM tq_trg;
 DROP TABLE tq_trg CASCADE;
+
+-- hostile nesting raises a clean error instead of overflowing the C stack
+DO $d$ BEGIN
+  EXECUTE 'DO LANGUAGE plxtsql $b$RETURN '
+    || repeat('ISNULL(', 2000) || '1' || repeat(', 0)', 2000) || ';$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
