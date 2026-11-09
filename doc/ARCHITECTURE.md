@@ -1,7 +1,7 @@
 # plx Architecture
 
 plx lets a function body be written in a Ruby, PHP, JavaScript, TypeScript,
-Python, Go, COBOL, Oracle PL/SQL, or Transact-SQL dialect and executed by the
+Python, Go, C#, COBOL, Oracle PL/SQL, or Transact-SQL dialect and executed by the
 standard plpgsql interpreter. This document describes how that works in the
 extension as built.
 
@@ -127,7 +127,10 @@ per-dialect branching in the driver.
   string decoder as `str_value`), so the shared intrinsics rewrite their
   arguments as Lua; and the
   standalone dialects (COBOL, PL/SQL, T-SQL, Go) run their own tokenizer and
-  emitter, calling back into the engine only for shared services.
+  emitter, calling back into the engine only for shared services; and C# runs
+  its own scanner and parser, which resolve types and write a normalized
+  program, then lowers that program on the shared lexer, handing each leaf
+  statement to the engine.
 
 ## Files
 
@@ -149,6 +152,7 @@ src/plx_dialect_js.c          the plxjs surface (parse_body -> brace front end)
 src/plx_dialect_ts.c          the plxts surface (parse_body -> brace front end)
 src/plx_dialect_python.c      the plxpython3 surface + Python front end
 src/plx_dialect_go.c          the plxgo surface + Go front end
+src/plx_dialect_csharp.c      the plxcsharp surface + C# front end
 src/plx_dialect_cobol.c       the plxcobol surface + COBOL front end
 src/plx_dialect_plsql.c       the plxplsql surface + PL/SQL front end
 src/plx_dialect_tsql.c        the plxtsql surface + T-SQL front end
@@ -226,5 +230,5 @@ instead of passing over it.
 - [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
 - The per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
   [plxjs](plxjs.md), [plxts](plxts.md), [plxpython3](plxpython3.md),
-  [plxgo](plxgo.md), [plxcobol](plxcobol.md), [plxplsql](plxplsql.md),
-  [plxtsql](plxtsql.md), [plxlua](plxlua.md).
+  [plxgo](plxgo.md), [plxcsharp](plxcsharp.md), [plxcobol](plxcobol.md),
+  [plxplsql](plxplsql.md), [plxtsql](plxtsql.md), [plxlua](plxlua.md).

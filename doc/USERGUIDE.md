@@ -8,9 +8,9 @@ plpgsql equivalent to the manual's form; the notes under each example point out
 where they differ.
 
 The dialects that restructure their input rather than rename keywords, plxplsql
-(Oracle PL/SQL), plxts (TypeScript), plxtsql (Transact-SQL), plxgo (Go) and
-plxlua (Lua), are covered in full in their own chapters (see Further reading);
-each produces the same plpgsql shown here.
+(Oracle PL/SQL), plxts (TypeScript), plxtsql (Transact-SQL), plxgo (Go),
+plxcsharp (C#) and plxlua (Lua), are covered in full in their own chapters
+(see Further reading); each produces the same plpgsql shown here.
 
 Install the extension first:
 
@@ -748,8 +748,8 @@ Points to keep in mind:
 - Per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
   [plxjs](plxjs.md), [plxpython3](plxpython3.md), [plxcobol](plxcobol.md),
   [plxplsql](plxplsql.md), [plxts](plxts.md), [plxtsql](plxtsql.md),
-  [plxgo](plxgo.md), [plxlua](plxlua.md) (full syntax, supported and rejected constructs, semantic
-  differences).
+  [plxgo](plxgo.md), [plxcsharp](plxcsharp.md), [plxlua](plxlua.md) (full
+  syntax, supported and rejected constructs, semantic differences).
 - [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how plx maps to the plpgsql engine.
 - [TRANSPILER.md](TRANSPILER.md): the original transpiler design

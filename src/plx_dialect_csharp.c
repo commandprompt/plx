@@ -44,6 +44,11 @@
 #include "plx_int.h"
 #include "plx_engine.h"
 
+/* PostgreSQL 13 spells the event_trigger type OID EVTTRIGGEROID */
+#ifndef EVENT_TRIGGEROID
+#define EVENT_TRIGGEROID EVTTRIGGEROID
+#endif
+
 PG_FUNCTION_INFO_V1(plx_csharp_validator);
 PG_FUNCTION_INFO_V1(plx_csharp_inline_handler);
 

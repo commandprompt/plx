@@ -662,6 +662,27 @@ SELECT cs_src('cs_query');
  
 (1 row)
 
+-- perform of a SELECT built with an interpolated string runs through PERFORM
+CREATE FUNCTION cs_perform(g int) RETURNS int LANGUAGE plxcsharp AS $$
+perform($"SELECT count(*) FROM cs_orders WHERE grp = {g}");
+return 1;
+$$;
+SELECT cs_perform(1);
+ cs_perform 
+------------
+          1
+(1 row)
+
+SELECT cs_src('cs_perform');
+                                     cs_src                                      
+---------------------------------------------------------------------------------
+ BEGIN                                                                          +
+   PERFORM * FROM (SELECT count(*) FROM cs_orders WHERE grp = (g)) AS __plx_p_1;+
+   RETURN 1;                                                                    +
+ END;                                                                           +
+ 
+(1 row)
+
 -- a value interpolated into a query is bound, so it cannot inject SQL
 CREATE FUNCTION cs_lookup(name text) RETURNS bigint LANGUAGE plxcsharp AS $$
 long n = fetch_one($"SELECT count(*) FROM cs_orders WHERE grp::text = '{name}'");
