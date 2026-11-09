@@ -1,6 +1,6 @@
 # Oracle PL/SQL cookbook
 
-Practical recipes for the plxplsql dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. The function signature uses PostgreSQL types; the body is PL/SQL. See the [plxplsql chapter](plxplsql.md) for the full language reference.
+Practical recipes for the plxplsql dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. The function signature uses PostgreSQL types; the body is PL/SQL. See the [plxplsql chapter](../plxplsql.md) for the full language reference.
 
 ## Scalar function with branching
 

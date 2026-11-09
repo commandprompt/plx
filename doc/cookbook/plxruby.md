@@ -1,6 +1,6 @@
 # Ruby cookbook
 
-Practical recipes for the plxruby dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxruby chapter](plxruby.md) for the full language reference.
+Practical recipes for the plxruby dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxruby chapter](../plxruby.md) for the full language reference.
 
 ## Scalar function with branching
 

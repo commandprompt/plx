@@ -4,8 +4,8 @@ Target: every plpgsql capability is expressible in each plx dialect. The
 reference is the plpgsql statement set in `src/pl/plpgsql/src/plpgsql.h`
 (`PLpgSQL_stmt_*`) plus its declaration forms.
 
-Every construct below is supported in all five column dialects — **plxruby**,
-**plxphp**, **plxjs**, **plxpython3**, **plxcobol** — except where a footnote
+Every construct below is supported in all five column dialects (**plxruby**,
+**plxphp**, **plxjs**, **plxpython3**, **plxcobol**) except where a footnote
 notes an equivalent form. The cells show the dialect spelling; full syntax and
 semantics are in the per-dialect chapters ([plxruby](plxruby.md),
 [plxphp](plxphp.md), [plxjs](plxjs.md), [plxpython3](plxpython3.md),
@@ -35,8 +35,10 @@ it restructures rather than renames: `@x` variables hoist to the `DECLARE` block
 `IF`/`WHILE` bodies written as `BEGIN ... END` become `THEN ... END IF` /
 `LOOP ... END LOOP`, `SET @x = e` becomes `x := e`, `SELECT @x = c FROM t`
 becomes `SELECT c INTO x FROM t`, `PRINT`/`RAISERROR`/`THROW` become `RAISE`, and
-`TRY`/`CATCH` becomes an `EXCEPTION` block. So every plpgsql construct is
-reachable, but through T-SQL surface syntax rather than a one-to-one keyword map.
+`TRY`/`CATCH` becomes an `EXCEPTION` block. So most plpgsql constructs are
+reachable through T-SQL surface syntax rather than a one-to-one keyword map;
+the exceptions are cursors and transaction control, which plxtsql does not
+support.
 See [plxtsql.md](plxtsql.md).
 
 ## Control flow
@@ -54,16 +56,16 @@ See [plxtsql.md](plxtsql.md).
 | `FOR` over dynamic query | same, non-literal SQL / binds | same | same | same | `… OVER "sql" USING …` |
 | `FOREACH` over array | `arr.each do \|v\|` | `foreach ($a as $v)` | `for (const v of arr)` | `for v in arr:` | `PERFORM v OVER ARRAY a` |
 | `EXIT` / `CONTINUE` | `break` / `next` | `break` / `continue` | `break` / `continue` | `break` / `continue` | `EXIT PERFORM` / `EXIT PERFORM CYCLE` |
-| loop labels ² | `label:` + `break label` | `label:` + `break label` | `label:` (native) | — | — |
+| loop labels ² | `label:` + `break label` | `label:` + `break label` | `label:` (native) | `label:` + `break label` | not offered |
 
 ¹ Python has no `match`/`case`, and PHP/JS `switch` is a simple `CASE` only, so a
 searched (arbitrary-condition) or Python multi-way branch uses `if`/`elif`(`else
-if`)/`else` — the same control flow, lowered to plpgsql `IF`. Ruby `case` and
+if`)/`else`, the same control flow, lowered to plpgsql `IF`. Ruby `case` and
 COBOL `EVALUATE` / `EVALUATE TRUE` express both simple and searched `CASE`
 directly.
 ² Loop labels (`label:` before a loop with `break label` / `next label`) are
-native in JavaScript and a plx extension in Ruby and PHP; not offered in Python
-or COBOL.
+native in JavaScript and a plx extension in Ruby, PHP, and Python; not offered
+in COBOL.
 
 ## Return, SQL, and data access
 
@@ -77,7 +79,7 @@ or COBOL.
 | SQL / `SELECT INTO` | `fetch_one(sql)` · `fetch_one!` | `fetch_one(sql)` | `fetch_one(sql)` | `fetch_one(sql)` | `EXECUTE "sql" INTO v` |
 | cursors `OPEN`/`FETCH`/`MOVE`/`CLOSE` | `open_cursor` · `fetch_from` · `move_cursor` · `close_cursor` | (same call form) | (same call form) | (same call form) | `OPEN-` · `FETCH-` · `MOVE-` · `CLOSE-CURSOR` |
 | `CALL` procedure | `call("p", a)` | `call("p", $a)` | `call("p", a)` | `call("p", a)` | `CALL "p" USING a` |
-| `COMMIT` / `ROLLBACK` | `commit()` / `rollback()` | (same) | (same) | (same) | `COMMIT` / `ROLLBACK` |
+| `COMMIT` / `ROLLBACK` (procedures only) | `commit()` / `rollback()` | (same) | (same) | (same) | `COMMIT` / `ROLLBACK` |
 
 The call-form intrinsics (`perform`, `execute`, `fetch_one`, the `*_cursor`
 functions, `call`, `commit`, `rollback`, `return_next`, `return_query`) share the

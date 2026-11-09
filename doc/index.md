@@ -30,15 +30,15 @@ $$;
 The front end is dialect-pluggable, and the set is open-ended. The dialects
 available today:
 
-- [**plxruby**](plxruby.md) — a Ruby dialect
-- [**plxphp**](plxphp.md) — a PHP dialect
-- [**plxjs**](plxjs.md) — a JavaScript dialect
-- [**plxts**](plxts.md) — a TypeScript dialect (plxjs plus type annotations)
-- [**plxpython3**](plxpython3.md) — a Python dialect
-- [**plxgo**](plxgo.md) — a Go dialect
-- [**plxcobol**](plxcobol.md) — a COBOL dialect (ISO/IEC 1989:2023)
-- [**plxplsql**](plxplsql.md) — an Oracle PL/SQL dialect
-- [**plxtsql**](plxtsql.md) — a Transact-SQL (SQL Server) dialect
+- [**plxruby**](plxruby.md): a Ruby dialect
+- [**plxphp**](plxphp.md): a PHP dialect
+- [**plxjs**](plxjs.md): a JavaScript dialect
+- [**plxts**](plxts.md): a TypeScript dialect (plxjs plus type annotations)
+- [**plxpython3**](plxpython3.md): a Python dialect
+- [**plxgo**](plxgo.md): a Go dialect
+- [**plxcobol**](plxcobol.md): a COBOL dialect (ISO/IEC 1989:2023)
+- [**plxplsql**](plxplsql.md): an Oracle PL/SQL dialect
+- [**plxtsql**](plxtsql.md): a Transact-SQL (SQL Server) dialect
 
 The [user guide](USERGUIDE.md) shows the same worked examples across dialects,
 and [feature parity](PARITY.md) is the construct-by-construct matrix.
@@ -69,17 +69,22 @@ Build from source against your PostgreSQL installation:
 make && make install
 ```
 
-Then, in the database:
+Then, in the database (installing the extension requires a superuser):
 
 ```sql
 CREATE EXTENSION plx;
 ```
 
-Upgrading from an earlier install:
+Upgrading from an earlier install, after installing the new build:
 
 ```sql
-ALTER EXTENSION plx UPDATE TO '1.2';
+ALTER EXTENSION plx UPDATE;   -- or UPDATE TO '2.0.0'
 ```
+
+Upgrading changes no existing function: plx transpiles at `CREATE FUNCTION`
+time, so re-run a function's DDL to pick up new transpiler behaviour (see the
+2.0.0 entry in the
+[changelog](https://github.com/commandprompt/plx/blob/master/CHANGELOG.md)).
 
 plx supports PostgreSQL 13 through 18; see [compatibility](COMPATIBILITY.md).
 

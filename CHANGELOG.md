@@ -2,7 +2,7 @@
 
 All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
-version in `plx.control` (currently `1.0`).
+version in `plx.control` (currently `2.0.0`).
 
 ## [2.0.1] - 2026-08-25
 
@@ -89,6 +89,10 @@ SELECT p.oid::regprocedure
 Each result interpolates a value that will become NULL when the value is NULL.
 Where the old rendering was wanted, make it explicit with `coalesce(x, '')` in
 the body.
+
+The same applies to a dump taken from an earlier release and restored into
+2.0.0: the restored functions keep the plpgsql stored in the dump, including
+the empty-string rendering, until their DDL is run again.
 
 ## [1.3.2] - 2026-08-24
 

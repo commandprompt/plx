@@ -9,6 +9,15 @@
 > `plx.so` rather than separate per-dialect modules. For the as-built
 > architecture and the per-dialect behavior, see ARCHITECTURE.md and the dialect
 > chapters. This file is kept as a design reference.
+>
+> Several semantic choices below were not adopted. `==`/`!=` lower to plain
+> `=`/`<>` (not `IS [NOT] DISTINCT FROM`). Negation (`unless`, `!`, `not`) is
+> `NOT` (not `IS NOT TRUE`). Value-position `||` is SQL concatenation (not
+> `COALESCE`). Since 2.0.0 an interpolated NULL propagates, so interpolation is
+> not wrapped in `COALESCE((e)::text, '')`; only a RAISE message keeps that
+> empty-string fallback. The sentinel names the dialect as `plxruby`, not
+> `plruby`. Where this file and the dialect chapters disagree, the chapters are
+> authoritative.
 
 This is the specification for the Ruby surface. The transpiler runs at
 `CREATE FUNCTION` time inside `plx_generic_validator`, rewrites `pg_proc.prosrc`
@@ -95,24 +104,24 @@ typedef struct {
 typedef struct { int line, col; char *msg; } PlxError;
 ```
 
-### 2.2 Pass 1 — byte-level lexer (`plx_lex`)
+### 2.2 Pass 1: byte-level lexer (`plx_lex`)
 
 Skip inline whitespace (space/tab, **not** newline). Dispatch on current char:
 
-- **letter/`_`** — scan `[A-Za-z_][A-Za-z0-9_]*` plus a trailing `?`/`!`. Keyword-table `bsearch` → `PLX_TOK_KEYWORD` with a `PlxKw`, else `PLX_TOK_IDENT`.
-- **digit** — scan number. **Range guard:** on hitting `.`, peek `p[1]`; if it is also `.`, STOP the number (emit `INT`, let `..`/`...` become an OP). A single `.` before a digit is a float fraction. Underscores in numeric literals (`1_000`) are consumed and stripped at rewrite. Record whether the literal exceeds int4 range for the type-inference pass.
-- **`'`** — single-quoted string. Only `\\` and `\'` are escapes; **everything else, including `#{`, is inert literal text.** One opaque `PLX_TOK_STRING` with `sq_string=true`, `interp_count=0`.
-- **`"`** — double-quoted string. Escapes `\" \\ \n \t \r \0 \e \s \a \b \f \v \nnn \xHH \uXXXX`. **`\#{` (backslash before `#{`) suppresses interpolation** — the two chars `#{` become literal content. On an *unescaped* `#{`, push an interp context and scan a **balanced** sub-expression to the matching `}`: brace counter starts at 1, `++` on `{`, `--` on `}`, but only when not inside a nested string; nested `"..."`/`'...'` and nested `#{}` are honored. Record each interp `(start,len)` span. Empty/whitespace-only `#{}` is recorded with `len==0` (dropped later). One opaque `PLX_TOK_STRING`, `sq_string=false`, carrying its span list.
-- **`%`** — percent-literal only in **value position** (prev significant token is OP/`(`/`,`/keyword/terminator) and `p[1]∈{q,Q,w,W,i,I}` with a delimiter following: `%q`=single semantics, `%Q`=double/interp, bracket delimiters `()[]{}<>` nest. `%w`/`%i` (word/symbol arrays) are lexed as an opaque STRING but flagged unsupported → rejected in lowering. Otherwise `%` is the modulo OP.
-- **`<`** — `<<~IDENT` / `<<-IDENT` / `<<IDENT` / `<<"IDENT"` / `<<'IDENT'` in value position ⇒ heredoc: register a pending `PlxHeredoc`, emit a `PLX_TOK_HEREDOC` placeholder; capture the body lazily at the next newline. Otherwise `<`/`<<`/`<=` OP. **Descope fallback:** if heredoc support is disabled, DETECT-AND-REJECT with a precise error — **never fall through and mis-scan.**
-- **`#`** — if `p[1]==':' && p[2]==':'` ⇒ `PLX_TOK_TYPEANN`, capturing the rest of the line as type text (tested **before** plain comment). Else `#`..EOL is a `PLX_TOK_COMMENT` (dropped; its newline preserved). This dispatch runs **only in code position** — a `#` inside a string/interp/heredoc is already consumed as string bytes above, so a bare `#` inside `"50% off # ends soon"` is never a comment.
-- **`\n`** — candidate `PLX_TOK_NEWLINE`; apply suppression (§2.3). Then drain any pending heredocs, matching the terminator at line-start (`<<~` strips common leading indent; `<<-` allows an indented terminator).
-- **`;`** — `PLX_TOK_SEMI` (hard separator, outside strings/comments/brackets).
-- **`( ) [ ] { } , .`** — punctuation; maintain `paren_depth` over `()`+`[]`. `{`/`}` get their own kinds; disambiguated in pass 2.
-- **`|`** — `PLX_TOK_PIPE`; adjacent `||` still lexes as one OP run.
-- **`:`** — `PLX_TOK_SYMBOL` when followed by an ident char AND prev token is not a value; else OP (ternary `:`).
-- **operator chars** `= ! < > + - * / & ? ~ ^` — scan the maximal run into one `PLX_TOK_OP` (`==`,`!=`,`&&`,`||`,`<=`,`>=`,`..`,`...`,`=>`,`<<`,`**` come through whole).
-- **else** — record first error, `PLX_TOK_ERROR`.
+- **letter/`_`**: scan `[A-Za-z_][A-Za-z0-9_]*` plus a trailing `?`/`!`. Keyword-table `bsearch` → `PLX_TOK_KEYWORD` with a `PlxKw`, else `PLX_TOK_IDENT`.
+- **digit**: scan number. **Range guard:** on hitting `.`, peek `p[1]`; if it is also `.`, STOP the number (emit `INT`, let `..`/`...` become an OP). A single `.` before a digit is a float fraction. Underscores in numeric literals (`1_000`) are consumed and stripped at rewrite. Record whether the literal exceeds int4 range for the type-inference pass.
+- **`'`**: single-quoted string. Only `\\` and `\'` are escapes; **everything else, including `#{`, is inert literal text.** One opaque `PLX_TOK_STRING` with `sq_string=true`, `interp_count=0`.
+- **`"`**: double-quoted string. Escapes `\" \\ \n \t \r \0 \e \s \a \b \f \v \nnn \xHH \uXXXX`. **`\#{` (backslash before `#{`) suppresses interpolation**; the two chars `#{` become literal content. On an *unescaped* `#{`, push an interp context and scan a **balanced** sub-expression to the matching `}`: brace counter starts at 1, `++` on `{`, `--` on `}`, but only when not inside a nested string; nested `"..."`/`'...'` and nested `#{}` are honored. Record each interp `(start,len)` span. Empty/whitespace-only `#{}` is recorded with `len==0` (dropped later). One opaque `PLX_TOK_STRING`, `sq_string=false`, carrying its span list.
+- **`%`**: percent-literal only in **value position** (prev significant token is OP/`(`/`,`/keyword/terminator) and `p[1]∈{q,Q,w,W,i,I}` with a delimiter following: `%q`=single semantics, `%Q`=double/interp, bracket delimiters `()[]{}<>` nest. `%w`/`%i` (word/symbol arrays) are lexed as an opaque STRING but flagged unsupported → rejected in lowering. Otherwise `%` is the modulo OP.
+- **`<`**: `<<~IDENT` / `<<-IDENT` / `<<IDENT` / `<<"IDENT"` / `<<'IDENT'` in value position ⇒ heredoc: register a pending `PlxHeredoc`, emit a `PLX_TOK_HEREDOC` placeholder; capture the body lazily at the next newline. Otherwise `<`/`<<`/`<=` OP. **Descope fallback:** if heredoc support is disabled, DETECT-AND-REJECT with a precise error; **never fall through and mis-scan.**
+- **`#`**: if `p[1]==':' && p[2]==':'` ⇒ `PLX_TOK_TYPEANN`, capturing the rest of the line as type text (tested **before** plain comment). Else `#`..EOL is a `PLX_TOK_COMMENT` (dropped; its newline preserved). This dispatch runs **only in code position**; a `#` inside a string/interp/heredoc is already consumed as string bytes above, so a bare `#` inside `"50% off # ends soon"` is never a comment.
+- **`\n`**: candidate `PLX_TOK_NEWLINE`; apply suppression (§2.3). Then drain any pending heredocs, matching the terminator at line-start (`<<~` strips common leading indent; `<<-` allows an indented terminator).
+- **`;`**: `PLX_TOK_SEMI` (hard separator, outside strings/comments/brackets).
+- **`( ) [ ] { } , .`**: punctuation; maintain `paren_depth` over `()`+`[]`. `{`/`}` get their own kinds; disambiguated in pass 2.
+- **`|`**: `PLX_TOK_PIPE`; adjacent `||` still lexes as one OP run.
+- **`:`**: `PLX_TOK_SYMBOL` when followed by an ident char AND prev token is not a value; else OP (ternary `:`).
+- **operator chars** `= ! < > + - * / & ? ~ ^`: scan the maximal run into one `PLX_TOK_OP` (`==`,`!=`,`&&`,`||`,`<=`,`>=`,`..`,`...`,`=>`,`<<`,`**` come through whole).
+- **else**: record first error, `PLX_TOK_ERROR`.
 
 After each terminator, set `stmt_start=true` on the next significant token. **`stmt_start` bookkeeping is a first-class correctness surface** (opener vs modifier depends on it) and must be re-asserted correctly after a suppressed newline and after a heredoc body drain.
 
@@ -126,7 +135,7 @@ A physical `\n` is DROPPED (statement continues) iff **any** of:
 
 Otherwise emit `PLX_TOK_NEWLINE`. `;` is always a separator. The cannot-end set is one `static const` classifier keyed on the OP token bytes plus a short `strcmp` for `..`/`...`/`=>`.
 
-### 2.4 Pass 2 — block builder (`plx_build_blocks`)
+### 2.4 Pass 2: block builder (`plx_build_blocks`)
 
 Push `BLK_TOPLEVEL`. Walk tokens, cutting statements at `NEWLINE`/`SEMI` in the current frame. Classify each statement's leading `stmt_start` token:
 
@@ -140,7 +149,7 @@ Push `BLK_TOPLEVEL`. Walk tokens, cutting statements at `NEWLINE`/`SEMI` in the 
 
 At EOF, a non-`[TOPLEVEL]` stack → `ereport` "unterminated `<kind>` block opened at line N"; a stray `end`/`}` → matching-close error at its own line.
 
-Every token carries a 1-based dialect line; every block records `open_line` — feeding the plpgsql→dialect source map and line-accurate errors.
+Every token carries a 1-based dialect line; every block records `open_line`; feeding the plpgsql→dialect source map and line-accurate errors.
 
 ---
 
@@ -183,10 +192,10 @@ The parse ctx carries a `loop_depth` and a `handler_depth` counter (for `next`/`
 
 Emission mechanics: 2-space indent per level, body at level 1. Leaf: `<indent><text>;\n` (node supplies text sans `;`; emitter appends exactly one). Compound opener line ends in the plpgsql keyword (`THEN`/`LOOP`) with **no** `;`; children at indent+1; closers `END IF;`/`END LOOP;`/`END;`. Subquery aliases `__plx_fo_N`/`__plx_p_N` use a monotonic counter.
 
-### PLX_ASSIGN — `LHS := RHS;`
-`x = e` → `x := e';`. Compound `x += e` → `x := x + (e');` (same for `-= *= /= %=`). Multi-assign `a, b = e1, e2` → `SELECT e1', e2' INTO a, b;` (simultaneous → `a,b=b,a` swaps correctly). LHS must be a bare local or an OUT/TABLE-column param (from meta); assigning to `row.field` is rejected. **`||=`/`&&=` are rejected** (no faithful three-valued lowering) — message points at the explicit form, which itself lowers per the value-context `||` rule (§6). RHS-intrinsics (`fetch_one`, `query`, `emit`, …) are recognized **first** and routed to their own node; they are never assignments.
+### PLX_ASSIGN: `LHS := RHS;`
+`x = e` → `x := e';`. Compound `x += e` → `x := x + (e');` (same for `-= *= /= %=`). Multi-assign `a, b = e1, e2` → `SELECT e1', e2' INTO a, b;` (simultaneous → `a,b=b,a` swaps correctly). LHS must be a bare local or an OUT/TABLE-column param (from meta); assigning to `row.field` is rejected. **`||=`/`&&=` are rejected** (no faithful three-valued lowering); message points at the explicit form, which itself lowers per the value-context `||` rule (§6). RHS-intrinsics (`fetch_one`, `query`, `emit`, …) are recognized **first** and routed to their own node; they are never assignments.
 
-### PLX_IF — if/elsif/else, unless, modifier-if
+### PLX_IF: if/elsif/else, unless, modifier-if
 ```
 IF C' THEN
   <arm0>
@@ -196,12 +205,12 @@ ELSE
   <armN>
 END IF;
 ```
-`unless C` → `IF (C') IS NOT TRUE THEN … END IF;` (**not** `NOT (C')` — matches Ruby falsey nil/false; see §6). Modifier `STMT if C` → `IF C' THEN STMT; END IF;`. Positive `if C` uses `C'` directly (NULL correctly skips the THEN arm). Condition must be boolean; **no truthiness coercion** — a bare non-boolean condition is a CREATE-time reject (§6/§7), not `IF <int>`.
+`unless C` → `IF (C') IS NOT TRUE THEN … END IF;` (**not** `NOT (C')`; matches Ruby falsey nil/false; see §6). Modifier `STMT if C` → `IF C' THEN STMT; END IF;`. Positive `if C` uses `C'` directly (NULL correctly skips the THEN arm). Condition must be boolean; **no truthiness coercion**; a bare non-boolean condition is a CREATE-time reject (§6/§7), not `IF <int>`.
 
-### PLX_WHILE — while/until
+### PLX_WHILE: while/until
 `while C` → `WHILE C' LOOP … END LOOP;`. `until C` → `WHILE (C') IS NOT TRUE LOOP … END LOOP;`. Modifiers `STMT while C` / `STMT until C` expand to the full loop. `begin…end while` (do-while) is rejected.
 
-### PLX_LOOP — `loop do … end`
+### PLX_LOOP: `loop do … end`
 ```
 LOOP
   …
@@ -209,7 +218,7 @@ END LOOP;
 ```
 Requires a reachable `break`/`return` (not statically enforced).
 
-### PLX_FORINT — integer for
+### PLX_FORINT: integer for
 Surfaces: `for v in LO..HI`, `for v in LO...HI`, `(LO..HI).each do |v|`, `(LO...HI).each`, `HI.downto(LO) do |v|`, `LO.upto(HI) do |v|`, `(LO..HI).step(k).each`, `LO.step(HI,k)`.
 
 ```
@@ -217,7 +226,7 @@ FOR v IN [REVERSE] LO'..HI' [BY k'] LOOP … END LOOP;
 ```
 
 Fixes folded in:
-- **Exclusive `...` is a property of the range node**, applied on every path: `LO'..(HI' - 1)`. So `(0...9).step(3)` → `FOR v IN 0..(9 - 1) BY 3 LOOP` (yields 0,3,6 — endpoint 9 correctly excluded). Guard the `(HI-1)` rewrite against INT_MIN underflow.
+- **Exclusive `...` is a property of the range node**, applied on every path: `LO'..(HI' - 1)`. So `(0...9).step(3)` → `FOR v IN 0..(9 - 1) BY 3 LOOP` (yields 0,3,6; endpoint 9 correctly excluded). Guard the `(HI-1)` rewrite against INT_MIN underflow.
 - `downto` → `REVERSE HI'..LO'`. `upto` → ascending.
 - **`.step(k)` with a literal negative k** → `FOR v IN REVERSE LO'..HI' BY (-k) LOOP` (Numeric#step limit is inclusive; no `-1`). Never emit `BY <negative>`.
 - **`.step(k)` with a non-literal k** → emit ascending `BY k'` and **document that k must be `>0` at runtime** (plpgsql cannot pick direction dynamically); optionally a CREATE-time NOTICE.
@@ -228,7 +237,7 @@ Fixes folded in:
 
 Loop var `v` is loop-local, plpgsql-declared, **not hoisted**; endpoints pass through to plpgsql. `v` referenced **outside** the loop body → reject `plruby: for-loop variable "v" is not visible after the loop` (Ruby's `for` leak is intentionally dropped and detected, not silently mis-emitted).
 
-### PLX_FORQUERY — query iteration
+### PLX_FORQUERY: query iteration
 `query(SQL[, args]).each do |row|` / `.each_with_index do |row, idx|`.
 
 **Static** (SQL is a string literal, no bind args). Interpolation `#{name}` inside the literal is spliced as a **bare plpgsql NAME reference** *only when it is in value position*:
@@ -242,30 +251,30 @@ FOR row IN SELECT id, amount FROM orders WHERE cust = cid LOOP … END LOOP;
 FOR row IN EXECUTE <SQL-expr'> USING a', b' LOOP … END LOOP;
 ```
 
-- **`row` is ALWAYS hoisted as `row RECORD;`** (mandatory — plpgsql auto-declares only *integer* FOR vars; a query FOR needs a pre-declared record var, else `"row" is not a known variable`). Register `row` in the active-loop-var stack for the body.
+- **`row` is ALWAYS hoisted as `row RECORD;`** (mandatory: plpgsql auto-declares only *integer* FOR vars; a query FOR needs a pre-declared record var, else `"row" is not a known variable`). Register `row` in the active-loop-var stack for the body.
 - `each_with_index`: the index var is a **synthesized local** routed through the symtab (`idx integer;`), registered in the active-loop stack and checked against params. Emit `idx := -1;` immediately before the FOR and inject `idx := idx + 1;` as the **very first** body statement (above any `next if` guard) → 0-based, matching Ruby.
 - Field access `row.col`, `row[:col]`, `row['col']` all normalize to `row.col`.
-- Nested/overlapping loops need distinct row names (checked against the active stack only — sequential sibling loops may reuse `row`, §5).
+- Nested/overlapping loops need distinct row names (checked against the active stack only; sequential sibling loops may reuse `row`, §5).
 
-### PLX_FETCH — `fetch_one` → SELECT INTO
+### PLX_FETCH: `fetch_one` → SELECT INTO
 **Static:** wrap the user SQL so INTO needs no SQL parse:
 ```
 SELECT * INTO [STRICT] <targets> FROM ( <SQL-spliced> ) AS __plx_fo_1;
 ```
 **Dynamic** (bind args / non-literal): `EXECUTE <SQL-expr'> INTO [STRICT] <targets> USING args';`.
 
-`fetch_one` non-STRICT (0 rows → all-NULL, extra rows → first); `fetch_one!` STRICT. Whole-row target hoists `RECORD`; scalar destructure targets need annotation/inference. Set-returning DML (`INSERT … RETURNING`) as the user SQL must use the dynamic/EXECUTE path (the subquery wrap fails on it). `<fetch-target>.nil?` (row-presence) lowers to **`NOT FOUND`** evaluated right after the INTO — not `IS NULL` (which is true only when *every* column is NULL; §6).
+`fetch_one` non-STRICT (0 rows → all-NULL, extra rows → first); `fetch_one!` STRICT. Whole-row target hoists `RECORD`; scalar destructure targets need annotation/inference. Set-returning DML (`INSERT … RETURNING`) as the user SQL must use the dynamic/EXECUTE path (the subquery wrap fails on it). `<fetch-target>.nil?` (row-presence) lowers to **`NOT FOUND`** evaluated right after the INTO; not `IS NULL` (which is true only when *every* column is NULL; §6).
 
-### PLX_PERFORM — run SQL, discard (static, literal, no binds)
+### PLX_PERFORM: run SQL, discard (static, literal, no binds)
 DML (INSERT/UPDATE/DELETE/MERGE) → verbatim `…;`. Row-returning (SELECT/WITH/VALUES/TABLE) → `PERFORM * FROM ( <SQL> ) AS __plx_p_1;`. Value-position interpolation → name reference (identifier position → reject/dynamic, as FORQUERY).
 
-### PLX_EXECUTE — dynamic SQL, discard
+### PLX_EXECUTE: dynamic SQL, discard
 `execute(SQL_expr[, a, b])` → `EXECUTE <SQL-expr'> [USING a', b'];`. Always dynamic. Interpolation `#{e}` → runtime concat `|| COALESCE((e)::text,'')` (Ruby nil→''; also prevents `EXECUTE NULL`). User owns injection safety; recommend `USING`/`format(%I,%L)`.
 
 ### PLX_RETURN
-`return` → `RETURN;`. `return e` → `RETURN e';`. In a SETOF function `return e` is rejected (use `emit`/`return_next`/`return_query`); bare `return` → `RETURN;`. `return a, b` with matching OUT params → `out1 := a'; out2 := b'; RETURN;`. **No implicit last-expression return** — a scalar function must end with explicit `return e`.
+`return` → `RETURN;`. `return e` → `RETURN e';`. In a SETOF function `return e` is rejected (use `emit`/`return_next`/`return_query`); bare `return` → `RETURN;`. `return a, b` with matching OUT params → `out1 := a'; out2 := b'; RETURN;`. **No implicit last-expression return**; a scalar function must end with explicit `return e`.
 
-### PLX_RETURN_NEXT — emit / return_next
+### PLX_RETURN_NEXT: emit / return_next
 Bare `emit`/`return_next` → `RETURN NEXT;`. `emit(e)`/`return_next e` → `RETURN NEXT e';`. Requires `meta.retset`, else hard error.
 
 ### PLX_RETURN_QUERY
@@ -274,9 +283,9 @@ Static: `RETURN QUERY <SQL-spliced>;`. Dynamic: `RETURN QUERY EXECUTE <SQL-expr'
 ### PLX_RAISE
 Surfaces: `raise "msg"` (→EXCEPTION); `raise LEVEL: "msg"` with `LEVEL∈{notice,warning,info,log,debug,exception}`; option keys `errcode: detail: hint: column: constraint: message:`; class form `raise PG::UniqueViolation, "m"`; **bare `raise`**.
 
-**Message building — the RAISE fixes:**
+**Message building; the RAISE fixes:**
 - The message is split into literal chunks + interpolation spans **first**. `'`→`''` and `%`→`%%` escaping is applied to **literal chunks only**; interpolation expressions are `plx_rewrite_expr`'d and emitted **verbatim** as ordered arguments (their internal `'` and `%`, e.g. `a % b` modulo or `f('x')`, are never touched).
-- **Placeholder adjacent to a literal `%`** cannot be represented positionally (a `%`-run parses pairs-first). When any interpolation is immediately followed by a literal `%` — and, safely, whenever a literal `%` co-occurs with interpolation — **lower the whole message through the single-placeholder concat form** instead:
+- **Placeholder adjacent to a literal `%`** cannot be represented positionally (a `%`-run parses pairs-first). When any interpolation is immediately followed by a literal `%`; and, safely, whenever a literal `%` co-occurs with interpolation; **lower the whole message through the single-placeholder concat form** instead:
   ```
   RAISE NOTICE '%', 'discount ' || COALESCE((pct)::text,'') || '%';
   ```
@@ -294,7 +303,7 @@ Surfaces: `raise "msg"` (→EXCEPTION); `raise LEVEL: "msg"` with `LEVEL∈{noti
 ### PLX_NEXT / PLX_BREAK
 `next`→`CONTINUE;`, `break`→`EXIT;`. Modifiers: `next if C`→`CONTINUE WHEN C';`; `break if C`→`EXIT WHEN C';`; `next unless C`→`CONTINUE WHEN (C') IS NOT TRUE;`; `break unless C`→`EXIT WHEN (C') IS NOT TRUE;`. Must be inside a loop (`loop_depth>0`), else hard error. `break <expr>`, labeled break, `redo`, `retry` rejected.
 
-### PLX_EXCEPTION — begin/rescue/ensure
+### PLX_EXCEPTION: begin/rescue/ensure
 Without `ensure`:
 ```
 BEGIN
@@ -348,7 +357,7 @@ typedef struct PlxSymtab {
 ```
 
 ### 5.2 Seeding params (never hoist)
-From `PlxFuncMeta->argnames[i]` for **all** argmodes (IN/OUT/INOUT/VARIADIC/TABLE). **Skip NULL/empty argnames** (`f(int, OUT numeric)` has unnamed args) — guard every `hash_search` key against NULL (a NULL key into a `HASH_STRINGS` dynahash segfaults). Case-fold with `downcase_truncate_identifier` (63-byte `NAMEDATALEN` truncation) to match plpgsql exactly.
+From `PlxFuncMeta->argnames[i]` for **all** argmodes (IN/OUT/INOUT/VARIADIC/TABLE). **Skip NULL/empty argnames** (`f(int, OUT numeric)` has unnamed args); guard every `hash_search` key against NULL (a NULL key into a `HASH_STRINGS` dynahash segfaults). Case-fold with `downcase_truncate_identifier` (63-byte `NAMEDATALEN` truncation) to match plpgsql exactly.
 
 ### 5.3 Collection walk
 Single recursive descent. On a **loop node**: push its var(s) onto `active_loopvars`, recurse, pop on close.
@@ -380,37 +389,37 @@ Empty symtab → no `DECLARE` keyword. Else `DECLARE\n` then one line per local 
 
 ## 6. Expression rewrite rules & accepted divergences
 
-`plx_rewrite_expr(char *src, ctx, boolean_context)` → `char *`, a **single left-to-right pass over source tokens** honoring string/`#{}`/bracket state. It **never re-scans its own output** (the `||`/`OR` invariant). Inside a **single-quoted** string, NOTHING is rewritten — no `#{}` splice, no operator/keyword rewrite, no `+`→`||`; only `'`→`''` for re-emission. `#{}` is an interpolation **only** in double-quoted strings/heredocs.
+`plx_rewrite_expr(char *src, ctx, boolean_context)` → `char *`, a **single left-to-right pass over source tokens** honoring string/`#{}`/bracket state. It **never re-scans its own output** (the `||`/`OR` invariant). Inside a **single-quoted** string, NOTHING is rewritten; no `#{}` splice, no operator/keyword rewrite, no `+`→`||`; only `'`→`''` for re-emission. `#{}` is an interpolation **only** in double-quoted strings/heredocs.
 
-### 6.1 String literals — decode then re-encode (never memcpy source bytes)
+### 6.1 String literals: decode then re-encode (never memcpy source bytes)
 Ruby string escape alphabet ≠ plpgsql literal alphabet. Always **fully decode** the Ruby token to its abstract character sequence, then **re-encode** for the chosen target literal:
 - **Single-quoted** Ruby string: resolve `\\`→`\`, `\'`→`'`; all other bytes literal. Emit as plpgsql `'...'` with `'`→`''`. (`'a\\b'` = Ruby `a\b` → plpgsql `'a\b'`, one backslash.)
-- **Double-quoted** Ruby string / bare-or-`"`-quoted heredoc: decode `\n \t \r \0 \e \\ \" \xHH \uXXXX …` to actual control bytes. If any control byte or backslash is present, emit an **escape string** `E'...'` (re-escaping `'`→`''` and `\`→`\\`); else a plain `'...'`. `standard_conforming_strings=on` means `'...\n...'` is a literal backslash-n — so `"line1\nline2"` **must** become `E'line1\nline2'`, not `'line1\nline2'`. `"C:\\tmp"` (Ruby value `C:\tmp`) → `E'C:\\tmp'`.
+- **Double-quoted** Ruby string / bare-or-`"`-quoted heredoc: decode `\n \t \r \0 \e \\ \" \xHH \uXXXX …` to actual control bytes. If any control byte or backslash is present, emit an **escape string** `E'...'` (re-escaping `'`→`''` and `\`→`\\`); else a plain `'...'`. `standard_conforming_strings=on` means `'...\n...'` is a literal backslash-n; so `"line1\nline2"` **must** become `E'line1\nline2'`, not `'line1\nline2'`. `"C:\\tmp"` (Ruby value `C:\tmp`) → `E'C:\\tmp'`.
 
 ### 6.2 Interpolation `"lit#{e}lit2"`
-Split into literal chunks + interp spans first. Each literal chunk is decoded/escaped per §6.1. Each interp expression is **recursively `plx_rewrite_expr`'d** (nested `"..."` inside `#{}` must themselves be lowered — never spliced verbatim) and wrapped to match Ruby nil→`''`:
+Split into literal chunks + interp spans first. Each literal chunk is decoded/escaped per §6.1. Each interp expression is **recursively `plx_rewrite_expr`'d** (nested `"..."` inside `#{}` must themselves be lowered; never spliced verbatim) and wrapped to match Ruby nil→`''`:
 ```
 'lit' || COALESCE((e')::text, '') || 'lit2'
 ```
-A lone `#{e}` → `COALESCE((e')::text,'')`. **Empty/whitespace `#{}` → dropped** (never `()::text`). `\#{` → literal `#{` in the chunk. `'`→`''` and `%` are applied to literal chunks only, never to interp expressions. (Equivalently the whole interpolation may lower to `concat('lit', e', 'lit2')`, which ignores NULLs; pick one and be consistent.) **Documented divergence:** interpolation follows Ruby (nil→`''`), diverging from raw SQL `||` NULL-propagation; the RAISE `%`-path renders NULL as `<NULL>` unless COALESCE'd — reconcile or document.
+A lone `#{e}` → `COALESCE((e')::text,'')`. **Empty/whitespace `#{}` → dropped** (never `()::text`). `\#{` → literal `#{` in the chunk. `'`→`''` and `%` are applied to literal chunks only, never to interp expressions. (Equivalently the whole interpolation may lower to `concat('lit', e', 'lit2')`, which ignores NULLs; pick one and be consistent.) **Documented divergence:** interpolation follows Ruby (nil→`''`), diverging from raw SQL `||` NULL-propagation; the RAISE `%`-path renders NULL as `<NULL>` unless COALESCE'd; reconcile or document.
 
-### 6.3 Operators — boolean vs value context
+### 6.3 Operators: boolean vs value context
 Context (condition slot vs value/RHS slot) is known to the emitter; the split is decidable.
 
 - `==` → **`IS NOT DISTINCT FROM`** (null-safe, matches Ruby `nil==nil`→true, `5==nil`→false). `!=` → **`IS DISTINCT FROM`**. **Literal-nil special case first** (token-level, before the generic rewrite): `E == nil` / `nil == E` → `((E') IS NULL)`; `E != nil` / `nil != E` → `((E') IS NOT NULL)`. (A perf-minded variant may keep `=`/`<>` when neither operand can be NULL, but null-safe is the default.)
 - `&&`/`||`/`!` and keyword `and`/`or`/`not`:
-  - **Boolean context** (if/unless/while/until tests, ternary test): `&&`/`and`→` AND `, `||`/`or`→` OR `, `!`/`not`→ negation. **Negation uses `(x) IS NOT TRUE`, not `NOT (x)`** — TRUE for both FALSE and NULL, matching Ruby falsey (`unless nil` runs). So `unless C`→`IF (C') IS NOT TRUE`, `next unless C`→`CONTINUE WHEN (C') IS NOT TRUE`, `!arr.include?(x)`→`(x = ANY(arr)) IS NOT TRUE`.
+  - **Boolean context** (if/unless/while/until tests, ternary test): `&&`/`and`→` AND `, `||`/`or`→` OR `, `!`/`not`→ negation. **Negation uses `(x) IS NOT TRUE`, not `NOT (x)`**; TRUE for both FALSE and NULL, matching Ruby falsey (`unless nil` runs). So `unless C`→`IF (C') IS NOT TRUE`, `next unless C`→`CONTINUE WHEN (C') IS NOT TRUE`, `!arr.include?(x)`→`(x = ANY(arr)) IS NOT TRUE`.
   - **Value/RHS context**: `a || b` → `COALESCE(a', b')` (Ruby nil-default; document that SQL can't distinguish stored FALSE from NULL, so `false || b` won't pick b). `a && b` value use → reject with a precise message pointing at an explicit ternary, or (boolean operands) `CASE WHEN (a') IS NOT TRUE THEN a' ELSE b' END`. Keyword `and`/`or` in value position → **reject** (their below-`=` precedence and `x or return` control-flow can't be faithfully lowered). This is why `||=`/`&&=` are rejected and the suggested `x = x || y` lowers to `COALESCE`.
 - `nil`→`NULL`, `true`/`false`→`TRUE`/`FALSE`.
 - Ternary `C ? A : B` → `CASE WHEN C' THEN A' ELSE B' END` (recursive).
-- Ranges/membership (self-parenthesized): `(a..b).include?(x)`→`(x BETWEEN a' AND b')`; **`(a...b).include?(x)`→`(x >= a' AND x < b')`** (parenthesized — unparenthesized re-associates against outer operators); `arr.include?(x)`→`(x = ANY(arr'))`.
+- Ranges/membership (self-parenthesized): `(a..b).include?(x)`→`(x BETWEEN a' AND b')`; **`(a...b).include?(x)`→`(x >= a' AND x < b')`** (parenthesized; unparenthesized re-associates against outer operators); `arr.include?(x)`→`(x = ANY(arr'))`.
 - `**`→`power(a,b)`; `1_000`→`1000`; casts `x.to_i/.to_s/.to_f`→`(x)::integer/::text/::double precision`.
-- **`+` stays SQL numeric `+`** — the literal-adjacency `+`→`||` heuristic is **dropped** (it misfires both ways: `first + last` two text vars stay `+` and error at runtime; `amount + "0"` numeric becomes string concat). Interpolation is the sanctioned concatenation path.
-- **`<<` is NOT blanket-rewritten** to `||` — PG `<<` is integer bit-shift, and the shovel's in-place mutation has no bare-statement plpgsql form. Leave `<<` verbatim (bit-shift) or reject; string/array building goes through interpolation or explicit `x = x || y`.
+- **`+` stays SQL numeric `+`**: the literal-adjacency `+`→`||` heuristic is **dropped** (it misfires both ways: `first + last` two text vars stay `+` and error at runtime; `amount + "0"` numeric becomes string concat). Interpolation is the sanctioned concatenation path.
+- **`<<` is NOT blanket-rewritten** to `||`: PG `<<` is integer bit-shift, and the shovel's in-place mutation has no bare-statement plpgsql form. Leave `<<` verbatim (bit-shift) or reject; string/array building goes through interpolation or explicit `x = x || y`.
 - `%` modulo, `::` casts, function calls, column refs, arithmetic → pass through verbatim to SQL.
 
-### 6.4 Truthiness — no coercion, reject non-boolean conditions
-Ruby treats `0`, `""`, `[]` as truthy — unrepresentable by any single SQL coercion. A bare non-boolean condition (`if rows_affected`, `return unless result`) is **rejected at CREATE**: `plruby: condition must be a boolean expression; Ruby truthiness is not emulated (0, "", [] are truthy in Ruby) — write an explicit comparison such as x != 0 or !x.nil?`. Do not pass `IF <int>`/`NOT (<text>)` to plpgsql.
+### 6.4 Truthiness: no coercion, reject non-boolean conditions
+Ruby treats `0`, `""`, `[]` as truthy; unrepresentable by any single SQL coercion. A bare non-boolean condition (`if rows_affected`, `return unless result`) is **rejected at CREATE**: `plruby: condition must be a boolean expression; Ruby truthiness is not emulated (0, "", [] are truthy in Ruby); write an explicit comparison such as x != 0 or !x.nil?`. Do not pass `IF <int>`/`NOT (<text>)` to plpgsql.
 
 ### 6.5 Accepted, documented divergences
 - Decimal literals → `numeric`, not `float8`.
@@ -442,9 +451,9 @@ Hard-reject catalog (all at CREATE time, precise messages, real line numbers): `
 ## 8. C file / function layout & validator integration
 
 ### 8.1 Files
-- `plx_scan.h` / `plx_scan.c` — shared framework: enums, `PlxToken`/`PlxLexer`/`PlxBlock`/`PlxStmt`, `plx_lex`, `plx_build_blocks`. Dialect-neutral; consumes a `PlxSurface`.
-- `plx_transpile.h` / `plx_transpile.c` — shared framework: `PlxNode`/`PlxArm`/`PlxLocal`/`PlxSymtab`, `plx_rewrite_expr`, `plx_infer_type`, the `plx_lower_*` builders, `plx_emit`, `plx_emit_declare`, and the public entry point `plx_transpile`.
-- `plx_dialect_ruby.c` — the Ruby `PlxSurface` (keyword table, block-form matchers, intrinsic names, sigils `#{`/`#::`, exception-class map) and the thin `ruby_validator` wired into `CREATE FUNCTION`.
+- `plx_scan.h` / `plx_scan.c`: shared framework: enums, `PlxToken`/`PlxLexer`/`PlxBlock`/`PlxStmt`, `plx_lex`, `plx_build_blocks`. Dialect-neutral; consumes a `PlxSurface`.
+- `plx_transpile.h` / `plx_transpile.c`: shared framework: `PlxNode`/`PlxArm`/`PlxLocal`/`PlxSymtab`, `plx_rewrite_expr`, `plx_infer_type`, the `plx_lower_*` builders, `plx_emit`, `plx_emit_declare`, and the public entry point `plx_transpile`.
+- `plx_dialect_ruby.c`: the Ruby `PlxSurface` (keyword table, block-form matchers, intrinsic names, sigils `#{`/`#::`, exception-class map) and the thin `ruby_validator` wired into `CREATE FUNCTION`.
 
 ### 8.2 Public API
 ```c
@@ -498,12 +507,12 @@ if (!has_sentinel(rubysrc)) {
 ```
 Because `lanplcallfoid` is `plpgsql_call_handler`, the stored (now-plpgsql) `prosrc` executes on stock plpgsql. Re-running `CREATE OR REPLACE` re-supplies Ruby; the sentinel check makes a second validator pass idempotent (never double-transpile already-plpgsql text).
 
-### 8.4 Embedded original (Strategy A) — safe encoding
+### 8.4 Embedded original (Strategy A): safe encoding
 The verbatim-splice of user bytes into a `/* … */` comment is unsafe: any `*/` in the body (in a string, `a */ b`, etc.) closes the comment early and corrupts `prosrc`; the `$plx-orig$` sentinel can likewise be forged. **Base64-encode the whole original body** and wrap:
 ```
 /*plx-orig:b64$<base64>$plx-orig*/
 ```
-Base64's alphabet contains no `*`, `/`, or `$`, so the terminator and sentinel are unforgeable. (Alternative: escape every `*/`→`*\/` and sentinel occurrences on write, reverse on read — base64 is simpler and total.) A recovery tool decodes this to show the user their original Ruby.
+Base64's alphabet contains no `*`, `/`, or `$`, so the terminator and sentinel are unforgeable. (Alternative: escape every `*/`→`*\/` and sentinel occurrences on write, reverse on read; base64 is simpler and total.) A recovery tool decodes this to show the user their original Ruby.
 
 ### 8.5 Ruby `PlxSurface` (`plx_dialect_ruby.c`)
 Supplies keyword spellings (`if elsif unless while until for begin rescue ensure end next break return loop do case when then in and or not`), block-form matchers (`.each`, `.each_with_index`, `do |..|`, `loop do`, `{ |..| }`), intrinsics (`query fetch_one fetch_one! perform execute emit return_next return_query raise`), sigils `#{ }` and `#::`, and the exception-class→condition map. Nothing else is Ruby-specific.
@@ -516,7 +525,7 @@ Supplies keyword spellings (`if elsif unless while until for begin rescue ensure
 
 **Dialect-specific (a new `plx_dialect_php.c` `PlxSurface`):**
 - keyword spellings (`if/elseif/else/endif` or brace-blocks, `while`, `foreach`, `function` reject, …);
-- comment lexer + **type-annotation sigil** (PHP spelling `/*:: text */` instead of `#::`) — the shared framework consumes "a `::`-tagged type string in a trailing dialect comment"; the dialect supplies only its comment lexer;
+- comment lexer + **type-annotation sigil** (PHP spelling `/*:: text */` instead of `#::`); the shared framework consumes "a `::`-tagged type string in a trailing dialect comment"; the dialect supplies only its comment lexer;
 - string/quote flavors (`"$var"` interpolation vs `'...'` literal), heredoc/nowdoc (`<<<EOT`/`<<<'EOT'`) mapped onto the same pending-heredoc queue;
 - intrinsic names and the exception-class→condition map.
 
@@ -543,6 +552,6 @@ A PHP function reuses every `plx_*` function and swaps only `PlxSurface`. Diverg
 5. **Ranges / off-by-one:** inclusive/exclusive; `downto`/`upto`; `.step` positive/negative-literal/non-literal/fractional; endless/beginless reject; float endpoint reject; int4-overflow reject; exclusive-membership parenthesization.
 6. **DECLARE / scoping:** annotation vs inference; RECORD hoist (query FOR); each_with_index counter + collision; unnamed args (no segfault); sibling-vs-nested loop names; post-loop name reuse; scalar-vs-record conflict; case/truncation collision; synthesized `__plx_e_*` declared.
 7. **RAISE:** placeholder-adjacent-`%`→concat form; `%`/`'` escaping literal-chunks-only; USING-option interpolation→concat; `message:`-vs-positional exclusivity; bare `raise`/re-raise handler-depth; unmapped exception class; literal-`%` no-interp message.
-8. **Full functions (end-to-end on live PG 18.4):** scalar and SETOF; query iteration; fetch_one/`!`; perform/execute static+dynamic; begin/rescue/ensure with diagnostics; loops with next/break; multi-assign swap — each CREATEd, its `prosrc` inspected, and executed for correct results.
+8. **Full functions (end-to-end on live PG 18.4):** scalar and SETOF; query iteration; fetch_one/`!`; perform/execute static+dynamic; begin/rescue/ensure with diagnostics; loops with next/break; multi-assign swap; each CREATEd, its `prosrc` inspected, and executed for correct results.
 
 "Done" = every category's golden files match and the category-8 functions produce correct runtime results on stock plpgsql, with all §7 rejects firing at CREATE time with accurate Ruby line numbers.

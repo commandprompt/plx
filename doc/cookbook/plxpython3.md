@@ -1,6 +1,6 @@
 # Python cookbook
 
-Practical recipes for the plxpython3 dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxpython3 chapter](plxpython3.md) for the full language reference.
+Practical recipes for the plxpython3 dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxpython3 chapter](../plxpython3.md) for the full language reference.
 
 ## Scalar function with branching
 

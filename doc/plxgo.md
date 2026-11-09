@@ -57,7 +57,7 @@ declarations are translated (see below).
 | `x += e` (also `-= *= /= %=`) | `x := x + (e);` |
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
-| `a, b := f(), g()` | declares `a` and `b`, then assigns |
+| `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
 literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
@@ -87,10 +87,12 @@ three-clause `for` lowers to a `WHILE` with the post statement at the end of the
 body; there, as in plpgsql, `continue` re-tests the condition without running the
 post statement, so prefer the counting form when you use `continue`.
 
-In a `range` loop, a single variable is the index (Go semantics), and two
-variables are `(index, value)`. The value variable's type is inferred from the
-slice's declared element type; `for i, v := range` (both index and value) is not
-supported, so use `for _, v := range` or `for i := range`.
+In a `range` loop over an integer, the single variable is the index. Over a
+slice, use `for _, v := range s`. The value variable's type is inferred from the
+slice's declared element type; when `s` is a parameter, declare `v` with `var`
+before the loop. `for i := range s` and `for i, v := range s` over a slice are
+not supported; walk a slice by index with a counting loop
+(`for i := 0; i < len(s); i++`).
 
 ### switch
 
@@ -120,10 +122,9 @@ $$;
 | `nil` | `NULL` |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
-| `len(x)` | `length(x)` (text) or `cardinality(x)` (a slice) |
+| `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `[]int{1, 2, 3}` (again) | `ARRAY[1, 2, 3]` |
 | `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` / `::bigint` / `::double precision` / `::text` |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
@@ -133,8 +134,10 @@ $$;
 A slice literal `[]T{...}` becomes a PostgreSQL `ARRAY[...]`. Go slices are
 0-based while PostgreSQL arrays are 1-based, so a subscript `a[i]` is rewritten
 to `a[(i) + 1]`. Indexing therefore follows Go semantics: `a[0]` is the first
-element, and `len(a)`, `for i := range a`, and `a[i]` all agree on 0-based
-positions. Go slice expressions (`a[i:j]`) are not translated.
+element, and `len(a)` and `a[i]` agree on 0-based positions, so
+`for i := 0; i < len(a); i++` walks a slice by index. `len` and `range`
+recognize only slices declared in the body; copy an array parameter into one
+first (`var a []int = p`). Go slice expressions (`a[i:j]`) are not translated.
 
 `fmt.Println`/`fmt.Printf` used as a statement raise a `NOTICE` with one `%`
 placeholder per value argument (space-separated); there the format string's
@@ -163,8 +166,9 @@ rather than rounding it to two decimal places. Verbs that change an operand's
 representation rather than its padding are affected the same way: `%x`, `%o`,
 `%b`, `%e` and `%q` all render the operand's text, so `fmt.Sprintf("%x", 255)`
 yields `255` and not `ff`.
-A doubled `%%` stays a literal `%`, and a `%` that starts no directive is
-passed through as a literal percent.
+A doubled `%%` stays a literal `%`. A `%` that starts no directive is also
+rendered as a literal percent, but it makes plx fall back to `format()`, where
+a NULL operand renders as empty instead of propagating; write `%%` instead.
 
 ### Types (in declarations)
 
@@ -186,7 +190,8 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 A subset of the standard library is mapped: `strings.ToUpper`/`ToLower`/
 `TrimSpace`/`ReplaceAll`/`Contains`, `math.Abs`/`Floor`/`Ceil`/`Sqrt`/`Pow`/
-`Max`/`Min`/`Mod`, `strconv.Itoa`/`Atoi`, and `time.Now`. Anything not mapped is
+`Max`/`Min`/`Mod`, `strconv.Itoa` (integer to text) and `strconv.Atoi` (text
+to integer), and `time.Now`. Anything not mapped is
 emitted as written, so a PostgreSQL function of the same name still works.
 
 ## SQL access
@@ -197,7 +202,7 @@ plxgo provides small SQL intrinsics, mirroring the other dialects:
 | --- | --- |
 | `emit(x)` | `RETURN NEXT x;` (for a set-returning function) |
 | `execute("...")` | `EXECUTE '...';` |
-| `perform("...")` | `PERFORM ...;` |
+| `perform(expr)` | `PERFORM expr;` (write the call as Go, for example `perform(nextval("seq"))`; a quoted string is evaluated as a literal and does nothing) |
 | `for _, row := range query("...") { ... }` | `FOR row IN EXECUTE '...' LOOP ...` |
 
 ```sql
@@ -217,8 +222,9 @@ $$;
 - `switch` `fallthrough`.
 - String concatenation with `+`. Go overloads `+` for numeric addition and
   string concatenation; plx cannot tell which is meant without type information,
-  so it leaves `+` as `+`. Use `||` (valid in an expression) or build the string
-  another way for text concatenation.
+  so it leaves `+` as `+`. `||` is logical OR in plxgo, so use
+  `fmt.Sprintf("%s%s", a, b)` for text concatenation (a NULL operand makes the
+  result NULL).
 - The full `fmt`/`strings`/`math`/`strconv` packages; only the subset above is
   translated.
 

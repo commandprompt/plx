@@ -81,7 +81,7 @@ nav:
       - Gaps and limitations: LIMITATIONS.md
       - Compatibility: COMPATIBILITY.md
       - Architecture: ARCHITECTURE.md
-      - Transpiler: TRANSPILER.md
+      - Transpiler design (historical): TRANSPILER.md
       - Debugging: DEBUGGING.md
 
 extra:

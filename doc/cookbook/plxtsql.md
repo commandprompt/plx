@@ -1,6 +1,6 @@
 # Transact-SQL cookbook
 
-Practical recipes for the plxtsql dialect (SQL Server / Sybase T-SQL). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxtsql chapter](plxtsql.md) for the full language reference.
+Practical recipes for the plxtsql dialect (SQL Server / Sybase T-SQL). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxtsql chapter](../plxtsql.md) for the full language reference.
 
 ## Scalar function with branching
 

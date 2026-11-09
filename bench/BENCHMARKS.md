@@ -28,7 +28,8 @@ plx uses plx-prefixed language names, so it coexists with the native plruby,
 plphp, plperl, and plpython3u.
 
 plxruby, plxphp, plxjs, plxpython3, and plxcobol transpile to plpgsql at
-`CREATE FUNCTION` time, so at run time they execute as plpgsql. plperl and
+`CREATE FUNCTION` time, so at run time they execute as plpgsql. plxts, plxgo,
+plxplsql, and plxtsql were not benchmarked; they also execute as plpgsql. plperl and
 plpython3u run their own embedded interpreters and retrieve rows through SPI.
 
 ## Results
@@ -56,7 +57,7 @@ In the strbuild column, native plpgsql is the `s := s || 'x'` baseline and the
 plx dialects use the builder. This is the intended native-versus-plx comparison:
 the same accumulation idiom is 1743 ms in stock plpgsql and about 10 ms in the
 plx dialects. The plx builder is also faster than the native PLs' own in-language
-append on this workload (native plruby 53 ms, native plphp 14 ms), because it
+append on this workload (native plruby 53 ms, native plphp 15 ms), because it
 mutates one expanded-object buffer in place rather than materializing an
 interpreter string per step. These numbers are on PostgreSQL 18; the builder's
 amortized-O(1) append requires PostgreSQL 18 (see the version note under String
@@ -65,9 +66,9 @@ building). On PostgreSQL 13 to 17 the plx strbuild column would match plpgsql
 
 ## Analysis
 
-- The plx dialects match plpgsql within about 10 percent on the arith, iter, and
-  call workloads, because the stored function body is plpgsql. There is no
-  run-time translation cost; the translation happens once at `CREATE FUNCTION`.
+- The plx dialects match plpgsql within about 10 percent on the arith and call
+  workloads, and within 17 percent on iter, because the stored function body is
+  plpgsql. There is no run-time translation cost; the translation happens once at `CREATE FUNCTION`.
   The small spread among the dialects is measurement noise.
 
 - plxcobol (branch): the one place plxcobol trails is the four-way branch
@@ -91,7 +92,7 @@ building). On PostgreSQL 13 to 17 the plx strbuild column would match plpgsql
   amortized O(1), and the transpiler lowers the dialect append operators
   (`<<`, `.=`, `+=` on a string) onto it. The result is about 170x faster than
   the stock plpgsql idiom, and faster than the native PLs building the same
-  string with their own append (native plruby 53 ms, native plphp 14 ms), which
+  string with their own append (native plruby 53 ms, native plphp 15 ms), which
   each materialize a fresh interpreter string per step. In hand-written plpgsql
   the same win is available by calling `plx_sb_append`, or by assembling text in
   SQL with `string_agg` over a set.

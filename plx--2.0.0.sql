@@ -1,4 +1,4 @@
-/* plx 1.0: registers the plx dialect languages and the string-builder type */
+/* plx 2.0.0: registers the nine plx dialect languages and the string-builder type */
 
 \echo Use "CREATE EXTENSION plx" to load this file. \quit
 
