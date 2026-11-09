@@ -398,3 +398,20 @@ SELECT rb_hex();
     255
 (1 row)
 
+-- many distinct locals transpile in linear time, even after an over-long name
+-- (which used to disable the index); a regression takes tens of seconds
+SET statement_timeout = '20s';
+DO $d$ BEGIN
+  EXECUTE 'CREATE FUNCTION rb_many_locals() RETURNS int LANGUAGE plxruby AS $b$'
+    || 'v' || repeat('a', 130) || E' = 0\n'
+    || (SELECT string_agg(format('v%s = %s', i, i), E'\n') FROM generate_series(1, 60000) AS i)
+    || E'\nreturn 1\n$b$';
+END $d$;
+-- (not called: plpgsql's own compile of 60,000 variables is slow, and is not plx's)
+SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
+ count 
+-------
+     1
+(1 row)
+
+RESET statement_timeout;

@@ -165,3 +165,34 @@ SELECT js_hex() AS hex, js_bin() AS bin, js_oct() AS oct, js_hex_us() AS hex_us;
 CREATE FUNCTION js_flt() RETURNS numeric LANGUAGE plxjs AS $$ return 3.14; $$;
 CREATE FUNCTION js_exp() RETURNS numeric LANGUAGE plxjs AS $$ return 1.5e3; $$;
 SELECT js_flt() AS flt, js_exp() AS exp;
+
+-- a type annotation at the start of a condition is ignored (it used to give a
+-- span with no source text and crash the backend)
+CREATE FUNCTION js_ann_cond(x int) RETURNS int LANGUAGE plxjs AS $$
+  if (/*:: int */ x > 0) { return 1; }
+  return 0;
+$$;
+SELECT js_ann_cond(3), js_ann_cond(-3);
+
+-- finally inside finally is capped (each level doubles the generated body)
+DO $d$ DECLARE s text := 'x = 1;'; BEGIN
+  FOR i IN 1..12 LOOP s := 'try { x = x + 1; } finally { ' || s || ' }'; END LOOP;
+  EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
+    || s || ' return x; $b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- a finally body that throws runs once, not again from the error path
+DO LANGUAGE plxjs $p$
+  try { raise("warning", "body"); }
+  finally { raise("warning", "finally ran"); throw new Exception("boom"); }
+$p$;
+
+-- a string ending in a lone backslash cannot escape its quotes: the second
+-- assignment stays an inert string instead of running set_config
+CREATE FUNCTION js_bs_escape() RETURNS text LANGUAGE plxjs AS $q$
+let a = `${'\n\'}`;
+let b = " || set_config($x$plx.test_pwned$x$, $x$yes$x$, false)); --";
+return b;
+$q$;
+SELECT js_bs_escape() LIKE '%set_config%' AS literal_kept,
+       current_setting('plx.test_pwned', true) IS NULL AS not_run;

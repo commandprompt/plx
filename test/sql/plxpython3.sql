@@ -138,3 +138,36 @@ if x is not None:
 return "?"
 $$;
 SELECT py_isnull(NULL), py_isnull(5);
+
+-- a type annotation inside a call argument list is ignored (it used to give a
+-- span with no source text and crash the backend)
+DO LANGUAGE plxpython3 $p$
+assert(#:: int
+  1 > 0)
+$p$;
+
+-- call() takes a plain string name; an f-string used to emit a broken identifier
+DO $d$ BEGIN
+  EXECUTE E'DO LANGUAGE plxpython3 $b$\ncall(f"noop")\n$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- blank lines and comments are counted once in error line numbers
+DO $d$ DECLARE d text; BEGIN
+  EXECUTE E'DO LANGUAGE plxpython3 $b$\nx = 1\n\n\n# c\n\nclass Foo:\n    pass\n$b$';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS d = PG_EXCEPTION_DETAIL;
+  RAISE WARNING 'caught: % (%)', SQLERRM, d;
+END $d$;
+
+-- runs of blank or annotation lines lex in linear time (a regression takes tens
+-- of seconds and trips the timeout, which the handlers below do not catch)
+SET statement_timeout = '20s';
+DO $d$ BEGIN
+  EXECUTE E'CREATE FUNCTION py_blank_run() RETURNS int LANGUAGE plxpython3 AS $b$\nx = 1\n'
+    || repeat(E'\n', 400000) || E'return x\n$b$';
+END $d$;
+SELECT py_blank_run();
+DO $d$ BEGIN
+  EXECUTE E'DO LANGUAGE plxpython3 $b$\nx = 1\n' || repeat(E'#:: int\n', 40000) || E'$b$';
+EXCEPTION WHEN syntax_error OR feature_not_supported THEN NULL; END $d$;
+RESET statement_timeout;
