@@ -46,8 +46,8 @@ unwrapped (the declarations inside still hoist).
 
 The **body** is T-SQL, but the function **signature** (the parameter and return
 types in `CREATE FUNCTION`) is parsed by PostgreSQL before plx sees the body, so
-it must use PostgreSQL type names: write `RETURNS int`, not `RETURNS INT` inside
-a T-SQL `CREATE PROCEDURE`. Parameters are referenced in the body with the `@`
+it must use PostgreSQL type names: write `RETURNS timestamp`, not
+`RETURNS DATETIME`. Parameters are referenced in the body with the `@`
 sigil (`@score` above binds to the parameter `score`). Inside the body, T-SQL
 type names in `DECLARE` are translated (see below).
 
@@ -196,8 +196,10 @@ session option.
 - Table variables (`DECLARE @t TABLE (...)`) and T-SQL cursors
   (`DECLARE c CURSOR`).
 - `GOTO`, `WAITFOR`, and label targets.
-- Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`): a plpgsql function
-  runs inside the caller's transaction and cannot manage transactions.
+- Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`), in a function or a
+  procedure; plxtsql rejects them everywhere. plxruby, plxphp, plxjs, plxts,
+  plxpython3, plxcobol and plxplsql support `COMMIT` and `ROLLBACK` in a
+  procedure; plxgo does not.
 - Calling a stored procedure by name (`EXEC procname`); only `EXEC('<sql>')`
   dynamic SQL is supported.
 - String concatenation with `+`. T-SQL overloads `+` for both numeric addition

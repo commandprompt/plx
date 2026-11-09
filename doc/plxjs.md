@@ -41,6 +41,12 @@ let amount /*:: numeric */;
 amount = principal * rate;
 ```
 
+Known issue: a top-level first assignment of an interpolated string is folded
+into the declaration, so it is evaluated before any earlier statement runs.
+``let x = 1; x = 2; let m = `v ${x}`; return m;`` returns `v 1`. When an
+interpolated initializer depends on earlier statements, declare the variable
+first (`let m /*:: text */;`) and then assign it.
+
 The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
 
 ```sql
@@ -97,7 +103,7 @@ while (n > 0) { n = n - 1; }
 ```sql
 outer: for (let i = 1; i <= n; i++) {
   for (let j = 1; j <= n; j++) {
-    if (i + j >= limit) { break outer; }
+    if (i + j >= lim) { break outer; }
   }
 }
 ```
@@ -113,7 +119,8 @@ for (const row of query(`SELECT id, amount FROM orders WHERE grp = ${g}`)) {
 ```
 
 The row variable is a record. Field access is `row.col`. For bind parameters or
-non-literal SQL, pass extra arguments: `query(sql, a) of ...`.
+non-literal SQL, pass extra arguments: `for (const row of query(sql, a))`, which
+becomes `FOR row IN EXECUTE sql USING a`.
 
 ### Iterating an array
 
@@ -164,7 +171,7 @@ close_cursor(c);
 
 ```sql
 let rc = row_count();   // GET DIAGNOSTICS rc = ROW_COUNT
-found()                 // the FOUND variable
+if (found()) { return rc; }   // the FOUND variable
 ```
 
 ### Set-returning functions
@@ -190,20 +197,23 @@ The call form `raise("notice", "message")` emits a `RAISE` at the named level
 ### Handling
 
 ```sql
+let r = 0;
 try {
-  return 100 / d;
+  r = 100 / d;
 } catch (e) {
   raise("notice", `caught: ${e.message}`);
-  return -1;
+  r = -1;
 } finally {
   perform("INSERT INTO log(msg) VALUES ('done')");
 }
+return r;
 ```
 
 `catch (e)` maps to `WHEN OTHERS`. Accessors: `e.message` to `SQLERRM`,
 `e.sqlstate` to `SQLSTATE`, and `e.detail`, `e.hint`, `e.constraint`, `e.column`,
 `e.table`, `e.schema`, `e.datatype` to the matching `GET STACKED DIAGNOSTICS`
-fields.
+fields. A `return` inside the `try` or `catch` block leaves the function without
+running `finally`; set a variable and return after the block instead.
 
 ### Assertions
 
@@ -217,7 +227,10 @@ assert(n > 0, "must be positive");
   `'...'` strings do not interpolate. Use template literals for concatenation.
 - Comparison: `==`, `===`, `!=`, `!==` map to `=` and `<>`. `x === null` becomes
   `x IS NULL`.
-- Boolean: `&&`, `||`, `!` map to `AND`, `OR`, `NOT`.
+- Boolean: `&&` and `!` map to `AND` and `NOT`. `||` maps to `OR` only in an
+  `if`/`while` condition or a ternary test. Elsewhere (assignments, `return`)
+  it passes through as SQL `||` (string concatenation), so write `OR` there:
+  `let ok = a OR b /*:: boolean */;`.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
 - `null` and `undefined` become `NULL`.
 
@@ -272,23 +285,35 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - `+` is numeric addition; use template literals for string building.
 - Interpolating a NULL in a template literal propagates it, so the whole string
   is NULL. It is neither the JavaScript string `"null"` nor an empty string. In
-  a message being built for `throw` the value falls back to an empty string
-  instead, so one NULL cannot swallow the message.
+  a `throw` or `raise` message, including the `raise("level", ...)` call form,
+  the value falls back to an empty string instead, so one NULL cannot swallow
+  the message. An `assert` message gets no fallback: a NULL there replaces your
+  message with plpgsql's generic `assertion failed`.
 - Integer division and modulo follow SQL (truncate toward zero).
 - JavaScript truthiness is not emulated. A condition must be a boolean
-  expression. A non-boolean condition is an error reported by plpgsql when the
-  function runs.
-- Locals are function-scoped, matching JavaScript `var` scope.
+  expression. A non-boolean condition is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
+- Locals are function-scoped, matching JavaScript `var` scope. `let` and
+  `const` inside a block are not block-scoped: a redeclaration in an inner block
+  assigns the outer variable. `const` is not enforced.
 
 ## Not supported
 
 Rejected at `CREATE FUNCTION` time with a line number:
 
-- Function definitions, arrow functions, classes, `import`.
-- Object and array literals as general values.
-- `for...in`, and `for...of` over anything other than `query(...)` or an array.
+- Function definitions, classes, `import`.
+- `for...in`.
 - `switch` fall-through (end each case with `break` or `return`).
-- Per-block local `DECLARE` (locals are function-scoped by design).
+
+Not translated:
+
+- Arrow functions and object and array literals as general values. Unannotated,
+  they fail at `CREATE FUNCTION` time with `cannot infer a PostgreSQL type`;
+  annotated, they pass through and fail when the function runs.
+- `for...of` treats anything other than `query(...)` as an array
+  (`FOREACH ... IN ARRAY`); a non-array fails when the function runs.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

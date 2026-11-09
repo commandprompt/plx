@@ -106,10 +106,10 @@ is plpgsql. See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) and
 
 ## Example
 
-One function, written in three dialects, each producing the same plpgsql:
+One function, written in three dialects, each producing equivalent plpgsql:
 
 ```sql
-CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxruby AS $$
+CREATE FUNCTION grade_rb(score int) RETURNS text LANGUAGE plxruby AS $$
   grade #:: text
   if score >= 90
     grade = "A"
@@ -121,14 +121,14 @@ CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxruby AS $$
   return grade
 $$;
 
-CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxphp AS $$
+CREATE FUNCTION grade_php(score int) RETURNS text LANGUAGE plxphp AS $$
   if ($score >= 90) { $grade = "A"; }
   elseif ($score >= 80) { $grade = "B"; }
   else { $grade = "F"; }
   return $grade;
 $$;
 
-CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxjs AS $$
+CREATE FUNCTION grade_js(score int) RETURNS text LANGUAGE plxjs AS $$
   let grade = "F";
   if (score >= 90) { grade = "A"; }
   else if (score >= 80) { grade = "B"; }
@@ -137,26 +137,41 @@ CREATE FUNCTION grade(score int) RETURNS text LANGUAGE plxjs AS $$
 $$;
 ```
 
-The stored plpgsql (in `pg_proc.prosrc`) for each is:
+The stored plpgsql (in `pg_proc.prosrc`) for the plxruby and plxphp versions is
+shown below. The plxjs version is the same except that it initializes `grade`
+in its `DECLARE` (`grade text := 'F';`).
 
 ```plpgsql
+/*plx:v1:plxruby:b04416a1*/
 DECLARE
   grade text;
 BEGIN
-  IF score >= 90 THEN grade := 'A';
-  ELSIF score >= 80 THEN grade := 'B';
-  ELSE grade := 'F';
+  IF score >= 90 THEN
+    grade := 'A';
+  ELSIF score >= 80 THEN
+    grade := 'B';
+  ELSE
+    grade := 'F';
   END IF;
   RETURN grade;
 END;
+/*plx-orig:b64$...$plx-orig*/
 ```
+
+The first line is a sentinel naming the dialect, and the last line is a
+comment carrying your original source in base64, so it survives dump and
+restore and can be recovered (see [doc/DEBUGGING.md](doc/DEBUGGING.md)).
+Everything between them is the plpgsql that runs.
 
 ## Performance
 
-Because functions execute as plpgsql, the plx dialects match plpgsql (within about
-11 percent across five workloads) and inherit its performance profile: several
-times faster than the embedded-interpreter PLs on row iteration, and competitive
-on arithmetic, branching, and call overhead.
+Because functions execute as plpgsql, the plx dialects match plpgsql within
+about 10 percent on most workloads (the worst cases measured are plxruby row
+iteration at 1.17x and plxcobol's `EVALUATE` branch at 1.32x) and inherit its
+performance profile: several times faster than the embedded-interpreter PLs on
+row iteration, fastest on call overhead, and between the embedded PLs on
+arithmetic. On a pure-CPU branching loop the embedded PLs are faster (native
+PL/PHP runs it in 0.40x of plpgsql's time).
 
 The one place plpgsql is weak is building a string in a loop: `s := s || 'x'` is
 O(n^2), because text is immutable and each step copies the whole string. plx
@@ -185,11 +200,22 @@ make PG_CONFIG=/path/to/pg_config
 make install PG_CONFIG=/path/to/pg_config
 ```
 
-Then, in a database:
+Then, in a database (installing the extension requires a superuser):
 
 ```sql
 CREATE EXTENSION plx;
 ```
+
+To upgrade, install the new build and run, in each database:
+
+```sql
+ALTER EXTENSION plx UPDATE;
+```
+
+Upgrading changes no existing function. plx transpiles at `CREATE FUNCTION`
+time and stores the result, so a function keeps the plpgsql it was created with
+until its DDL is run again. See [CHANGELOG.md](CHANGELOG.md) for the notes on
+each release.
 
 ## Documentation
 
@@ -218,7 +244,8 @@ CREATE EXTENSION plx;
 ## Layout
 
 ```
-plx.control, plx--1.0.sql   extension control and install SQL
+plx.control, plx--2.0.0.sql extension control and install SQL
+plx--X--Y.sql               upgrade scripts between releases
 Makefile                    PGXS build
 src/                        C sources (transpiler, dialect surfaces, PL handler)
 doc/                        per-dialect chapters, architecture, transpiler, parity
@@ -231,11 +258,17 @@ bench/                      benchmark harness and results
 
 ```
 make installcheck            # pg_regress suite
+make differentialcheck       # each dialect against a plpgsql reference
+make metacheck               # META.json against the PGXN spec (no server)
 python3 test/run_corpus.py   # additional Ruby corpus runner
+python3 test/fuzz.py         # transpiler fuzzer
 ```
 
-`make installcheck` runs against an installed plx on a running server. The
-expected output is in `test/expected/`.
+`make installcheck` and `make differentialcheck` run against an installed plx on
+a running server; run `differentialcheck` after `installcheck`, which creates
+the `contrib_regression` database it uses. The expected output is in
+`test/expected/`. CI runs installcheck, differentialcheck, and metacheck on
+PostgreSQL 13 through 18.
 
 ## License
 

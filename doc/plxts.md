@@ -91,17 +91,21 @@ These are intentional and inherited from plxjs (see [plxjs.md](plxjs.md)).
 - The type system is not enforced at compile time: annotations only set the
   plpgsql declaration type. Structural/interface types, generics beyond `T[]`,
   and complex unions are not modeled; use a SQL type name for anything the table
-  above does not cover.
+  above does not cover. A union of two non-null types uses the first member
+  (`number | string` becomes `numeric`).
 
 ## Not supported
 
-Everything plxjs rejects (function/class/arrow definitions, object/array
-literals as general values, non-`query`/array `for...of`, `switch`
-fall-through), plus:
+Everything plxjs rejects or does not translate (see [plxjs.md](plxjs.md)),
+plus:
 
-- TypeScript type declarations (`interface`, `type`, `enum`), generics, and
-  type-only imports.
+- TypeScript type declarations (`interface`, `type`, `enum`) and type-only
+  imports, which are rejected at `CREATE FUNCTION` time.
+- Generic annotations (`Array<T>`, `Map<K,V>`) and nested arrays (`number[][]`)
+  are not mapped. They are emitted verbatim and fail with `invalid type name`
+  the first time the function runs; use `T[]` or a SQL type name.
 - Multiple annotated declarators in one statement
-  (`let a: number = 1, b: string = 'x';`); use one declaration per statement.
+  (`let a: number = 1, b: string = 'x';`), reported as a type-inference error;
+  use one declaration per statement.
 
 See [PARITY.md](PARITY.md) and [plxjs.md](plxjs.md).

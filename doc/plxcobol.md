@@ -27,15 +27,18 @@ A function body is a free-format COBOL program fragment: an optional
 
 ```sql
 CREATE FUNCTION add(a int, b int) RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 RESULT PIC 9(9).
 PROCEDURE DIVISION.
     COMPUTE RESULT = A + B
     GOBACK RETURNING RESULT.
 $$;
 ```
 
-Function arguments are referenced by name (case-insensitively). Any SQL
-expression is valid inside `COMPUTE` and conditions, because expressions are
-passed through to plpgsql and SQL.
+Function arguments are referenced by name (case-insensitively). Most SQL
+expressions are valid inside `COMPUTE` and conditions, because expressions are
+passed through to plpgsql and SQL. The `||` operator and `::` casts are not:
+the tokenizer drops them, so use `CONCAT(...)` and `CAST(x AS type)`.
 
 ### Local variables and types
 
@@ -49,7 +52,7 @@ clause is mapped to a SQL type:
 | `PIC 9(n)`, larger | `numeric(n)` |
 | `PIC 9(i)V9(s)` (implied decimal) | `numeric(i+s, s)` |
 | `PIC X(n)`, `PIC A(n)` | `varchar(n)` |
-| `USAGE COMP-1` / `COMP-2` | `real` / `double precision` |
+| `PIC ... USAGE COMP-1` / `COMP-2` (a `PIC` clause is required) | `real` / `double precision` |
 
 A leading `S` (sign) is accepted and ignored for typing. A `VALUE` clause becomes
 the declaration's initializer:
@@ -85,8 +88,8 @@ writes element `i` (1-based):
 ```sql
 01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
 ...
-COMPUTE WS-ARR(WS-I) = WS-I * WS-I     -- write element
-COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I) -- read element
+COMPUTE WS-ARR(WS-I) = WS-I * WS-I     *> write element
+COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I) *> read element
 ```
 
 Iterate the whole table with `PERFORM v OVER ARRAY WS-ARR`. A subscript is
@@ -336,8 +339,8 @@ $$;
 ```
 
 `NEW`, `OLD`, and the `TG_` variables are available. Assigning to a record field
-(`MOVE e TO NEW.COL`) works because a qualified name maps to `new.col`; a bare
-`MOVE e TO NEW` is not supported.
+(`MOVE e TO NEW.COL`) works because a qualified name maps to `new.col`;
+`MOVE OLD TO NEW` replaces the whole row.
 
 ## Semantic differences
 
@@ -346,7 +349,9 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Decimal literals infer `numeric`, not a floating-point type.
 - Integer division and modulo follow SQL (truncate toward zero).
 - A condition must be a boolean expression; there is no COBOL 88-level or
-  class-condition abbreviation.
+  class-condition abbreviation. An 88-level entry is rejected. A class
+  condition such as `N IS NUMERIC` is not rejected but mistranslated (`IS` is
+  dropped), so write a SQL boolean expression.
 - Data names are function-scoped after mapping to plpgsql identifiers, so two
   names that differ only by `-` versus `_` collide.
 
@@ -360,8 +365,11 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Group items (subordinate level entries under an `01`) in `WORKING-STORAGE`;
   declare elementary items, or use a `TYPE` clause for a composite plpgsql type.
 - Fixed-format source (columns, sequence area, indicator area). Use free format.
-- Report Writer, screen sections, object orientation, and the standard COBOL
-  intrinsic function library. Use SQL functions inside expressions and SQL text.
+- Report Writer, screen sections, and object orientation.
+
+Not translated: the standard COBOL intrinsic function library. A
+`FUNCTION name(...)` call is passed through and fails when the function runs.
+Use SQL functions inside expressions and SQL text.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

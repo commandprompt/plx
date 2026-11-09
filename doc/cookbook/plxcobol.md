@@ -1,6 +1,6 @@
 # COBOL cookbook
 
-Practical recipes for the plxcobol dialect (ISO/IEC 1989:2023). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxcobol chapter](plxcobol.md) for the full language reference.
+Practical recipes for the plxcobol dialect (ISO/IEC 1989:2023). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxcobol chapter](../plxcobol.md) for the full language reference.
 
 ## Absolute value with IF / ELSE
 

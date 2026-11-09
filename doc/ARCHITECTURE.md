@@ -18,7 +18,8 @@ dialect syntax and emits plpgsql; the execution engine is plpgsql.
 
 ## Catalog wiring
 
-For each dialect, `plx--1.0.sql` creates a language whose parts are:
+For each dialect, the install script (`plx--2.0.0.sql` for the current release)
+creates a language whose parts are:
 
 - `HANDLER` is `plx_call_handler`, which is bound to plpgsql's exported
   `plpgsql_call_handler` symbol (`AS '$libdir/plpgsql', 'plpgsql_call_handler'`).
@@ -120,7 +121,8 @@ per-dialect branching in the driver.
 ## Files
 
 ```
-plx.control, plx--1.0.sql     extension control and install SQL
+plx.control, plx--2.0.0.sql   extension control and install SQL
+plx--X--Y.sql                 upgrade scripts between releases
 src/plx.h                     public ABI (PlxDialect, PlxFuncMeta)
 src/plx_int.h                 internal ABI (PlxSurface, canonical keywords)
 src/plx_engine.h              engine interface: PlxCtx, tokens, symtab, and the
@@ -151,12 +153,15 @@ is a new `plx_dialect_X.c` (a surface with its `parse_body`, plus a few
 
 The plx languages are declared `TRUSTED`. A plx function executes as plpgsql
 through plpgsql's call handler, so it can do what a plpgsql function can do and
-nothing more: no filesystem, no network, no arbitrary native code, and all SQL
-runs with the caller's privileges. plx embeds no language runtime, which is the
+nothing more: no filesystem, no network, no arbitrary native code, and SQL runs
+with the caller's privileges (or the owner's, for a `SECURITY DEFINER`
+function), exactly as in plpgsql. plx embeds no language runtime, which is the
 difference from the native PL/Ruby and PL/PHP, which are untrusted because they
 load a full interpreter into the backend. The transpiler is C that parses
 untrusted input at `CREATE FUNCTION` time; it has a recursion-depth limit and is
-fuzzed (see `test/fuzz.py`).
+fuzzed (see `test/fuzz.py`). See the user guide's
+[Trust and security](USERGUIDE.md#trust-and-security) section for who can use
+the languages and how to restrict them.
 
 ## Testing
 
@@ -193,7 +198,8 @@ instead of passing over it.
 
 ## Related documents
 
-- [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification.
+- [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification
+  (historical; the dialect chapters are authoritative where they differ).
 - [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
 - The per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
   [plxjs](plxjs.md), [plxts](plxts.md), [plxpython3](plxpython3.md),
