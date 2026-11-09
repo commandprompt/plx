@@ -5028,6 +5028,8 @@ lua_namestmt(Lua *L, int ind)
 			depth++;
 		else if (k == T_RPAREN || k == T_RBRACKET || k == T_RBRACE)
 			depth--;
+		else if (k == T_KW && t[i].kw == KW_DEF && L->match[i] > i && L->match[i] < b)
+			i = L->match[i];	/* step over a function body (pcall) */
 		else if (depth == 0 && plx_tok_is(&t[i], "="))
 		{
 			eq = i;
