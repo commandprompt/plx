@@ -178,7 +178,7 @@ SELECT js_ann_cond(3), js_ann_cond(-3);
 -- linear in size (each level used to double the generated body)
 DO $d$ DECLARE s text := 'x = 1;'; BEGIN
   FOR i IN 1..40 LOOP s := 'try { x = x + 1; } finally { ' || s || ' }'; END LOOP;
-  EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x /*:: int */ = 0; '
+  EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
     || s || ' return x; $b$';
 END $d$;
 SELECT js_fin_deep(), length(prosrc) < 200000 AS linear FROM pg_proc WHERE proname = 'js_fin_deep';
