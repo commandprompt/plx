@@ -201,13 +201,15 @@ SELECT id, label, code FROM widget ORDER BY id;
 
 ## Dynamic SQL with bind parameters
 
-Interpolate identifiers you control (a table name) with an f-string, but pass
-untrusted values as bind parameters: `$1` in the SQL text and an extra argument
-to `fetch_one`. This keeps the value out of the SQL string and avoids injection.
+Interpolate an identifier (a table name) with `{ident(tbl)}`, which quotes it
+with `quote_ident`, and pass values as bind parameters: `$1` in the SQL text and
+an extra argument to `fetch_one`. An interpolated value would be bound as well;
+only `ident()`, `literal()` and `raw()` put text into the SQL itself. See
+[Interpolation in SQL](../DYNAMIC-SQL.md).
 
 ```python
 CREATE FUNCTION count_at_least(tbl text, threshold int) RETURNS bigint LANGUAGE plxpython3 AS $$
-r = fetch_one(f"SELECT count(*) AS c FROM {tbl} WHERE amount >= $1", threshold)
+r = fetch_one(f"SELECT count(*) AS c FROM {ident(tbl)} WHERE amount >= $1", threshold)
 return r.c
 $$;
 ```
