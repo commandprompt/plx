@@ -22,6 +22,8 @@
 #include "catalog/pg_proc.h"
 #include "commands/proclang.h"
 #include "nodes/parsenodes.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -71,6 +73,36 @@ plx_lookup_dialect(const char *lanname)
 	return NULL;
 }
 
+/* ---- plpgsql privilege gate ------------------------------------------- */
+
+/*
+ * A plx function is stored and executed as plpgsql, so a role allowed to use a
+ * plx language could otherwise run plpgsql after USAGE on plpgsql was revoked
+ * from it. Require USAGE on plpgsql as well, at the same points plpgsql itself
+ * checks it: when a function is created (the validator) and for a DO block
+ * (the inline handler). As with plpgsql, functions that already exist keep
+ * running after a REVOKE. Superusers pass the check as usual.
+ */
+static void
+plx_require_plpgsql_usage(const PlxDialect *d)
+{
+	Oid			plpgsql_lang = get_language_oid("plpgsql", false);
+	AclResult	aclresult;
+
+#if PG_VERSION_NUM >= 160000
+	aclresult = object_aclcheck(LanguageRelationId, plpgsql_lang, GetUserId(),
+								ACL_USAGE);
+#else
+	aclresult = pg_language_aclcheck(plpgsql_lang, GetUserId(), ACL_USAGE);
+#endif
+	if (aclresult != ACLCHECK_OK)
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for language plpgsql"),
+				 errdetail("Language %s is executed as plpgsql, so using it requires USAGE on plpgsql.",
+						   d->lanname)));
+}
+
 /* ---- generic validator (DDL time) ------------------------------------- */
 
 /* Populate PlxFuncMeta from a pg_proc tuple (args incl. OUT/TABLE columns). */
@@ -105,6 +137,9 @@ plx_generic_validator(FunctionCallInfo fcinfo, const PlxDialect *d)
 	/* Respect check_function_bodies / permission gating. */
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid))
 		PG_RETURN_VOID();
+
+	/* before the sentinel check, so a pre-transpiled body is gated too */
+	plx_require_plpgsql_usage(d);
 
 	tuple = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcoid));
 	if (!HeapTupleIsValid(tuple))
@@ -161,6 +196,8 @@ plx_generic_inline_handler(FunctionCallInfo fcinfo, const PlxDialect *d)
 	HeapTuple	langtup;
 	Form_pg_language langform;
 	Oid			inline_oid;
+
+	plx_require_plpgsql_usage(d);
 
 	transpiled = d->transpile(codeblock->source_text, NULL);
 
