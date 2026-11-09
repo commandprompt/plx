@@ -688,7 +688,7 @@ plx_local_add(Ctx *cx, const char *name, int len)
  *   Ruby: #{expr}   PHP: {$expr} and $var
  */
 static bool
-interp_at(const PlxSurface *surf, bool fstr, const char *s, const char *e,
+interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const char *e,
 		  const char **exs, int *exl, const char **next)
 {
 	if (fstr && s < e && s[0] == '{' && !(s + 1 < e && s[1] == '{'))	/* f-string {expr} */
@@ -781,7 +781,12 @@ interp_at(const PlxSurface *surf, bool fstr, const char *s, const char *e,
 			*next = (q < e) ? q + 1 : q;
 			return true;
 		}
-		if (s + 1 < e && s[0] == '{' && s[1] == '$')	/* {$expr} */
+		/* {$expr}; inside a SQL argument also {ident(...)} and {raw(...)} */
+		if ((s + 1 < e && s[0] == '{' && s[1] == '$') ||
+			(sqlctx && s[0] == '{' &&
+			 ((e - s > 7 && strncmp(s + 1, "ident(", 6) == 0) ||
+			  (e - s > 9 && strncmp(s + 1, "literal(", 8) == 0) ||
+			  (e - s > 5 && strncmp(s + 1, "raw(", 4) == 0))))
 		{
 			int			depth = 1;
 			const char *x = s + 1, *q = x;
@@ -848,7 +853,7 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			s += 2;
 			continue;
 		}
-		if (can_interp && interp_at(cx->surf, tk->fstr, s, e, &exs, &exl, &nx))
+		if (can_interp && interp_at(cx->surf, tk->fstr, false, s, e, &exs, &exl, &nx))
 		{
 			char	   *rw;
 
@@ -1808,17 +1813,73 @@ plx_diag_prefix(int mask, int ind)
 	return p.data;
 }
 
-/* Emit a Ruby string token as raw SQL text (interp #{e} -> rewritten expr,
- * inline; no surrounding quotes). Used for static query/perform/fetch SQL. */
-void
-plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
+/* ------------------------------------------------- SQL arguments (templates) */
+
+/*
+ * The SQL argument of query / fetch_one / execute / open_cursor / return_query
+ * / perform, when it is a string literal, is a template: literal SQL text with
+ * interpolations. How an interpolation is lowered depends on where it sits in
+ * the SQL and on whether the statement is static or dynamic:
+ *
+ *   value, outside quotes   static: the plpgsql expression itself (plpgsql
+ *                           binds it as a variable); dynamic: a $n parameter
+ *                           passed with USING
+ *   value, '#{x}'           the value alone (static: (x); dynamic: $n), not a
+ *                           literal containing the expression's text
+ *   value, '..#{x}..'       ('..' || x::text || '..'), x as above
+ *   #{ident(e)}             quote_ident(e), spliced; makes the call dynamic
+ *   #{literal(e)}           quote_nullable(e), spliced; makes the call dynamic
+ *   #{raw(e)}               e as SQL text, spliced as is; makes the call dynamic
+ *   inside "..."            rejected: write #{ident(e)} instead
+ *
+ * Only planned statements accept $n parameters (SELECT, INSERT, UPDATE,
+ * DELETE, MERGE, WITH, VALUES, TABLE, CALL, EXPLAIN). In any other dynamic
+ * statement (CREATE, ALTER, SET, COMMENT, GRANT, ...) a value is spliced as
+ * literal(e) instead: still quoted, so still not SQL.
+ *
+ * So data never becomes SQL text unless the author says so with raw(), and an
+ * identifier is quoted unless the author says otherwise. An interpolation in a
+ * string that is built elsewhere and passed in a variable is ordinary string
+ * concatenation (the call cannot see it); use bind arguments for those.
+ */
+typedef struct
+{
+	bool		interp;
+	char	   *s;				/* literal: decoded SQL text; interp: raw expr */
+	int			len;
+} PlxTplSeg;
+
+typedef enum
+{
+	TPL_VALUE, TPL_IDENT, TPL_LITERAL, TPL_RAW
+} PlxTplKind;
+
+/*
+ * Split a string token into literal runs and interpolations. full: decode
+ * escapes as a string value does (emit_string_value), for SQL that will be
+ * passed to EXECUTE as a string; otherwise only \" and \\, as static SQL text
+ * always has been.
+ */
+static int
+tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 {
 	const char *s = tk->s + (tk->fstr ? 2 : 1);
 	const char *e = tk->s + tk->len - 1;
-
 	bool		can_interp = tk->fstr ||
 		(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
+	bool		raw = tk->sq && cx->surf->sq_is_raw;
+	PlxTplSeg  *segs = NULL;
+	int			n = 0,
+				cap = 0;
+	StringInfoData lit;
 
+	initStringInfo(&lit);
+#define TPL_PUSH(isint, str, l) do { \
+		if (n >= cap) { cap = cap ? cap * 2 : 8; \
+			segs = segs ? repalloc(segs, cap * sizeof(PlxTplSeg)) \
+						: palloc(cap * sizeof(PlxTplSeg)); } \
+		segs[n].interp = (isint); segs[n].s = pnstrdup((str), (l)); \
+		segs[n].len = (l); n++; } while (0)
 	while (s < e)
 	{
 		const char *exs, *nx;
@@ -1827,25 +1888,457 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		if (tk->fstr && ((s[0] == '{' && s + 1 < e && s[1] == '{') ||
 						 (s[0] == '}' && s + 1 < e && s[1] == '}')))
 		{
-			appendStringInfoChar(out, s[0]);
+			appendStringInfoChar(&lit, s[0]);
 			s += 2;
 			continue;
 		}
-		if (can_interp && interp_at(cx->surf, tk->fstr, s, e, &exs, &exl, &nx))
+		if (can_interp && interp_at(cx->surf, tk->fstr, true, s, e, &exs, &exl, &nx))
 		{
-			appendStringInfoString(out, plx_rewrite_expr(cx, exs, exl, false));
+			if (lit.len)
+			{
+				TPL_PUSH(false, lit.data, lit.len);
+				resetStringInfo(&lit);
+			}
+			TPL_PUSH(true, exs, exl);
 			s = nx;
 			continue;
 		}
-		if (s[0] == '\\' && s + 1 < e && (s[1] == '"' || s[1] == '\\'))
+		if (s[0] == '\\' && s + 1 < e)
 		{
-			appendStringInfoChar(out, s[1]);
-			s += 2;
+			char		c = s[1];
+
+			if (!full)
+			{
+				if (c == '"' || c == '\\')
+				{
+					appendStringInfoChar(&lit, c);
+					s += 2;
+					continue;
+				}
+			}
+			else if (raw)
+			{
+				s += 2;
+				if (c != '\\' && c != '\'')
+					appendStringInfoChar(&lit, '\\');
+				appendStringInfoChar(&lit, c);
+				continue;
+			}
+			else
+			{
+				s += 2;
+				switch (c)
+				{
+					case 'n': appendStringInfoChar(&lit, '\n'); break;
+					case 't': appendStringInfoChar(&lit, '\t'); break;
+					case 'r': appendStringInfoChar(&lit, '\r'); break;
+					default: appendStringInfoChar(&lit, c); break;
+				}
+				continue;
+			}
+		}
+		appendStringInfoChar(&lit, *s++);
+	}
+	if (lit.len)
+		TPL_PUSH(false, lit.data, lit.len);
+#undef TPL_PUSH
+	pfree(lit.data);
+	*segs_out = segs;
+	return n;
+}
+
+/* ident(e) / raw(e) wrapping the whole interpolation? Sets [*is, *is + *il). */
+static PlxTplKind
+tpl_kind(const char *s, int len, const char **is, int *il)
+{
+	static const struct { const char *w; PlxTplKind k; } w[] = {
+		{"ident(", TPL_IDENT}, {"literal(", TPL_LITERAL}, {"raw(", TPL_RAW},
+	};
+	int			i;
+
+	while (len > 0 && (*s == ' ' || *s == '\t'))
+	{
+		s++;
+		len--;
+	}
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t'))
+		len--;
+	for (i = 0; i < (int) lengthof(w); i++)
+	{
+		int			wl = (int) strlen(w[i].w),
+					depth = 0,
+					j;
+
+		if (len <= wl || strncmp(s, w[i].w, wl) != 0 || s[len - 1] != ')')
+			continue;
+		/* the paren opened by the wrapper must be the one that closes last */
+		for (j = wl - 1; j < len; j++)
+		{
+			if (s[j] == '(')
+				depth++;
+			else if (s[j] == ')' && --depth == 0)
+				break;
+		}
+		if (j == len - 1)
+		{
+			*is = s + wl;
+			*il = len - wl - 1;
+			return w[i].k;
+		}
+	}
+	*is = s;
+	*il = len;
+	return TPL_VALUE;
+}
+
+/* SQL lexical state of the template text emitted so far */
+typedef struct
+{
+	bool		sq,				/* inside '...' */
+				dq,				/* inside "..." */
+				estr;			/* the '...' is an E'...' */
+	int			sq_open;		/* buf offset of the opening quote */
+	bool		wrapped;		/* a '(' was inserted before sq_open */
+} PlxTplState;
+
+/* Append a literal run, tracking quotes. next: the segment after, or NULL. */
+static void
+tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
+{
+	int			i;
+
+	for (i = 0; i < len; i++)
+	{
+		char		c = s[i];
+
+		if (st->sq)
+		{
+			if (st->estr && c == '\\' && i + 1 < len)
+			{
+				appendStringInfoChar(buf, c);
+				appendStringInfoChar(buf, s[++i]);
+				continue;
+			}
+			if (c == '\'')
+			{
+				if (i + 1 < len && s[i + 1] == '\'')
+				{
+					appendBinaryStringInfo(buf, "''", 2);	/* escaped quote */
+					i++;
+					continue;
+				}
+				appendStringInfoChar(buf, c);
+				st->sq = false;
+				if (st->wrapped)
+				{
+					appendStringInfoChar(buf, ')');
+					st->wrapped = false;
+				}
+				continue;
+			}
+		}
+		else if (st->dq)
+		{
+			if (c == '"')
+			{
+				if (i + 1 < len && s[i + 1] == '"')
+				{
+					appendBinaryStringInfo(buf, "\"\"", 2);
+					i++;
+					continue;
+				}
+				st->dq = false;
+			}
+		}
+		else if (c == '\'')
+		{
+			char		p1 = buf->len > 0 ? buf->data[buf->len - 1] : ' ';
+			char		p2 = buf->len > 1 ? buf->data[buf->len - 2] : ' ';
+
+			st->sq = true;
+			st->sq_open = buf->len;
+			st->wrapped = false;
+			st->estr = (p1 == 'E' || p1 == 'e') && !plx_is_ident(p2);
+		}
+		else if (c == '"')
+			st->dq = true;
+		appendStringInfoChar(buf, c);
+	}
+}
+
+/*
+ * Emit one value interpolation. ref is the text that stands for the value: the
+ * rewritten expression (static) or "$n" (dynamic). Returns true when the
+ * closing quote of a '#{x}' was consumed and must be skipped in the next run.
+ */
+static bool
+tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
+			  const PlxTplSeg *next)
+{
+	if (!st->sq)
+	{
+		appendStringInfoString(buf, ref);
+		return false;
+	}
+	/* '#{x}' exactly: the value alone */
+	if (!st->estr && buf->len == st->sq_open + 1 && next && !next->interp &&
+		next->len >= 1 && next->s[0] == '\'' &&
+		!(next->len >= 2 && next->s[1] == '\''))
+	{
+		buf->len = st->sq_open;
+		buf->data[buf->len] = '\0';
+		appendStringInfo(buf, "(%s)", ref);
+		st->sq = false;
+		return true;
+	}
+	/* inside a longer literal: close it, concatenate, reopen; parenthesize the
+	 * whole literal so a following cast or operator applies to all of it */
+	if (!st->wrapped)
+	{
+		/* before the quote, or before the E of an E'...' */
+		int			at = st->estr ? st->sq_open - 1 : st->sq_open;
+
+		appendStringInfoChar(buf, ' ');		/* room for the '(' */
+		memmove(buf->data + at + 1, buf->data + at, buf->len - at - 1);
+		buf->data[at] = '(';
+		st->sq_open++;
+		st->wrapped = true;
+	}
+	appendStringInfo(buf, "' || (%s)::text || %s'", ref, st->estr ? "E" : "");
+	return false;
+}
+
+/* Does a template need dynamic SQL (an ident() or raw() interpolation)? */
+static bool
+tpl_needs_dynamic(PlxTplSeg *segs, int n)
+{
+	int			i;
+
+	for (i = 0; i < n; i++)
+	{
+		const char *is;
+		int			il;
+
+		if (segs[i].interp && tpl_kind(segs[i].s, segs[i].len, &is, &il) != TPL_VALUE)
+			return true;
+	}
+	return false;
+}
+
+/* Static SQL text for a template (no ident()/raw(), checked by the caller). */
+void
+plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
+{
+	PlxTplSeg  *segs;
+	int			n = tpl_split(cx, tk, false, &segs),
+				i;
+	PlxTplState st = {0};
+	bool		skip = false;
+
+	for (i = 0; i < n; i++)
+	{
+		if (!segs[i].interp)
+		{
+			int			o = skip ? 1 : 0;
+
+			tpl_put_literal(&st, out, segs[i].s + o, segs[i].len - o);
+			skip = false;
 			continue;
 		}
-		appendStringInfoChar(out, *s);
-		s++;
+		if (st.dq)
+			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
+					"allowed; interpolate ident(expr), without the quotes, to quote it");
+		skip = tpl_put_value(&st, out,
+							 plx_rewrite_expr(cx, segs[i].s, segs[i].len, false),
+							 i + 1 < n ? &segs[i + 1] : NULL);
 	}
+}
+
+/* Does the statement accept $n parameters? (by its first word) */
+static bool
+tpl_takes_params(PlxTplSeg *segs, int n)
+{
+	static const char *const verbs[] = {
+		"select", "insert", "update", "delete", "merge", "with", "values",
+		"table", "call", "explain", NULL
+	};
+	const char *s;
+	int			i;
+
+	if (n == 0 || segs[0].interp)
+		return true;
+	s = segs[0].s;
+	while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '(')
+		s++;
+	for (i = 0; verbs[i]; i++)
+	{
+		int			l = (int) strlen(verbs[i]);
+
+		if (pg_strncasecmp(s, verbs[i], l) == 0 && !plx_is_ident(s[l]))
+			return true;
+	}
+	return false;
+}
+
+static void
+tpl_flush(StringInfo expr, StringInfo lit)
+{
+	const char *c;
+
+	if (!lit->len)
+		return;
+	if (expr->len)
+		appendStringInfoString(expr, " || ");
+	appendStringInfoChar(expr, '\'');
+	for (c = lit->data; *c; c++)
+	{
+		if (*c == '\'')
+			appendStringInfoChar(expr, '\'');
+		appendStringInfoChar(expr, *c);
+	}
+	appendStringInfoChar(expr, '\'');
+	resetStringInfo(lit);
+}
+
+/*
+ * Dynamic SQL for a template: returns the plpgsql string expression to EXECUTE
+ * and appends each value interpolation to *binds as parameter $first, $first+1,
+ * ... (after the call's own bind arguments, $1 .. $first-1).
+ */
+static char *
+tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
+{
+	PlxTplSeg  *segs;
+	int			n = tpl_split(cx, tk, true, &segs),
+				i,
+				k = first;
+	PlxTplState st = {0};
+	StringInfoData expr,
+				lit;
+	bool		skip = false;
+	bool		params = tpl_takes_params(segs, n);
+
+	initStringInfo(&expr);
+	initStringInfo(&lit);
+	for (i = 0; i < n; i++)
+	{
+		const char *is;
+		int			il;
+		PlxTplKind	kind;
+		char	   *rw;
+		bool		exact = false;
+
+		if (!segs[i].interp)
+		{
+			int			o = skip ? 1 : 0;
+
+			tpl_put_literal(&st, &lit, segs[i].s + o, segs[i].len - o);
+			skip = false;
+			continue;
+		}
+		kind = tpl_kind(segs[i].s, segs[i].len, &is, &il);
+		if (kind == TPL_VALUE && !params)
+			kind = TPL_LITERAL;		/* this statement takes no $n parameters */
+		if (st.dq)
+			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
+					"allowed; interpolate ident(expr), without the quotes, to quote it");
+		if (kind == TPL_LITERAL && st.sq)
+		{
+			/* '#{x}' exactly: the quoted value replaces the literal */
+			const PlxTplSeg *nx = i + 1 < n ? &segs[i + 1] : NULL;
+
+			if (!st.estr && lit.len == st.sq_open + 1 && nx && !nx->interp &&
+				nx->len >= 1 && nx->s[0] == '\'' && !(nx->len >= 2 && nx->s[1] == '\''))
+			{
+				lit.len = st.sq_open;
+				lit.data[lit.len] = '\0';
+				st.sq = false;
+				exact = true;
+			}
+			else
+				plx_err(cx, tk->line, "%s; build the whole value and interpolate it in "
+						"place of the quoted literal",
+						params ? "literal() cannot be used inside a quoted SQL string"
+						: "this statement takes no parameters, so a value inside a quoted "
+						"SQL string cannot be bound");
+		}
+		if ((kind == TPL_IDENT || kind == TPL_RAW) && st.sq)
+			plx_err(cx, tk->line, "%s() cannot be used inside a quoted SQL string",
+					kind == TPL_IDENT ? "ident" : "raw");
+		rw = plx_rewrite_expr(cx, is, il, false);
+		if (kind == TPL_VALUE)
+		{
+			char		ref[16];
+
+			if (binds->len)
+				appendStringInfoString(binds, ", ");
+			appendStringInfoString(binds, rw);
+			snprintf(ref, sizeof(ref), "$%d", k++);
+			skip = tpl_put_value(&st, &lit, ref, i + 1 < n ? &segs[i + 1] : NULL);
+			continue;
+		}
+		tpl_flush(&expr, &lit);
+		if (expr.len)
+			appendStringInfoString(&expr, " || ");
+		if (kind == TPL_IDENT)
+			appendStringInfo(&expr, "quote_ident((%s)::text)", rw);
+		else if (kind == TPL_LITERAL)
+			appendStringInfo(&expr, "quote_nullable((%s)::text)", rw);
+		else
+			appendStringInfo(&expr, "(%s)::text", rw);
+		skip = exact;
+	}
+	tpl_flush(&expr, &lit);
+	if (!expr.len)
+		appendStringInfoString(&expr, "''");
+	return expr.data;
+}
+
+/*
+ * Lower the SQL argument (args [0, n)) of a query-style call. Returns true when
+ * the statement must run as dynamic SQL: then *sql is a string expression for
+ * EXECUTE and *binds its USING list (or NULL). Returns false when *sql is
+ * static SQL text. A single string-literal argument is static unless it uses
+ * ident() or raw(); force_dynamic is for execute(), which always is dynamic.
+ */
+bool
+plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
+			char **sql, char **binds)
+{
+	bool		lit = plx_arg_is_string_literal(cx, as[0], ae[0]);
+
+	*binds = NULL;
+	if (lit)
+	{
+		Tok		   *tk = &cx->t[as[0]];
+		PlxTplSeg  *segs;
+		int			ns = tpl_split(cx, tk, false, &segs);
+
+		if (n == 1 && !force_dynamic && !tpl_needs_dynamic(segs, ns))
+		{
+			StringInfoData s;
+
+			initStringInfo(&s);
+			plx_emit_string_as_sql(cx, tk, &s);
+			*sql = s.data;
+			return false;
+		}
+		else
+		{
+			StringInfoData b;
+			char	   *explicit_binds = plx_binds_text(cx, as, ae, n);
+
+			initStringInfo(&b);
+			if (explicit_binds)
+				appendStringInfoString(&b, explicit_binds);
+			*sql = tpl_dynamic(cx, tk, n, &b);
+			*binds = b.len ? b.data : NULL;
+			return true;
+		}
+	}
+	*sql = plx_rw_range(cx, as[0], ae[0], false);
+	*binds = plx_binds_text(cx, as, ae, n);
+	return true;
 }
 
 /* first non-space word of a SQL string is a row-returning verb? */
@@ -1921,14 +2414,12 @@ static void
 emit_execute(Ctx *cx, int a, int ind)
 {
 	int			as[16], ae[16], after, n;
-	char	   *sqlv, *binds, *st;
+	char	   *sqlv, *binds;
 
 	n = plx_parse_args(cx, a, as, ae, 16, &after);
 	if (n < 1)
 		plx_err(cx, cx->t[a].line, "execute requires a SQL argument");
-	st = plx_span_text(cx, as[0], ae[0]);
-	sqlv = plx_rewrite_expr(cx, st, (int) strlen(st), false);
-	binds = plx_binds_text(cx, as, ae, n);
+	(void) plx_sql_arg(cx, as, ae, n, true, &sqlv, &binds);
 	plx_indent(&cx->out, ind);
 	if (binds)
 		appendStringInfo(&cx->out, "EXECUTE %s USING %s;\n", sqlv, binds);
@@ -1955,18 +2446,12 @@ emit_open_cursor(Ctx *cx, Tok *lhs, int a, int ind)
 	if (n < 1)
 		plx_err(cx, cx->t[a].line, "open_cursor requires a SQL argument");
 	plx_indent(&cx->out, ind);
-	if (n == 1 && plx_arg_is_string_literal(cx, as[0], ae[0]))
 	{
-		appendStringInfo(&cx->out, "OPEN %.*s FOR ", lhs->len, lhs->s);
-		plx_emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
-		appendStringInfoString(&cx->out, ";\n");
-	}
-	else
-	{
-		char	   *sqlv = plx_rw_range(cx, as[0], ae[0], false);
-		char	   *binds = plx_binds_text(cx, as, ae, n);
+		char	   *sqlv, *binds;
 
-		if (binds)
+		if (!plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+			appendStringInfo(&cx->out, "OPEN %.*s FOR %s;\n", lhs->len, lhs->s, sqlv);
+		else if (binds)
 			appendStringInfo(&cx->out, "OPEN %.*s FOR EXECUTE %s USING %s;\n",
 							 lhs->len, lhs->s, sqlv, binds);
 		else
@@ -2009,16 +2494,18 @@ emit_perform(Ctx *cx, int a, int ind)
 	if (!plx_arg_is_string_literal(cx, as[0], ae[0]))
 		plx_err(cx, cx->t[a].line, "perform currently requires a string-literal SQL");
 	plx_indent(&cx->out, ind);
-	if (sql_is_row_returning(&cx->t[as[0]]))
 	{
-		appendStringInfoString(&cx->out, "PERFORM * FROM (");
-		plx_emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
-		appendStringInfo(&cx->out, ") AS __plx_p_%d;\n", ++cx->subq);
-	}
-	else
-	{
-		plx_emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
-		appendStringInfoString(&cx->out, ";\n");
+		char	   *sqlv, *binds;
+
+		/* dynamic (ident()/raw()): EXECUTE discards any rows, as PERFORM does */
+		if (plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+			appendStringInfo(&cx->out, binds ? "EXECUTE %s USING %s;\n" : "EXECUTE %s;\n",
+							 sqlv, binds);
+		else if (sql_is_row_returning(&cx->t[as[0]]))
+			appendStringInfo(&cx->out, "PERFORM * FROM (%s) AS __plx_p_%d;\n",
+							 sqlv, ++cx->subq);
+		else
+			appendStringInfo(&cx->out, "%s;\n", sqlv);
 	}
 }
 
@@ -2034,19 +2521,12 @@ emit_return_query(Ctx *cx, int a, int ind)
 	if (n < 1)
 		plx_err(cx, cx->t[a].line, "return_query requires a SQL argument");
 	plx_indent(&cx->out, ind);
-	if (n == 1 && plx_arg_is_string_literal(cx, as[0], ae[0]))
 	{
-		appendStringInfoString(&cx->out, "RETURN QUERY ");
-		plx_emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
-		appendStringInfoString(&cx->out, ";\n");
-	}
-	else
-	{
-		char	   *st = plx_span_text(cx, as[0], ae[0]);
-		char	   *sqlv = plx_rewrite_expr(cx, st, (int) strlen(st), false);
-		char	   *binds = plx_binds_text(cx, as, ae, n);
+		char	   *sqlv, *binds;
 
-		if (binds)
+		if (!plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+			appendStringInfo(&cx->out, "RETURN QUERY %s;\n", sqlv);
+		else if (binds)
 			appendStringInfo(&cx->out, "RETURN QUERY EXECUTE %s USING %s;\n", sqlv, binds);
 		else
 			appendStringInfo(&cx->out, "RETURN QUERY EXECUTE %s;\n", sqlv);
@@ -2071,20 +2551,13 @@ emit_fetch(Ctx *cx, Tok *lhs, int a, int ind, bool strict)
 	if (n < 1)
 		plx_err(cx, cx->t[a].line, "fetch_one requires a SQL argument");
 	plx_indent(&cx->out, ind);
-	if (n == 1 && plx_arg_is_string_literal(cx, as[0], ae[0]))
 	{
-		appendStringInfo(&cx->out, "SELECT * INTO %s%.*s FROM (",
-						 strict ? "STRICT " : "", lhs->len, lhs->s);
-		plx_emit_string_as_sql(cx, &cx->t[as[0]], &cx->out);
-		appendStringInfo(&cx->out, ") AS __plx_fo_%d;\n", ++cx->subq);
-	}
-	else
-	{
-		char	   *st = plx_span_text(cx, as[0], ae[0]);
-		char	   *sqlv = plx_rewrite_expr(cx, st, (int) strlen(st), false);
-		char	   *binds = plx_binds_text(cx, as, ae, n);
+		char	   *sqlv, *binds;
 
-		if (binds)
+		if (!plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+			appendStringInfo(&cx->out, "SELECT * INTO %s%.*s FROM (%s) AS __plx_fo_%d;\n",
+							 strict ? "STRICT " : "", lhs->len, lhs->s, sqlv, ++cx->subq);
+		else if (binds)
 			appendStringInfo(&cx->out, "EXECUTE %s INTO %s%.*s USING %s;\n",
 							 sqlv, strict ? "STRICT " : "", lhs->len, lhs->s, binds);
 		else

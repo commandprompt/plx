@@ -203,18 +203,12 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 		l->is_record = true;
 	}
 	plx_indent(o, ind);
-	if (n == 1 && plx_arg_is_string_literal(cx, sa[0], se[0]))
 	{
-		appendStringInfo(o, "FOR %.*s IN ", var->len, var->s);
-		plx_emit_string_as_sql(cx, &cx->t[sa[0]], o);
-		appendStringInfoString(o, " LOOP\n");
-	}
-	else
-	{
-		char	   *sqlv = plx_rw_range(cx, sa[0], se[0], false);
-		char	   *binds = plx_binds_text(cx, sa, se, n);
+		char	   *sqlv, *binds;
 
-		if (binds)
+		if (!plx_sql_arg(cx, sa, se, n, false, &sqlv, &binds))
+			appendStringInfo(o, "FOR %.*s IN %s LOOP\n", var->len, var->s, sqlv);
+		else if (binds)
 			appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
 							 var->len, var->s, sqlv, binds);
 		else

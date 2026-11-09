@@ -67,6 +67,29 @@ PUBLIC has USAGE by default).
   literal could end up as SQL in the generated body. Such directives now fall
   back to the `format()` lowering, which keeps the text literal.
 
+### Changed (breaking; for 3.0)
+
+- **An interpolated value in a SQL argument is bound, never spliced as SQL.**
+  In `query`, `fetch_one`, `execute`, `open_cursor`, `return_query` and
+  `perform`, an interpolation in the SQL string (`#{x}`, `{$x}`, `${x}`,
+  f-string `{x}`) used to be concatenated into dynamic SQL unquoted, so data
+  could inject SQL; adding a bind argument to a safe static call silently made
+  it injectable. Now a value becomes a `$n` parameter passed with `USING`
+  (after the call's own bind arguments), or, in a statement that takes no
+  parameters (`CREATE`, `ALTER`, `SET`, `COMMENT`, ...), is spliced through
+  `quote_nullable()`. `'#{x}'` is the value of `x` in static and dynamic SQL
+  alike (it used to be the literal text `'x'` in static SQL), and an
+  interpolation inside a longer literal concatenates the value. An
+  interpolation inside a quoted identifier is rejected.
+- **`ident()`, `literal()` and `raw()`** may wrap an interpolation in a SQL
+  argument (plxphp: `{ident($t)}`): `ident(e)` splices `quote_ident(e)`,
+  `literal(e)` splices `quote_nullable(e)`, and `raw(e)` splices `e` unquoted,
+  for a trusted SQL fragment. Each makes the call dynamic.
+- Upgrading: a body that interpolated an identifier (`FROM #{t}`) or a SQL
+  fragment on purpose fails when re-created (`syntax error at or near "$1"`)
+  until it uses `ident()` or `raw()`. Stored functions are unaffected until
+  their DDL is run again. See doc/DYNAMIC-SQL.md.
+
 ### Fixed
 
 - A `finally`/`ensure` body that raised an error on the normal path ran a
