@@ -294,7 +294,7 @@ taken to be a schema-qualified SQL function.
 | `s.IndexOf(x)` | `strpos(s, x) - 1` (0-based, -1 when absent) |
 | `s.Substring(i)`, `s.Substring(i, n)` | `substr(s, i + 1)`, `substr(s, i + 1, n)` |
 | `s.Replace(a, b)` | `replace(s, a, b)` |
-| `s.PadLeft(n)`, `s.PadRight(n, c)` | `lpad`, `rpad` (never truncating, as in C#) |
+| `s.PadLeft(n)`, `s.PadRight(n, c)` | `lpad`, `rpad` (never truncating, as in C#; `s` must be a variable, field or literal) |
 | `s.Split(sep)` | `string_to_array(s, sep)` |
 | `x.ToString()`, `x.ToString("F2")` | `(x)::text`, `round(x, 2)` |
 | `x.Equals(y)` | `x = y` |
@@ -653,6 +653,15 @@ UPDATE products SET code = 'cd';
 SELECT * FROM products;
 ```
 
+## Debugging
+
+`pg_proc.prosrc` holds the generated plpgsql, and [DEBUGGING.md](DEBUGGING.md)
+shows how to recover the original C# from it. An error at `CREATE FUNCTION`
+names the line of the C# source. With `SET client_min_messages = debug1`,
+`CREATE FUNCTION` also logs the intermediate program that the C# parser hands
+to the plpgsql lowering, with every expression already in SQL, which shows how
+each construct was read.
+
 ## Semantic differences
 
 These are intentional. plx pins semantics to SQL and plpgsql rather than
@@ -668,9 +677,11 @@ emulating the .NET runtime.
   wraps silently (in an `unchecked` context). Integer division and `%` truncate
   toward zero in both.
 - An unsuffixed real literal is exact `numeric`, not a `double`.
-- `Math.Round`, the `Convert.To...` methods and the `:F` format round half away
-  from zero (PostgreSQL's `numeric` rounding), where .NET rounds half to even.
-  A cast `(int)x` truncates toward zero, as in C#.
+- A `numeric` (`decimal`) value rounds half away from zero, where .NET rounds
+  half to even. That covers `Math.Round` on a `decimal`, `Math.Round(x,
+  digits)`, the `Convert.To...` conversions of a `decimal`, and the `:F` format.
+  A `double` rounds half to even in both. A cast `(int)x` truncates toward zero,
+  as in C#.
 - `bool` values print as `true` and `false`, not `True` and `False`.
 - Reading an array past its end yields NULL and assigning past it extends the
   array, where C# throws `IndexOutOfRangeException`.
