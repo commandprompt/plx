@@ -220,6 +220,8 @@ $$;
 - `map`, `chan`, `struct`, and `interface` types (declare data with SQL types or
   arrays instead).
 - `switch` `fallthrough`.
+- Transaction control. `commit()` and `rollback()` are accepted when a procedure
+  is created but fail when it runs (`function commit() does not exist`).
 - String concatenation with `+`. Go overloads `+` for numeric addition and
   string concatenation; plx cannot tell which is meant without type information,
   so it leaves `+` as `+`. `||` is logical OR in plxgo, so use

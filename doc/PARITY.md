@@ -4,7 +4,7 @@ Target: every plpgsql capability is expressible in each plx dialect. The
 reference is the plpgsql statement set in `src/pl/plpgsql/src/plpgsql.h`
 (`PLpgSQL_stmt_*`) plus its declaration forms.
 
-Every construct below is supported in all five column dialects (**plxruby**,
+Every construct below is supported in each column dialect (**plxruby**,
 **plxphp**, **plxjs**, **plxpython3**, **plxcobol**) except where a footnote
 notes an equivalent form. The cells show the dialect spelling; full syntax and
 semantics are in the per-dialect chapters ([plxruby](plxruby.md),
@@ -27,8 +27,9 @@ IMMEDIATE`, `NVL`, `seq.NEXTVAL`, `NUMBER`/`VARCHAR2`, ...) on top. See
 `var`/`:=` declarations (with type inference) hoist into the `DECLARE` block,
 parenless `if`/`for` headers become `IF ... THEN`/`WHILE ... LOOP`, `for range`
 becomes `FOR`/`FOREACH`, the no-fallthrough `switch` becomes `IF`/`ELSIF`, and
-`panic`/`fmt.Println` become `RAISE`. Every plpgsql construct is reachable
-through Go surface syntax. See [plxgo.md](plxgo.md).
+`panic`/`fmt.Println` become `RAISE`. Every plpgsql construct except
+transaction control is reachable through Go surface syntax. See
+[plxgo.md](plxgo.md).
 
 **plxtsql** (Transact-SQL, SQL Server) is not shown as a separate column because
 it restructures rather than renames: `@x` variables hoist to the `DECLARE` block,

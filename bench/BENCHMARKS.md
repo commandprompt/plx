@@ -79,7 +79,7 @@ building). On PostgreSQL 13 to 17 the plx strbuild column would match plpgsql
   counting loop lowers to an integer `FOR`, and `STRING-APPEND` lowers to the
   string builder).
 
-- Row iteration (iter): plpgsql, and therefore the plx dialects, are 2.8x to 6.0x
+- Row iteration (iter): plpgsql, and therefore the plx dialects, are 2.7x to 5.6x
   faster than the embedded PLs (plperl, plpython3u, native plruby, native plphp).
   plpgsql streams rows through a cursor and reads columns directly, while the
   embedded interpreters copy each row into their own data structures.
@@ -97,16 +97,18 @@ building). On PostgreSQL 13 to 17 the plx strbuild column would match plpgsql
   the same win is available by calling `plx_sb_append`, or by assembling text in
   SQL with `string_agg` over a set.
 
-- Arithmetic (arith): the embedded interpreters vary. plperl is fastest (native
-  integer arithmetic), plpython3u is slowest, and plpgsql with the plx dialects
-  sits between.
+- Arithmetic (arith): the embedded interpreters vary. plperl is fastest (0.79x,
+  native integer arithmetic), native plruby is slowest (1.79x) followed by
+  plpython3u (1.31x), and plpgsql with the plx dialects sits between.
 
-- Branching (branch): plpython3u is faster on this pure-CPU integer workload
-  (0.72x); plperl and plpgsql with the plx dialects are close to each other.
+- Branching (branch): on this pure-CPU integer workload the embedded PLs are
+  faster: native plphp (0.40x), plpython3u (0.68x), native plruby (0.90x) and
+  plperl (0.95x). plpgsql and the plx dialects are at about 1.0x (plxcobol's
+  `EVALUATE` at 1.32x).
 
 - Call overhead (call): plpgsql and the plx dialects are fastest. The embedded
   PLs pay an SPI round trip per call and are slower even at one tenth the
-  iteration count (native plruby is the slowest here, at 2.97x).
+  iteration count (native plruby is the slowest here, at 3.03x).
 
 The transpile-to-plpgsql approach gives the plx dialects the performance profile
 of plpgsql: strong on set-oriented and SQL-bound work, competitive on procedural

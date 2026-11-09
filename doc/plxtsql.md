@@ -197,8 +197,9 @@ session option.
   (`DECLARE c CURSOR`).
 - `GOTO`, `WAITFOR`, and label targets.
 - Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`), in a function or a
-  procedure. The other dialects support `COMMIT` and `ROLLBACK` in a procedure;
-  plxtsql rejects them everywhere.
+  procedure; plxtsql rejects them everywhere. plxruby, plxphp, plxjs, plxts,
+  plxpython3, plxcobol and plxplsql support `COMMIT` and `ROLLBACK` in a
+  procedure; plxgo does not.
 - Calling a stored procedure by name (`EXEC procname`); only `EXEC('<sql>')`
   dynamic SQL is supported.
 - String concatenation with `+`. T-SQL overloads `+` for both numeric addition

@@ -169,7 +169,9 @@ Because functions execute as plpgsql, the plx dialects match plpgsql within
 about 10 percent on most workloads (the worst cases measured are plxruby row
 iteration at 1.17x and plxcobol's `EVALUATE` branch at 1.32x) and inherit its
 performance profile: several times faster than the embedded-interpreter PLs on
-row iteration, and competitive on arithmetic, branching, and call overhead.
+row iteration, fastest on call overhead, and between the embedded PLs on
+arithmetic. On a pure-CPU branching loop the embedded PLs are faster (native
+PL/PHP runs it in 0.40x of plpgsql's time).
 
 The one place plpgsql is weak is building a string in a loop: `s := s || 'x'` is
 O(n^2), because text is immutable and each step copies the whole string. plx

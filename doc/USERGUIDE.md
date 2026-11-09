@@ -641,10 +641,10 @@ for i in range(1, n + 1):
 $$;
 ```
 
-plxphp and plxjs use the same `commit()` and `rollback()` calls, plxcobol uses
-the `COMMIT` and `ROLLBACK` verbs, and plxplsql uses `COMMIT;` as in PL/SQL.
-plxtsql does not support transaction control. Calling `commit()` from a
-function, or from a procedure called inside an explicit transaction block,
+plxphp, plxjs and plxts use the same `commit()` and `rollback()` calls,
+plxcobol uses the `COMMIT` and `ROLLBACK` verbs, and plxplsql uses `COMMIT;` as
+in PL/SQL. plxtsql and plxgo do not support transaction control. Calling
+`commit()` from a function, or from a procedure called inside an explicit transaction block,
 raises `invalid transaction termination`, as in plpgsql.
 
 ## Trust and security
@@ -694,9 +694,18 @@ Points to keep in mind:
   its interpolated values are concatenated exactly as in `execute`: do not mix
   interpolation with binds.
 - Functions that use the string-append operators reference the extension's
-  `plx_strbuild` type and `plx_sb_append` function unqualified, so the
-  extension's schema must be on the function's `search_path` at run time,
-  including any `SET search_path` clause on a `SECURITY DEFINER` function.
+  `plx_strbuild` type and `plx_sb_append` function unqualified, so both are
+  looked up through `search_path` each time the function runs. The extension's
+  schema must therefore be on the function's path, including any
+  `SET search_path` clause. It also means that a role able to create objects in
+  a schema that comes earlier on the path can put its own `plx_sb_append` there,
+  and a `SECURITY DEFINER` function would run it with the owner's privileges.
+  Pin the path on every `SECURITY DEFINER` function, listing only trusted
+  schemas, the extension's schema among them, and `pg_temp` last, as the
+  PostgreSQL manual advises:
+  `ALTER FUNCTION f(...) SET search_path = app, public, pg_temp`, where
+  `public` stands for the schema plx is installed in and is not writable by
+  untrusted roles.
 
 ## Further reading
 

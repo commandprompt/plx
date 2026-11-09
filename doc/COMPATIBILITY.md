@@ -3,7 +3,7 @@
 ## Supported versions
 
 plx supports PostgreSQL 13 through 18 (released), and builds and passes on the
-19 and 20 development lines. The full pg_regress suite (the nine dialect files
+19 and 20 development lines. The full pg_regress suite (one file per dialect
 plus plx_features, plx_output, plx_strbuild, and plx_errors) passes on each of
 PostgreSQL 13 through 18. CI (`.github/workflows/ci.yml`) runs `make
 installcheck`, `make differentialcheck`, and `make metacheck` on PostgreSQL 13

@@ -27,8 +27,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   caller's transaction, so `COMMIT` and `ROLLBACK` raise `invalid transaction
   termination` there. In a `CREATE PROCEDURE` invoked with `CALL` (outside an
   explicit transaction block), `commit()`/`rollback()` (COBOL `COMMIT`/`ROLLBACK`,
-  PL/SQL `COMMIT;`) work as in plpgsql. plxtsql does not support transaction
-  control. Savepoint management is not available in any dialect.
+  PL/SQL `COMMIT;`) work as in plpgsql. plxtsql and plxgo do not support
+  transaction control. Savepoint management is not available in any dialect.
 - **The signature is SQL.** The parameter and return types in `CREATE FUNCTION`
   are parsed by PostgreSQL before plx sees the body, so they must be PostgreSQL
   type names (`integer`, `numeric`, `text`, `timestamp`, ...). Dialect type names
@@ -77,7 +77,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `plx_sb_append` function unqualified, so the extension's schema must be on the
   function's `search_path` at run time, including any `SET search_path` clause
   on the function. Otherwise the function is created but fails when called with
-  `type "plx_strbuild" does not exist`.
+  `type "plx_strbuild" does not exist`. Because the lookup goes through the
+  path, a `SECURITY DEFINER` function should pin it; see
+  [Trust and security](USERGUIDE.md#trust-and-security).
 - **Runtime errors point at the generated plpgsql.** plpgsql requires all
   declarations at the top, so line numbers in a runtime error refer to the
   transpiled body, not your dialect source. `plx_source()` recovers the embedded
@@ -88,7 +90,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
 - **What is always reachable.** Every plpgsql statement type (assignment,
   `IF`/`CASE`, all loops, `RETURN`/set-returning, cursors, dynamic SQL, `RAISE`,
   exception handling, triggers, `GET DIAGNOSTICS`) is expressible from every
-  dialect, except that plxtsql has no cursors or transaction control. See
+  dialect, except that plxtsql has no cursors or transaction control and plxgo
+  has no transaction control. See
   [PARITY.md](PARITY.md) for the construct-by-construct matrix.
 
 A dialect gives you its syntax over SQL semantics, not its standard library.
