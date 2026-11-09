@@ -1,4 +1,4 @@
--- plxcsharp regression tests
+-- plxcsharp regression tests (C# dialect)
 CREATE EXTENSION IF NOT EXISTS plx;
 NOTICE:  extension "plx" already exists, skipping
 SET client_min_messages = warning;
@@ -6,5 +6,1190 @@ SELECT lanname, lanpltrusted FROM pg_language WHERE lanname = 'plxcsharp';
   lanname  | lanpltrusted 
 -----------+--------------
  plxcsharp | t
+(1 row)
+
+-- the generated plpgsql, without the sentinel line and the embedded original
+CREATE FUNCTION cs_src(fn text) RETURNS text LANGUAGE sql AS $f$
+  SELECT regexp_replace(prosrc, '^/\*plx:v1:[^*]*\*/\n|/\*plx-orig.*$', '', 'gs')
+  FROM pg_proc WHERE proname = fn
+$f$;
+-- a CREATE FUNCTION that must fail cleanly: returns the error message
+CREATE FUNCTION cs_try(body text) RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+  EXECUTE format('CREATE OR REPLACE FUNCTION cs_probe() RETURNS text LANGUAGE plxcsharp AS %L', body);
+  RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLERRM;
+END
+$f$;
+-- ---------------------------------------------------------------- basics
+CREATE FUNCTION cs_add(a int, b int) RETURNS int LANGUAGE plxcsharp AS $$
+return a + b * 2;
+$$;
+SELECT cs_add(3, 4);
+ cs_add 
+--------
+     11
+(1 row)
+
+-- if / else if / else, Allman braces and braceless bodies
+CREATE FUNCTION cs_grade(score int) RETURNS text LANGUAGE plxcsharp AS $$
+string grade;
+if (score >= 90)
+{
+    grade = "A";
+}
+else if (score >= 80)
+    grade = "B";
+else
+{
+    grade = "F";
+}
+return grade;
+$$;
+SELECT cs_grade(95), cs_grade(85), cs_grade(10), cs_grade(NULL);
+ cs_grade | cs_grade | cs_grade | cs_grade 
+----------+----------+----------+----------
+ A        | B        | F        | F
+(1 row)
+
+SELECT cs_src('cs_grade');
+          cs_src          
+--------------------------
+ DECLARE                 +
+   grade text;           +
+ BEGIN                   +
+   IF score >= 90 THEN   +
+     grade := 'A';       +
+   ELSIF score >= 80 THEN+
+     grade := 'B';       +
+   ELSE                  +
+     grade := 'F';       +
+   END IF;               +
+   RETURN grade;         +
+ END;                    +
+ 
+(1 row)
+
+-- declarations: C# types map to PostgreSQL types; var infers from the value
+CREATE FUNCTION cs_types() RETURNS text LANGUAGE plxcsharp AS $$
+int i = 1;
+long l = 2;
+short sh = 3;
+byte bt = 4;
+bool b = true;
+string s = "five";
+char c = '6';
+double d = 7.5;
+float f = 8.5f;
+decimal m = 9.25m;
+DateTime dt = DateTime.Parse("2024-03-15 10:20:30");
+DateOnly day = DateOnly.Parse("2024-03-15");
+TimeSpan span = TimeSpan.Parse("01:02:03");
+Guid g = Guid.Parse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+byte[] raw = null;
+int[] arr = {1, 2, 3};
+var v1 = 10;
+var v2 = "text";
+var v3 = 1.5;
+var v4 = 5L;
+int? maybe = null;
+numeric(10,2) money = 12.345;
+const int Max = 100;
+return $"{i} {l} {sh} {bt} {b} {s} {c} {d} {f} {m} {dt} {day} {span} {g} {raw is null} {arr[0]} {v1} {v2} {v3} {v4} {maybe ?? -1} {money} {Max}";
+$$;
+SELECT cs_types();
+                                                                              cs_types                                                                              
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 1 2 3 4 true five 6 7.5 8.5 9.25 Fri Mar 15 10:20:30 2024 03-15-2024 @ 1 hour 2 mins 3 secs a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 true 1 10 text 1.5 5 -1 12.35 100
+(1 row)
+
+SELECT cs_src('cs_types');
+                                                                                                                                                                                                                                                             cs_src                                                                                                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       +
+   i integer := 1;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             +
+   l bigint := 2;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   sh smallint := 3;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           +
+   bt smallint := 4;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           +
+   b boolean := true;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          +
+   s text := 'five';                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           +
+   c text := '6';                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   d double precision := 7.5;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  +
+   f real;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     +
+   m numeric := 9.25;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          +
+   dt timestamp;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               +
+   day date;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   +
+   span interval;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   g uuid;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     +
+   raw bytea;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  +
+   arr integer[];                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   v1 integer := 10;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           +
+   v2 text := 'text';                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          +
+   v3 numeric := 1.5;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          +
+   v4 bigint;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  +
+   maybe integer;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   money numeric(10,2) := 12.345;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   Max CONSTANT integer := 100;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                +
+ BEGIN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         +
+   f := 8.5::real;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             +
+   dt := ('2024-03-15 10:20:30')::timestamp;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   +
+   day := ('2024-03-15')::date;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                +
+   span := ('01:02:03')::interval;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             +
+   g := ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')::uuid;                                                                                                                                                                                                                                                                                                                                                                                                                                                                        +
+   raw := NULL;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                +
+   arr := ARRAY[1, 2, 3]::integer[];                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           +
+   v4 := 5::bigint;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            +
+   maybe := NULL;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              +
+   RETURN (i)::text || ' ' || (l)::text || ' ' || (sh)::text || ' ' || (bt)::text || ' ' || (b)::text || ' ' || (s)::text || ' ' || (c)::text || ' ' || (d)::text || ' ' || (f)::text || ' ' || (m)::text || ' ' || (dt)::text || ' ' || (day)::text || ' ' || (span)::text || ' ' || (g)::text || ' ' || (raw IS NULL)::text || ' ' || (arr[1])::text || ' ' || (v1)::text || ' ' || (v2)::text || ' ' || (v3)::text || ' ' || (v4)::text || ' ' || (COALESCE(maybe, -1))::text || ' ' || (money)::text || ' ' || (Max)::text;+
+ END;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          +
+ 
+(1 row)
+
+-- ---------------------------------------------------------------- strings
+-- regular strings with C# escapes, verbatim @"..." (backslashes literal, ""
+-- is a quote), raw """...""" (indentation stripped), char literals
+CREATE FUNCTION cs_strings() RETURNS text LANGUAGE plxcsharp AS $$
+string a = "tab\tquote\"back\\slash \u00e9 \x41";
+string b = @"C:\temp\new ""quoted""";
+string c = """
+    SELECT "raw"
+      indented
+    """;
+char ch = '\'';
+return a + "|" + b + "|" + c + "|" + ch;
+$$;
+SELECT cs_strings();
+                           cs_strings                           
+----------------------------------------------------------------
+ tab     quote"back\slash é A|C:\temp\new "quoted"|SELECT "raw"+
+   indented|'
+(1 row)
+
+-- interpolated $"...", $@"...", raw $"""...""" ($$ for literal braces),
+-- {{ }} escapes, nested interpolation, the F format, and conditional holes
+CREATE FUNCTION cs_interp(nm text, n int) RETURNS text LANGUAGE plxcsharp AS $cs$
+string a = $"user {nm} has {n} items {{braces}}";
+string b = $@"C:\{nm}\x";
+string c = $$"""{literal} {{n * 2}}""";
+string d = $"[{$"<{n}>"}] {(n > 1 ? "many" : "one")} {n / 3.0:F2}";
+return a + "|" + b + "|" + c + "|" + d;
+$cs$;
+SELECT cs_interp('bob', 3);
+                             cs_interp                              
+--------------------------------------------------------------------
+ user bob has 3 items {braces}|C:\bob\x|{literal} 6|[<3>] many 1.00
+(1 row)
+
+-- an interpolated NULL makes the whole string NULL, as in the other dialects
+SELECT cs_interp(NULL, 3) IS NULL AS null_propagates;
+ null_propagates 
+-----------------
+ t
+(1 row)
+
+-- '+' is string concatenation when either side is a string, and numeric
+-- addition otherwise; C# evaluates left to right
+CREATE FUNCTION cs_plus(a int, b int, s text) RETURNS text LANGUAGE plxcsharp AS $$
+string r = "sum=" + a + b;
+string q = a + b + "=sum";
+string t = s + (a + b);
+string u = 'x' + s;
+return r + ";" + q + ";" + t + ";" + u;
+$$;
+SELECT cs_plus(1, 2, 'x');
+      cs_plus       
+--------------------
+ sum=12;3=sum;x3;xx
+(1 row)
+
+SELECT cs_src('cs_plus');
+                           cs_src                            
+-------------------------------------------------------------
+ DECLARE                                                    +
+   r text;                                                  +
+   q text;                                                  +
+   t text;                                                  +
+   u text;                                                  +
+ BEGIN                                                      +
+   r := 'sum='  ||  a  ||  b;                               +
+   q := a + b  ||  '=sum';                                  +
+   t := s  ||  (a + b);                                     +
+   u := 'x'  ||  s;                                         +
+   RETURN r  ||  ';'  ||  q  ||  ';'  ||  t  ||  ';'  ||  u;+
+ END;                                                       +
+ 
+(1 row)
+
+-- string members map to SQL functions; indexes are 0-based
+CREATE FUNCTION cs_members(s text) RETURNS text LANGUAGE plxcsharp AS $$
+string t = s.Trim().ToUpper();
+return string.Join("/", new[] {
+    t, t.Length.ToString(), t.Contains("ELL").ToString(), t.IndexOf("L").ToString(),
+    t.Substring(1, 3), t.Substring(3), s.Replace("l", "L"), t.StartsWith("HE").ToString(),
+    t.EndsWith("LO").ToString(), t.PadLeft(8, '*'), t.PadRight(7) + "|", t[0].ToString(),
+    t.ToLower(), s.TrimStart(), s.TrimEnd() + "|", string.IsNullOrEmpty(s).ToString(),
+    string.IsNullOrWhiteSpace("  ").ToString() });
+$$;
+SELECT cs_members('  hello ');
+                                          cs_members                                           
+-----------------------------------------------------------------------------------------------
+ HELLO/5/true/2/ELL/LO/  heLLo /true/true/***HELLO/HELLO  |/H/hello/hello /  hello|/false/true
+(1 row)
+
+CREATE FUNCTION cs_strstatic(a text, b text) RETURNS text LANGUAGE plxcsharp AS $$
+string[] parts = "a,b,c".Split(',');
+return string.Format("{0}-{1,5}-{0}|{2,-4}|", a, b, 7) + string.Concat(a, null, b) + "|" +
+       string.Join(",", parts) + "|" + string.Join("+", a, b, 3) + "|" + parts.Length +
+       "|" + string.Empty + "|" + nameof(parts) + "|" + Environment.NewLine.Length;
+$$;
+SELECT cs_strstatic('x', 'y');
+               cs_strstatic               
+------------------------------------------
+ x-    y-x|7   |xy|a,b,c|x+y+3|3||parts|1
+(1 row)
+
+-- string += in a loop uses the plx_strbuild builder; so does StringBuilder
+CREATE FUNCTION cs_build(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string s = "";
+for (int i = 0; i < n; i++) s += i;
+var sb = new StringBuilder();
+for (int i = 0; i < n; i++)
+{
+    if (i > 0) sb.Append(", ");
+    sb.Append(i).Append("!");
+}
+sb.AppendLine();
+sb.AppendFormat("[{0}]", sb.Length);
+return s + "|" + s.Length + "|" + sb.ToString();
+$$;
+SELECT cs_build(12);
+                              cs_build                              
+--------------------------------------------------------------------
+ 01234567891011|14|0!, 1!, 2!, 3!, 4!, 5!, 6!, 7!, 8!, 9!, 10!, 11!+
+ [49]
+(1 row)
+
+SELECT cs_src('cs_build');
+                                     cs_src                                      
+---------------------------------------------------------------------------------
+ DECLARE                                                                        +
+   s public.plx_strbuild := '';                                                 +
+   sb public.plx_strbuild := '';                                                +
+ BEGIN                                                                          +
+   FOR i IN 0..(n) - 1 LOOP                                                     +
+     s := public.plx_sb_append(s, (i)::text);                                   +
+   END LOOP;                                                                    +
+   FOR i IN 0..(n) - 1 LOOP                                                     +
+     IF i > 0 THEN                                                              +
+       sb := public.plx_sb_append(sb, (', ')::text);                            +
+     END IF;                                                                    +
+     sb := public.plx_sb_append(sb, (i)::text);                                 +
+     sb := public.plx_sb_append(sb, ('!')::text);                               +
+   END LOOP;                                                                    +
+   sb := public.plx_sb_append(sb, ('                                            +
+ ')::text);                                                                     +
+   sb := public.plx_sb_append(sb, (format('[%1$s]', length((sb)::text)))::text);+
+   RETURN (s)::text  ||  '|'  ||  length((s)::text)  ||  '|'  ||  (sb)::text;   +
+ END;                                                                           +
+ 
+(1 row)
+
+-- ---------------------------------------------------------------- operators
+CREATE FUNCTION cs_ops(a int, s text) RETURNS text LANGUAGE plxcsharp AS $$
+string label = a > 0 ? "pos" : a < 0 ? "neg" : "zero";
+string nn = s ?? "none";
+bool b1 = a == 1 || a != 2 && !(a > 100);
+bool sIsNull = s == null;
+bool hasValue = s is not null;
+int bits = (a & 6) | (a ^ 3) << 1;
+bool inRange = (a > 0) & (a < 10);
+int t = (int)3.9;
+int t2 = (int)-3.9;
+double d = (double)a / 4;
+long big = (long)a * 1000000000L;
+int code = (int)'A';
+char c2 = (char)66;
+int? maybe = null;
+maybe ??= a;
+int x = a;
+x += 2; x -= 1; x *= 3; x /= 2; x %= 5; x <<= 2; x >>= 1; x |= 1; x &= 7; x ^= 2;
+x++; ++x; x--;
+return $"{label}|{nn}|{b1}|{sIsNull}|{hasValue}|{bits}|{inRange}|{t}|{t2}|{d}|{big}|{code}|{c2}|{maybe}|{x}|{-a}|{~a}";
+$$;
+SELECT cs_ops(1, NULL);
+                               cs_ops                                
+---------------------------------------------------------------------
+ pos|none|true|true|false|4|true|3|-3|0.25|1000000000|65|B|1|6|-1|-2
+(1 row)
+
+SELECT cs_ops(-7, 'hi');
+                                cs_ops                                 
+-----------------------------------------------------------------------
+ neg|hi|true|false|true|-12|false|3|-3|-1.75|-7000000000|65|B|-7|4|7|6
+(1 row)
+
+-- switch expressions: constant patterns become a simple CASE; relational,
+-- null and when patterns a searched CASE
+SELECT cs_try($b$int a = 1; string s = a switch { var x when x > 0 => "pos", _ => "neg" }; return s;$b$);
+                                              cs_try                                              
+--------------------------------------------------------------------------------------------------
+ plxcsharp: this switch pattern is not supported (use constants, _, null, not null, or < <= > >=)
+(1 row)
+
+CREATE FUNCTION cs_switchx(a int) RETURNS text LANGUAGE plxcsharp AS $$
+string s1 = a switch { 1 => "one", 2 => "two", _ => "other" };
+string s2 = a switch { < 0 => "negative", 0 => "zero", > 100 => "huge", _ => "normal" };
+string s3 = a switch { null => "null", not null when a > 50 => "big", _ => "small" };
+return s1 + " " + s2 + " " + s3;
+$$;
+SELECT cs_switchx(1), cs_switchx(-5), cs_switchx(200);
+    cs_switchx    |      cs_switchx      |   cs_switchx   
+------------------+----------------------+----------------
+ one normal small | other negative small | other huge big
+(1 row)
+
+-- Math, Convert, Parse, MaxValue, DateTime and Guid members
+CREATE FUNCTION cs_bcl(x double precision) RETURNS text LANGUAGE plxcsharp AS $$
+var dt = DateTime.Parse("2024-03-15 10:20:30.75");
+Guid g = Guid.NewGuid();
+return $"{Math.Abs(-x)} {Math.Max(3, 7)} {Math.Min(3, 7)} {Math.Floor(x)} {Math.Ceiling(x)} " +
+       $"{Math.Round(x)} {Math.Round(2.345, 2)} {Math.Sqrt(16)} {Math.Pow(2, 10)} {Math.Sign(-x)} " +
+       $"{Math.Truncate(-x)} {Math.Round(Math.PI, 4)} {Convert.ToInt32("42") + 1} {int.Parse("7") * 2} " +
+       $"{double.Parse("1.5")} {int.MaxValue} {long.MinValue} {dt.Year} {dt.Month} {dt.Day} " +
+       $"{dt.Hour} {dt.Minute} {dt.Second} {dt.AddDays(20).Month} {dt.AddHours(15).Day} {dt.Date} " +
+       $"{g.ToString().Length} {Guid.Empty} {char.IsDigit('5')} {char.ToUpper('q')}";
+$$;
+SELECT cs_bcl(2.5);
+                                                                                      cs_bcl                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 2.5 7 3 2 3 2 2.35 4 1024 -1 -2 3.1416 43 14 1.5 2147483647 -9223372036854775808 2024 3 15 10 20 30 4 16 Fri Mar 15 00:00:00 2024 36 00000000-0000-0000-0000-000000000000 true Q
+(1 row)
+
+-- ---------------------------------------------------------------- loops
+-- a plain counting for loop becomes a plpgsql integer FOR (ascending,
+-- descending, with a step); any other for loop keeps C# semantics, so
+-- continue still runs the iterators
+CREATE FUNCTION cs_for(n int) RETURNS text LANGUAGE plxcsharp AS $$
+long up = 0, down = 0, step = 0, gen = 0;
+for (int i = 1; i <= n; i++) up += i;
+for (int i = n; i > 0; i--) down = down * 10 + i;
+for (int i = 0; i < n; i += 2) step += i;
+for (int i = 0, j = n; i < j; i++, j--)
+{
+    if (i == 1) continue;
+    gen += i * 10 + j;
+}
+return $"{up} {down} {step} {gen}";
+$$;
+SELECT cs_for(5), cs_for(0);
+    cs_for     | cs_for  
+---------------+---------
+ 15 54321 6 28 | 0 0 0 0
+(1 row)
+
+SELECT cs_src('cs_for');
+                                          cs_src                                          
+------------------------------------------------------------------------------------------
+ DECLARE                                                                                 +
+   up bigint := 0;                                                                       +
+   down bigint := 0;                                                                     +
+   step bigint := 0;                                                                     +
+   gen bigint := 0;                                                                      +
+   i integer := 0;                                                                       +
+   j integer;                                                                            +
+   __plx_for_1 boolean;                                                                  +
+ BEGIN                                                                                   +
+   FOR i IN 1..n LOOP                                                                    +
+     up := up + i;                                                                       +
+   END LOOP;                                                                             +
+   FOR i IN REVERSE n..(0) + 1 LOOP                                                      +
+     down := down * 10 + i;                                                              +
+   END LOOP;                                                                             +
+   FOR i IN 0..(n) - 1 BY 2 LOOP                                                         +
+     step := step + i;                                                                   +
+   END LOOP;                                                                             +
+   j := n;                                                                               +
+   __plx_for_1 := false;                                                                 +
+   LOOP                                                                                  +
+     IF __plx_for_1 THEN                                                                 +
+       i := i + 1;                                                                       +
+       j := j - 1;                                                                       +
+     END IF;                                                                             +
+     __plx_for_1 := true;                                                                +
+     EXIT WHEN (i < j) IS NOT TRUE;                                                      +
+     IF i = 1 THEN                                                                       +
+       CONTINUE;                                                                         +
+     END IF;                                                                             +
+     gen := gen + (i * 10 + j);                                                          +
+   END LOOP;                                                                             +
+   RETURN (up)::text || ' ' || (down)::text || ' ' || (step)::text || ' ' || (gen)::text;+
+ END;                                                                                    +
+ 
+(1 row)
+
+-- the bound changes inside the body: the general form re-tests it, as C# does
+CREATE FUNCTION cs_for_bound(n int) RETURNS int LANGUAGE plxcsharp AS $$
+int s = 0;
+int m = n;
+for (int i = 0; i < m; i++) { s += i; if (i == 2) m = 10; }
+return s;
+$$;
+SELECT cs_for_bound(5);
+ cs_for_bound 
+--------------
+           45
+(1 row)
+
+-- while, do/while (runs at least once; continue reaches the test), break,
+-- and an infinite for (;;)
+CREATE FUNCTION cs_loops(n int) RETURNS text LANGUAGE plxcsharp AS $$
+int w = 0, i = 0;
+while (i < n) { i++; if (i == 3) continue; if (i > 6) break; w += i; }
+int d = 0, k = 0;
+do { k++; if (k % 2 == 0) continue; d += k; } while (k < n);
+int once = 0;
+do once++; while (false);
+int f = 0;
+for (;;) { f++; if (f >= 4) break; }
+return $"{w} {d} {once} {f}";
+$$;
+SELECT cs_loops(5), cs_loops(10), cs_loops(0);
+ cs_loops | cs_loops  | cs_loops 
+----------+-----------+----------
+ 12 9 1 4 | 18 25 1 4 | 0 1 1 4
+(1 row)
+
+SELECT cs_src('cs_loops');
+                                       cs_src                                       
+------------------------------------------------------------------------------------
+ DECLARE                                                                           +
+   w integer := 0;                                                                 +
+   i integer := 0;                                                                 +
+   d integer := 0;                                                                 +
+   k integer := 0;                                                                 +
+   __plx_do_1 boolean;                                                             +
+   once integer := 0;                                                              +
+   f integer := 0;                                                                 +
+ BEGIN                                                                             +
+   WHILE i < n LOOP                                                                +
+     i := i + 1;                                                                   +
+     IF i = 3 THEN                                                                 +
+       CONTINUE;                                                                   +
+     END IF;                                                                       +
+     IF i > 6 THEN                                                                 +
+       EXIT;                                                                       +
+     END IF;                                                                       +
+     w := w + i;                                                                   +
+   END LOOP;                                                                       +
+   __plx_do_1 := false;                                                            +
+   LOOP                                                                            +
+     IF __plx_do_1 THEN                                                            +
+       EXIT WHEN (k < n) IS NOT TRUE;                                              +
+     END IF;                                                                       +
+     __plx_do_1 := true;                                                           +
+     k := k + 1;                                                                   +
+     IF k % 2 = 0 THEN                                                             +
+       CONTINUE;                                                                   +
+     END IF;                                                                       +
+     d := d + k;                                                                   +
+   END LOOP;                                                                       +
+   LOOP                                                                            +
+     once := once + 1;                                                             +
+     EXIT WHEN (false) IS NOT TRUE;                                                +
+   END LOOP;                                                                       +
+   LOOP                                                                            +
+     f := f + 1;                                                                   +
+     IF f >= 4 THEN                                                                +
+       EXIT;                                                                       +
+     END IF;                                                                       +
+   END LOOP;                                                                       +
+   RETURN (w)::text || ' ' || (d)::text || ' ' || (once)::text || ' ' || (f)::text;+
+ END;                                                                              +
+ 
+(1 row)
+
+-- foreach over an array (element type from the array), over a string's
+-- characters, and with an explicit element type
+CREATE FUNCTION cs_foreach(a int[], s text) RETURNS text LANGUAGE plxcsharp AS $$
+long total = 0;
+foreach (var v in a) total += v;
+int vowels = 0;
+foreach (char c in s) { if ("aeiou".Contains(c)) vowels++; }
+string joined = "";
+foreach (string w in new[] { "x", "y", "z" }) joined += w;
+int[] b = [10, 20, 30];
+int[] e = [];
+int[] filled = new int[3];
+return $"{total} {vowels} {joined} {a[0]} {b[1]} {b.Length} {b.Contains(20)} {e.Length} {filled[2]}";
+$$;
+SELECT cs_foreach(ARRAY[4, 5, 6], 'education');
+        cs_foreach        
+--------------------------
+ 15 5 xyz 4 20 3 true 0 0
+(1 row)
+
+-- switch: stacked labels, a nested break leaves the switch (not the loop),
+-- a block section, default anywhere, no default does nothing
+CREATE FUNCTION cs_switch(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string r = "";
+switch (n)
+{
+    default:
+        return "many";
+    case 1:
+        r = "one";
+        break;
+    case 2:
+    case 3:
+        if (n == 3) { r = "three"; break; }
+        r = "two";
+        break;
+    case 4:
+    {
+        r = "four";
+        break;
+    }
+}
+int hits = 0;
+for (int i = 0; i < 5; i++)
+{
+    switch (i)
+    {
+        case 1: case 3: hits++; break;
+        case 4: continue;
+    }
+    hits += 10;
+}
+return r + " " + hits;
+$$;
+SELECT cs_switch(1), cs_switch(2), cs_switch(3), cs_switch(4), cs_switch(9);
+ cs_switch | cs_switch | cs_switch | cs_switch | cs_switch 
+-----------+-----------+-----------+-----------+-----------
+ one 42    | two 42    | three 42  | four 42   | many
+(1 row)
+
+SELECT cs_src('cs_switch');
+             cs_src             
+--------------------------------
+ DECLARE                       +
+   r text := '';               +
+   hits integer := 0;          +
+ BEGIN                         +
+   <<__plx_sw_1>>              +
+   BEGIN                       +
+   CASE n                      +
+     WHEN 1 THEN               +
+       r := 'one';             +
+     WHEN 2, 3 THEN            +
+       IF n = 3 THEN           +
+         r := 'three';         +
+         EXIT __plx_sw_1;      +
+       END IF;                 +
+       r := 'two';             +
+     WHEN 4 THEN               +
+       r := 'four';            +
+     ELSE                      +
+       RETURN 'many';          +
+   END CASE;                   +
+   END;                        +
+   FOR i IN 0..(5) - 1 LOOP    +
+     CASE i                    +
+       WHEN 1, 3 THEN          +
+         hits := hits + 1;     +
+       WHEN 4 THEN             +
+         CONTINUE;             +
+       ELSE                    +
+         NULL;                 +
+     END CASE;                 +
+     hits := hits + 10;        +
+   END LOOP;                   +
+   RETURN r  ||  ' '  ||  hits;+
+ END;                          +
+ 
+(1 row)
+
+-- ---------------------------------------------------------------- SQL access
+CREATE TABLE cs_orders(id int PRIMARY KEY, grp int, amount bigint);
+INSERT INTO cs_orders VALUES (1, 1, 10), (2, 1, 20), (3, 1, 30), (4, 2, 5);
+-- foreach over query(): an interpolated string is a SQL template whose holes
+-- are bound as values, never spliced as SQL text; typed fetch_one targets
+CREATE FUNCTION cs_query(g int) RETURNS text LANGUAGE plxcsharp AS $$
+long total = 0;
+foreach (var row in query($"SELECT amount FROM cs_orders WHERE grp = {g} ORDER BY id"))
+{
+    total += row.amount;
+}
+foreach (long amt in query("SELECT amount FROM cs_orders WHERE grp = $1", g)) total += amt;
+var first = fetch_one($"SELECT id, amount FROM cs_orders WHERE grp = {g} ORDER BY id LIMIT 1");
+long cnt = fetch_one($"SELECT count(*) FROM cs_orders WHERE grp = {g}");
+perform($"UPDATE cs_orders SET amount = amount WHERE grp = {g}");
+int rc = row_count();
+bool hit = found();
+return $"{total} first={first.id} cnt={cnt} rc={rc} found={hit} col={first["amount"]}";
+$$;
+SELECT cs_query(1), cs_query(2), cs_query(3);
+                 cs_query                 |                cs_query                | cs_query 
+------------------------------------------+----------------------------------------+----------
+ 120 first=1 cnt=3 rc=3 found=true col=10 | 10 first=4 cnt=1 rc=1 found=true col=5 | 
+(1 row)
+
+SELECT cs_src('cs_query');
+                                                                                  cs_src                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                                                                                  +
+   total bigint := 0;                                                                                                                                                     +
+   row RECORD;                                                                                                                                                            +
+   amt bigint;                                                                                                                                                            +
+   first RECORD;                                                                                                                                                          +
+   cnt bigint;                                                                                                                                                            +
+   rc integer;                                                                                                                                                            +
+   hit boolean;                                                                                                                                                           +
+ BEGIN                                                                                                                                                                    +
+   FOR row IN SELECT amount FROM cs_orders WHERE grp = g ORDER BY id LOOP                                                                                                 +
+     total := total + row.amount;                                                                                                                                         +
+   END LOOP;                                                                                                                                                              +
+   FOR amt IN EXECUTE 'SELECT amount FROM cs_orders WHERE grp = $1' USING g LOOP                                                                                          +
+     total := total + amt;                                                                                                                                                +
+   END LOOP;                                                                                                                                                              +
+   SELECT * INTO first FROM (SELECT id, amount FROM cs_orders WHERE grp = g ORDER BY id LIMIT 1) AS __plx_fo_1;                                                           +
+   SELECT * INTO cnt FROM (SELECT count(*) FROM cs_orders WHERE grp = g) AS __plx_fo_2;                                                                                   +
+   UPDATE cs_orders SET amount = amount WHERE grp = g;                                                                                                                    +
+   GET DIAGNOSTICS rc = ROW_COUNT;                                                                                                                                        +
+   hit := FOUND;                                                                                                                                                          +
+   RETURN (total)::text || ' first=' || (first.id)::text || ' cnt=' || (cnt)::text || ' rc=' || (rc)::text || ' found=' || (hit)::text || ' col=' || (first.amount)::text;+
+ END;                                                                                                                                                                     +
+ 
+(1 row)
+
+-- a value interpolated into a query is bound, so it cannot inject SQL
+CREATE FUNCTION cs_lookup(name text) RETURNS bigint LANGUAGE plxcsharp AS $$
+long n = fetch_one($"SELECT count(*) FROM cs_orders WHERE grp::text = '{name}'");
+return n;
+$$;
+SELECT cs_lookup('1'), cs_lookup($x$1' OR '1' = '1$x$) AS injection_blocked;
+ cs_lookup | injection_blocked 
+-----------+-------------------
+         3 |                 0
+(1 row)
+
+-- fetch_one! raises when there is no row
+CREATE FUNCTION cs_strict(i int) RETURNS bigint LANGUAGE plxcsharp AS $$
+var r = fetch_one!($"SELECT amount FROM cs_orders WHERE id = {i}");
+return r.amount;
+$$;
+SELECT cs_strict(2);
+ cs_strict 
+-----------
+        20
+(1 row)
+
+SELECT cs_strict(99);
+ERROR:  query returned no rows
+CONTEXT:  PL/pgSQL function cs_strict(integer) line 5 at SQL statement
+-- dynamic SQL: execute with bind arguments, ident() for identifiers
+CREATE FUNCTION cs_dyn(col text, g int) RETURNS bigint LANGUAGE plxcsharp AS $$
+execute("UPDATE cs_orders SET amount = amount + $1 WHERE id = $2", 0, 1);
+long r = fetch_one($"SELECT sum({ident(col)}) FROM cs_orders WHERE grp = {g}");
+return r;
+$$;
+SELECT cs_dyn('amount', 1);
+ cs_dyn 
+--------
+     60
+(1 row)
+
+SELECT cs_src('cs_dyn');
+                                                  cs_src                                                  
+----------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                 +
+   r bigint;                                                                                             +
+ BEGIN                                                                                                   +
+   EXECUTE 'UPDATE cs_orders SET amount = amount + $1 WHERE id = $2' USING 0, 1;                         +
+   EXECUTE 'SELECT sum(' || quote_ident((col)::text) || ') FROM cs_orders WHERE grp = $1' INTO r USING g;+
+   RETURN r;                                                                                             +
+ END;                                                                                                    +
+ 
+(1 row)
+
+-- cursors
+CREATE FUNCTION cs_cursor() RETURNS bigint LANGUAGE plxcsharp AS $$
+long total = 0;
+var c = open_cursor("SELECT amount FROM cs_orders ORDER BY id");
+var row = fetch_from(c);
+while (found())
+{
+    total += row.amount;
+    row = fetch_from(c);
+}
+close_cursor(c);
+return total;
+$$;
+SELECT cs_cursor();
+ cs_cursor 
+-----------
+        65
+(1 row)
+
+-- a raw interpolated string keeps a multi-line query readable
+CREATE FUNCTION cs_rawsql(g int) RETURNS bigint LANGUAGE plxcsharp AS $$
+long total = 0;
+foreach (var r in query($"""
+    SELECT amount
+    FROM cs_orders
+    WHERE grp = {g}
+    """))
+{
+    total += r.amount;
+}
+return total;
+$$;
+SELECT cs_rawsql(1);
+ cs_rawsql 
+-----------
+        60
+(1 row)
+
+-- set-returning functions: yield return, yield break, return_query, and
+-- RETURNS TABLE with return_next()
+CREATE FUNCTION cs_squares(n int) RETURNS SETOF int LANGUAGE plxcsharp AS $$
+for (int i = 1; i <= n; i++)
+{
+    if (i > 4) yield break;
+    yield return i * i;
+}
+$$;
+SELECT * FROM cs_squares(10);
+ cs_squares 
+------------
+          1
+          4
+          9
+         16
+(4 rows)
+
+CREATE FUNCTION cs_rq(g int) RETURNS SETOF cs_orders LANGUAGE plxcsharp AS $$
+return_query($"SELECT * FROM cs_orders WHERE grp = {g} ORDER BY id");
+$$;
+SELECT * FROM cs_rq(1);
+ id | grp | amount 
+----+-----+--------
+  1 |   1 |     10
+  2 |   1 |     20
+  3 |   1 |     30
+(3 rows)
+
+CREATE FUNCTION cs_table(g int) RETURNS TABLE(id int, label text) LANGUAGE plxcsharp AS $$
+foreach (cs_orders o in query($"SELECT * FROM cs_orders WHERE grp = {g} ORDER BY id"))
+{
+    id = o.id;
+    label = $"#{o.id}: {o.amount}";
+    return_next();
+}
+$$;
+SELECT * FROM cs_table(1);
+ id | label  
+----+--------
+  1 | #1: 10
+  2 | #2: 20
+  3 | #3: 30
+(3 rows)
+
+-- procedures can commit; a DO block is C# too
+CREATE TABLE cs_log(msg text);
+CREATE PROCEDURE cs_proc(n int) LANGUAGE plxcsharp AS $$
+for (int i = 1; i <= n; i++)
+{
+    execute("INSERT INTO cs_log VALUES ($1)", $"row {i}");
+    if (i % 2 == 0) commit();
+}
+$$;
+CALL cs_proc(3);
+SELECT * FROM cs_log ORDER BY msg;
+  msg  
+-------
+ row 1
+ row 2
+ row 3
+(3 rows)
+
+SET client_min_messages = notice;
+DO LANGUAGE plxcsharp $$
+for (int i = 1; i <= 2; i++) Console.WriteLine($"do block {i}");
+Console.WriteLine("{0} + {1} = {2}", 1, 2, 1 + 2);
+Console.WriteLine();
+raise("warning", "raised at the warning level");
+$$;
+NOTICE:  do block 1
+NOTICE:  do block 2
+NOTICE:  1 + 2 = 3
+NOTICE:  
+WARNING:  raised at the warning level
+SET client_min_messages = warning;
+-- ---------------------------------------------------------------- errors
+-- catch classes map to conditions; Exception and PostgresException catch
+-- everything; finally runs on every path
+SET client_min_messages = notice;
+CREATE FUNCTION cs_div(a int, b int) RETURNS text LANGUAGE plxcsharp AS $$
+try
+{
+    return (a / b).ToString();
+}
+catch (DivideByZeroException e)
+{
+    Console.WriteLine($"caught: {e.Message} ({e.SqlState})");
+    return "div0";
+}
+catch (Exception e)
+{
+    return "other: " + e.Message;
+}
+finally
+{
+    Console.WriteLine("finally ran");
+}
+$$;
+SELECT cs_div(7, 2), cs_div(1, 0);
+NOTICE:  finally ran
+NOTICE:  caught: division by zero (22012)
+NOTICE:  finally ran
+ cs_div | cs_div 
+--------+--------
+ 3      | div0
+(1 row)
+
+SET client_min_messages = warning;
+-- when filters on e.SqlState (string codes or PostgresErrorCodes names),
+-- and the error's diagnostic properties
+CREATE FUNCTION cs_insert(i int) RETURNS text LANGUAGE plxcsharp AS $$
+try
+{
+    execute("INSERT INTO cs_orders VALUES ($1, 9, 0)", i);
+    return "inserted";
+}
+catch (PostgresException e) when (e.SqlState == PostgresErrorCodes.UniqueViolation)
+{
+    return $"duplicate: {e.ConstraintName} on {e.TableName}";
+}
+catch (PostgresException e) when (e.SqlState == "23502" || e.SqlState is "22003" or "22P02")
+{
+    return $"{e.SqlState}: {e.ColumnName}";
+}
+$$;
+SELECT cs_insert(1), cs_insert(100), cs_insert(NULL);
+               cs_insert                | cs_insert | cs_insert 
+----------------------------------------+-----------+-----------
+ duplicate: cs_orders_pkey on cs_orders | inserted  | 23502: id
+(1 row)
+
+SELECT cs_src('cs_insert');
+                                          cs_src                                          
+------------------------------------------------------------------------------------------
+ DECLARE                                                                                 +
+   __plx_constraint text;                                                                +
+   __plx_table text;                                                                     +
+   __plx_column text;                                                                    +
+ BEGIN                                                                                   +
+   BEGIN                                                                                 +
+     EXECUTE 'INSERT INTO cs_orders VALUES ($1, 9, 0)' USING i;                          +
+     RETURN 'inserted';                                                                  +
+   EXCEPTION                                                                             +
+     WHEN unique_violation THEN                                                          +
+       GET STACKED DIAGNOSTICS __plx_constraint = CONSTRAINT_NAME;                       +
+       GET STACKED DIAGNOSTICS __plx_table = TABLE_NAME;                                 +
+       RETURN 'duplicate: ' || (__plx_constraint)::text || ' on ' || (__plx_table)::text;+
+     WHEN SQLSTATE '23502' OR SQLSTATE '22003' OR SQLSTATE '22P02' THEN                  +
+       GET STACKED DIAGNOSTICS __plx_column = COLUMN_NAME;                               +
+       RETURN (SQLSTATE)::text || ': ' || (__plx_column)::text;                          +
+   END;                                                                                  +
+ END;                                                                                    +
+ 
+(1 row)
+
+-- throw: the class picks the SQLSTATE (P0001 unless mapped);
+-- PostgresException takes Npgsql's (messageText, severity, invariantSeverity,
+-- sqlState) and optional detail/hint; an inner exception becomes the detail
+CREATE FUNCTION cs_throw(v int) RETURNS int LANGUAGE plxcsharp AS $$
+if (v < 0) throw new ArgumentException($"negative: {v}");
+if (v == 0) throw new DivideByZeroException();
+if (v == 1) throw new PostgresException("custom", "ERROR", "ERROR", "P0042", detail: "the detail", hint: "the hint");
+try { return 10 / (v - 2); }
+catch (DivideByZeroException e) { throw new InvalidOperationException("wrapped", e); }
+$$;
+SELECT cs_throw(5);
+ cs_throw 
+----------
+        3
+(1 row)
+
+\set VERBOSITY verbose
+SELECT cs_throw(-1);
+ERROR:  P0001: negative: -1
+CONTEXT:  PL/pgSQL function cs_throw(integer) line 4 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3909
+SELECT cs_throw(0);
+ERROR:  22012: DivideByZeroException
+CONTEXT:  PL/pgSQL function cs_throw(integer) line 7 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3909
+SELECT cs_throw(1);
+ERROR:  P0042: custom
+DETAIL:  the detail
+HINT:  the hint
+CONTEXT:  PL/pgSQL function cs_throw(integer) line 10 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3909
+SELECT cs_throw(2);
+ERROR:  P0001: wrapped
+DETAIL:  division by zero
+CONTEXT:  PL/pgSQL function cs_throw(integer) line 16 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3909
+\set VERBOSITY default
+-- throw; rethrows the caught error unchanged
+CREATE FUNCTION cs_rethrow(v int) RETURNS int LANGUAGE plxcsharp AS $$
+try { return 1 / v; }
+catch (Exception e) { throw; }
+$$;
+SELECT cs_rethrow(0);
+ERROR:  division by zero
+CONTEXT:  PL/pgSQL function cs_rethrow(integer) line 4 at RETURN
+-- a return inside try still runs finally; Debug.Assert / assert
+CREATE TABLE cs_audit(msg text);
+CREATE FUNCTION cs_fin(n int) RETURNS int LANGUAGE plxcsharp AS $$
+try
+{
+    if (n > 0) return n * 2;
+    Debug.Assert(n == 0, "n must not be negative");
+    return 0;
+}
+finally
+{
+    execute("INSERT INTO cs_audit VALUES ($1)", $"fin {n}");
+}
+$$;
+SELECT cs_fin(4), cs_fin(0);
+ cs_fin | cs_fin 
+--------+--------
+      8 |      0
+(1 row)
+
+SELECT cs_fin(-1);
+ERROR:  n must not be negative
+CONTEXT:  PL/pgSQL function cs_fin(integer) line 18 at ASSERT
+SELECT * FROM cs_audit ORDER BY msg;
+  msg  
+-------
+ fin 0
+ fin 4
+(2 rows)
+
+-- ---------------------------------------------------------------- triggers
+CREATE TABLE cs_t(id int, name text, tag text, n int DEFAULT 0);
+CREATE FUNCTION cs_trg() RETURNS trigger LANGUAGE plxcsharp AS $$
+if (TG_OP == "INSERT") NEW.tag = $"new {NEW.name.ToUpper()} {TG_ARGV[0]}";
+else NEW.tag = $"upd from {OLD.name}";
+NEW["n"] += 1;
+return NEW;
+$$;
+CREATE TRIGGER cs_trg BEFORE INSERT OR UPDATE ON cs_t
+  FOR EACH ROW EXECUTE FUNCTION cs_trg('arg0');
+INSERT INTO cs_t(id, name) VALUES (1, 'ann');
+SELECT * FROM cs_t;
+ id | name |     tag      | n 
+----+------+--------------+---
+  1 | ann  | new ANN arg0 | 1
+(1 row)
+
+UPDATE cs_t SET name = 'bob';
+SELECT * FROM cs_t;
+ id | name |     tag      | n 
+----+------+--------------+---
+  1 | bob  | upd from ann | 2
+(1 row)
+
+-- ---------------------------------------------------------------- rejected
+\set VERBOSITY terse
+CREATE FUNCTION cs_bad1() RETURNS int LANGUAGE plxcsharp AS $$ var x = foo(1); return x; $$;
+ERROR:  plxcsharp: cannot infer the type of 'x'; declare it with a type, for example int x = ...
+CREATE FUNCTION cs_bad2() RETURNS int LANGUAGE plxcsharp AS $$ List<int> x = null; return 1; $$;
+ERROR:  plxcsharp: generic types are not supported
+CREATE FUNCTION cs_bad3() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; switch (x) { case 1: x = 2; case 2: x = 3; break; } return x; $$;
+ERROR:  plxcsharp: control cannot fall through from one case to another; end the section with break, return, throw or continue
+CREATE FUNCTION cs_bad4() RETURNS int LANGUAGE plxcsharp AS $$ goto done; $$;
+ERROR:  plxcsharp: 'goto' is not supported in plxcsharp
+CREATE FUNCTION cs_bad5() RETURNS int LANGUAGE plxcsharp AS $$ var f = (int a) => a + 1; return 1; $$;
+ERROR:  plxcsharp: lambda expressions and declarations inside an expression are not supported
+CREATE FUNCTION cs_bad6() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; return x.Foo(); $$;
+ERROR:  plxcsharp: the method 'Foo' is not supported here (plxcsharp maps a small set of .NET members; call a SQL function instead)
+CREATE FUNCTION cs_bad7() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; int X = 2; return x; $$;
+ERROR:  plxcsharp: 'X' and 'x' are the same name in PostgreSQL, which ignores case; rename one
+CREATE FUNCTION cs_bad8() RETURNS int LANGUAGE plxcsharp AS $$ throw; $$;
+ERROR:  plxcsharp: throw; (rethrow) is only valid inside a catch block
+CREATE FUNCTION cs_bad9() RETURNS int LANGUAGE plxcsharp AS $$ try { return 1; } catch (KeyNotFoundException e) { return 2; } $$;
+ERROR:  plxcsharp: catch (KeyNotFoundException) is not supported; catch Exception or PostgresException (optionally with a when filter on e.SqlState), or one of the mapped exception types
+CREATE FUNCTION cs_bad10() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; return x++; $$;
+ERROR:  plxcsharp: ++ and -- can only be used as statements
+CREATE FUNCTION cs_bad11() RETURNS int LANGUAGE plxcsharp AS $$ char c = 'a'; return c + 1; $$;
+ERROR:  plxcsharp: arithmetic on char values is not supported (C# would add character codes); convert with (int)c or concatenate strings
+CREATE FUNCTION cs_bad12() RETURNS text LANGUAGE plxcsharp AS $$ return $"{1:N2}"; $$;
+ERROR:  plxcsharp: the format specifier ':N2' is not supported; format the value with to_char() inside the braces
+CREATE FUNCTION cs_bad13() RETURNS int LANGUAGE plxcsharp AS $$ var r = fetch_one("SELECT 1") + 1; return 1; $$;
+ERROR:  plxcsharp: fetch_one(...) must be used on its own, for example var r = fetch_one(...);
+CREATE FUNCTION cs_bad14() RETURNS SETOF int LANGUAGE plxcsharp AS $$ return 1; $$;
+ERROR:  plxcsharp: a set-returning function produces rows with yield return; end it with a bare return;
+CREATE FUNCTION cs_bad15() RETURNS int LANGUAGE plxcsharp AS $$ yield return 1; $$;
+ERROR:  plxcsharp: yield return is only valid in a set-returning function (RETURNS SETOF ...)
+CREATE FUNCTION cs_bad16() RETURNS int LANGUAGE plxcsharp AS $$ int user = 1; return user; $$;
+ERROR:  plxcsharp: 'user' is a reserved word in PostgreSQL; choose another variable name
+CREATE FUNCTION cs_bad17() RETURNS int LANGUAGE plxcsharp AS $$ undeclared = 5; return 1; $$;
+ERROR:  plxcsharp: 'undeclared' is not declared
+CREATE FUNCTION cs_bad18(n int) RETURNS int LANGUAGE plxcsharp AS $$ int N = 5; return N; $$;
+ERROR:  plxcsharp: local 'N' has the name of a parameter (PostgreSQL ignores case in names)
+CREATE FUNCTION cs_bad19() RETURNS int LANGUAGE plxcsharp AS $$ Compute(1); return 1; $$;
+ERROR:  plxcsharp: only assignments, ++, --, and the plx statement intrinsics can be used as statements (to call a SQL function for its side effects, use perform("SELECT f(...)"))
+CREATE FUNCTION cs_bad20() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; while (x) { } return 1; $$;
+ERROR:  plxcsharp: a condition must be a bool expression
+CREATE FUNCTION cs_bad21() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; string x = "a"; return 1; $$;
+ERROR:  plxcsharp: 'x' is declared again with a different type (text, earlier integer); locals are function-scoped in plxcsharp, so give it another name
+CREATE FUNCTION cs_bad22() RETURNS int LANGUAGE plxcsharp AS $$ var x = null; return 1; $$;
+ERROR:  plxcsharp: cannot infer a type from null; declare 'x' with a type
+CREATE FUNCTION cs_bad23() RETURNS int LANGUAGE plxcsharp AS $$ try { return 1; } catch (Exception e) { return e; } $$;
+ERROR:  plxcsharp: use a property of the exception, for example e.Message
+CREATE FUNCTION cs_bad24() RETURNS int LANGUAGE plxcsharp AS $$ object o = 1; return 1; $$;
+ERROR:  plxcsharp: 'object' has no PostgreSQL equivalent; declare a specific type
+CREATE FUNCTION cs_bad25() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; x = y = 2; return 1; $$;
+ERROR:  plxcsharp: an assignment cannot be used inside an expression
+CREATE FUNCTION cs_bad26() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; switch (x) { case > 0: return 1; } return 0; $$;
+ERROR:  plxcsharp: relational case patterns are not supported; use if/else
+CREATE FUNCTION cs_bad27() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; switch (x) { case null: return 1; } return 0; $$;
+ERROR:  plxcsharp: case null is not supported; test x == null before the switch
+CREATE FUNCTION cs_bad28() RETURNS int LANGUAGE plxcsharp AS $$ public static int F() { return 1; } $$;
+ERROR:  plxcsharp: 'public' is not supported in plxcsharp
+CREATE FUNCTION cs_bad29() RETURNS int LANGUAGE plxcsharp AS $$ int x = int.TryParse("1", out var y); return 1; $$;
+ERROR:  plxcsharp: ref, out and in arguments are not supported
+CREATE FUNCTION cs_bad30() RETURNS int LANGUAGE plxcsharp AS $$ try { return 1; } catch (Exception e) when (e.Message.Contains("x")) { return 2; } $$;
+ERROR:  plxcsharp: a catch filter compares e.SqlState with a five-character SQLSTATE string or a PostgresErrorCodes name
+\set VERBOSITY default
+-- line numbers point at the C# source, also after a multi-line string
+CREATE FUNCTION cs_bad31() RETURNS int LANGUAGE plxcsharp AS $$
+string sql = @"SELECT 1
+FROM t";
+int a = 1;
+a.Normalize();
+$$;
+ERROR:  plxcsharp: the method 'Normalize' is not supported here (plxcsharp maps a small set of .NET members; call a SQL function instead)
+DETAIL:  at plxcsharp source line 5
+-- ---------------------------------------------------------------- hostile input
+SELECT cs_try('return "unterminated');
+                 cs_try                 
+----------------------------------------
+ plxcsharp: unterminated string literal
+(1 row)
+
+SELECT cs_try('return @"unterminated');
+                     cs_try                      
+-------------------------------------------------
+ plxcsharp: unterminated verbatim string literal
+(1 row)
+
+SELECT cs_try('return """' || chr(10) || 'no closing line');
+                   cs_try                   
+--------------------------------------------
+ plxcsharp: unterminated raw string literal
+(1 row)
+
+SELECT cs_try('return $"{unterminated hole');
+                   cs_try                    
+---------------------------------------------
+ plxcsharp: unterminated interpolated string
+(1 row)
+
+SELECT cs_try('/* unterminated comment');
+             cs_try              
+---------------------------------
+ plxcsharp: unterminated comment
+(1 row)
+
+SELECT cs_try('return "\u0001";');
+                               cs_try                               
+--------------------------------------------------------------------
+ plxcsharp: the control character U+0001 is not allowed in a string
+(1 row)
+
+SELECT cs_try('return "\uD800";');
+                       cs_try                        
+-----------------------------------------------------
+ plxcsharp: invalid Unicode escape: a lone surrogate
+(1 row)
+
+SELECT cs_try('return 0x' || repeat('F', 40) || ';');
+                 cs_try                  
+-----------------------------------------
+ plxcsharp: integer literal is too large
+(1 row)
+
+SELECT cs_try('#region x' || chr(10) || 'return 1;');
+                            cs_try                            
+--------------------------------------------------------------
+ plxcsharp: preprocessor directives and '#' are not supported
+(1 row)
+
+SELECT cs_try(repeat('if (true) { ', 2000) || 'return "x";' || repeat(' }', 2000));
+            cs_try            
+------------------------------
+ plxcsharp: nested too deeply
+(1 row)
+
+SELECT cs_try('return ' || repeat('(', 2000) || '1' || repeat(')', 2000) || ';');
+            cs_try            
+------------------------------
+ plxcsharp: nested too deeply
+(1 row)
+
+SELECT cs_try('return ' || repeat('$"{', 600) || '1' || repeat('}"', 600) || ';');
+                      cs_try                       
+---------------------------------------------------
+ plxcsharp: interpolated strings nested too deeply
+(1 row)
+
+SELECT cs_try('return "a"' || repeat('.PadLeft(1)', 40) || ';');
+                                               cs_try                                                
+-----------------------------------------------------------------------------------------------------
+ plxcsharp: PadLeft needs a variable or a field as its receiver; store the value in a variable first
+(1 row)
+
+SELECT cs_try(repeat('else ', 50));
+                cs_try                 
+---------------------------------------
+ plxcsharp: else without a matching if
+(1 row)
+
+SELECT cs_try(repeat('}', 50));
+          cs_try           
+---------------------------
+ plxcsharp: unexpected '}'
+(1 row)
+
+SELECT cs_try('return ' || repeat('-', 3000) || '1;');
+                       cs_try                        
+-----------------------------------------------------
+ plxcsharp: ++ and -- can only be used as statements
+(1 row)
+
+-- long flat input transpiles in linear time
+SELECT cs_try('return (' || repeat('1 + ', 20000) || '1).ToString();');
+ cs_try 
+--------
+ ok
+(1 row)
+
+SELECT cs_try('string s = "";' || repeat(' s += "x";', 20000) || ' return s;');
+ cs_try 
+--------
+ ok
+(1 row)
+
+SELECT cs_try('return ' || repeat('a ? b : ', 3000) || 'c;');
+            cs_try            
+------------------------------
+ plxcsharp: nested too deeply
 (1 row)
 
