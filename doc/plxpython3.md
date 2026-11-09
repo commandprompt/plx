@@ -41,7 +41,9 @@ amount #:: numeric
 amount = principal * rate
 ```
 
-The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 e #:: emp%ROWTYPE

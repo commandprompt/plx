@@ -25,6 +25,7 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "parser/parse_type.h"
 #include "utils/builtins.h"
 
 #include "plx.h"
@@ -2257,6 +2258,11 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 
 		if (plx_is_param(cx, t0->s, t0->len))
 			plx_err(cx, t0->line, "cannot annotate parameter \"%.*s\"", t0->len, t0->s);
+		/* a block annotation before "= 3" used to drop the "= 3" silently */
+		if (a + 2 < b)
+			plx_err(cx, t0->line,
+					"a type annotation must come after the value: write \"%s%.*s = value /*:: type */\"",
+					cx->surf->var_sigil == '$' ? "$" : "", t0->len, t0->s);
 		l = plx_local_find(cx, t0->s, t0->len);
 		if (!l)
 			l = plx_local_add(cx, t0->s, t0->len);
@@ -2613,7 +2619,137 @@ b64_encode_body(const char *body)
 	return dst;
 }
 
+/*
+ * Local-variable types are checked before they are spliced into DECLARE.
+ *
+ * plpgsql reads a declaration's type up to the next ':=', DEFAULT, NOT NULL,
+ * COLLATE or ';'. A type taken verbatim from an annotation could therefore
+ * carry an initializer: "x #:: int := f()", or "int DEFAULT f()" in a JS
+ * block-comment annotation, would run f() on entry while the source shows
+ * only a type (and in JS, only a comment). So a type must be exactly a type name, as
+ * plpgsql's own parse_datatype accepts it, or name%TYPE / name%ROWTYPE.
+ */
+static const char *
+tt_ws(const char *p)
+{
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+		p++;
+	return p;
+}
 
+/* one plain or double-quoted identifier; NULL when there is none */
+static const char *
+tt_ident(const char *p)
+{
+	if (*p == '"')
+	{
+		for (p++; *p; p++)
+			if (*p == '"')
+			{
+				if (p[1] != '"')
+					return p + 1;
+				p++;
+			}
+		return NULL;
+	}
+	if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' ||
+		  IS_HIGHBIT_SET(*p)))
+		return NULL;
+	while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+		   (*p >= '0' && *p <= '9') || *p == '_' || *p == '$' || IS_HIGHBIT_SET(*p))
+		p++;
+	return p;
+}
+
+/* [schema.]table[.column]%TYPE or %ROWTYPE, optionally followed by [] */
+static bool
+tt_is_pct_type(const char *p)
+{
+	p = tt_ws(p);
+	for (;;)
+	{
+		if (!(p = tt_ident(p)))
+			return false;
+		p = tt_ws(p);
+		if (*p != '.')
+			break;
+		p = tt_ws(p + 1);
+	}
+	if (*p != '%')
+		return false;
+	p = tt_ws(p + 1);
+	if (pg_strncasecmp(p, "rowtype", 7) == 0)
+		p += 7;
+	else if (pg_strncasecmp(p, "type", 4) == 0)
+		p += 4;
+	else
+		return false;
+	p = tt_ws(p);
+	while (*p == '[')
+	{
+		p = tt_ws(p + 1);
+		while (*p >= '0' && *p <= '9')
+			p++;
+		p = tt_ws(p);
+		if (*p != ']')
+			return false;
+		p = tt_ws(p + 1);
+	}
+	return *p == '\0';
+}
+
+/* the SQL type-name grammar, exactly as plpgsql's parse_datatype reads it */
+static bool
+tt_is_sql_type(const char *typ)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	volatile bool ok = true;
+	const char *c;
+
+	/* a comment would hide the declaration's ';' */
+	for (c = typ; *c; c++)
+		if ((c[0] == '-' && c[1] == '-') || (c[0] == '/' && c[1] == '*') ||
+			((unsigned char) *c < 0x20 && *c != ' ' && *c != '\t' &&
+			 *c != '\n' && *c != '\r'))
+			return false;
+
+	PG_TRY();
+	{
+#if PG_VERSION_NUM >= 160000
+		(void) typeStringToTypeName(typ, NULL);
+#else
+		(void) typeStringToTypeName(typ);
+#endif
+	}
+	PG_CATCH();
+	{
+		ErrorData  *ed;
+
+		MemoryContextSwitchTo(oldcxt);
+		ed = CopyErrorData();
+		if (ed->sqlerrcode != ERRCODE_SYNTAX_ERROR)
+			PG_RE_THROW();
+		FlushErrorState();
+		FreeErrorData(ed);
+		ok = false;
+	}
+	PG_END_TRY();
+	return ok;
+}
+
+static void
+plx_check_local_type(const PlxSurface *surf, const PlxLocal2 *l)
+{
+	if (tt_is_pct_type(l->typ) || tt_is_sql_type(l->typ))
+		return;
+	ereport(ERROR,
+			(errcode(ERRCODE_SYNTAX_ERROR),
+			 errmsg("%s: invalid type \"%s\" for local variable \"%s\"",
+					surf->lanname, l->typ, l->name),
+			 errhint("A type annotation must be a type name only, such as integer, "
+					 "numeric(10,2), text[] or tbl%%ROWTYPE. Assign the initial value "
+					 "in the body.")));
+}
 
 bool
 plx_has_sentinel(const char *prosrc)
@@ -2667,9 +2803,18 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 	{
 		if (cx.locals)
 		{
+			const char *checked = NULL;	/* last type that passed; runs repeat */
+
 			appendStringInfoString(&asm_, "DECLARE\n");
 			for (l = cx.locals; l; l = l->next)
 			{
+				CHECK_FOR_INTERRUPTS();
+				if (l->typ && !l->is_record &&
+					(checked == NULL || strcmp(checked, l->typ) != 0))
+				{
+					plx_check_local_type(surf, l);
+					checked = l->typ;
+				}
 				if (l->is_record)
 					appendStringInfo(&asm_, "  %s RECORD;\n", l->name);
 				else if (!l->typ)
