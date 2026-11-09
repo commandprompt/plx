@@ -92,7 +92,6 @@ typedef struct PlxCtx
 	StringInfoData out;			/* emitted BEGIN..END body */
 	PlxLocal2  *locals, *ltail;
 	struct HTAB *lhash;			/* lower-cased name -> local (see plx_local_find) */
-	bool		lhash_off;		/* a name too long to index was declared */
 	int			loopdepth;
 	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */

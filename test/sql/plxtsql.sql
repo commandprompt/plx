@@ -153,3 +153,11 @@ DO $d$ BEGIN
   EXECUTE 'DO LANGUAGE plxtsql $b$RETURN '
     || repeat('ISNULL(', 2000) || '1' || repeat(', 0)', 2000) || ';$b$';
 EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- below the 500-level counter, a small stack is guarded by check_stack_depth()
+SET max_stack_depth = '100kB';
+DO $d$ BEGIN
+  EXECUTE 'DO LANGUAGE plxtsql $b$RETURN '
+    || repeat('ISNULL(', 450) || '1' || repeat(', 0)', 450) || ';$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+RESET max_stack_depth;

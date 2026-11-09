@@ -25,6 +25,7 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 
@@ -209,20 +210,23 @@ plx_lex(Ctx *cx)
 			{
 				/*
 				 * Find the next real line's indentation, skipping blanks and
-				 * comments. Resume lexing after the skipped lines (up to the
-				 * first type-annotation line, which still has to be lexed)
-				 * rather than at the next newline: rescanning the run from
-				 * every newline made K blank lines cost O(K^2) and counted
-				 * their line numbers twice.
+				 * comments, and resume lexing after the skipped lines rather
+				 * than at the next newline: rescanning the run from every
+				 * newline made K blank lines cost O(K^2) and counted their
+				 * line numbers twice. A type-annotation line ends the scan
+				 * (it has to be lexed); its newline scans on from there, so
+				 * a run of them is linear too.
 				 */
 				const char *q = p;
 				const char *resume = p;
 				int			resume_line = line;
-				bool		held = false;
+				bool		ann_line = false;
 				int			col = 0;
 
 				for (;;)
 				{
+					const char *ls = q;
+
 					col = 0;
 					while (*q == ' ' || *q == '\t')
 					{
@@ -232,18 +236,19 @@ plx_lex(Ctx *cx)
 					if (q < end && *q == '\n')
 					{
 						q++;
-						if (!held)
-						{
-							resume = q;
-							resume_line++;
-						}
+						resume = q;
+						resume_line++;
 						continue;
 					}
 					if (q < end && *q == '#')
 					{
 						if (surf->type_ann &&
 							strncmp(q, surf->type_ann, strlen(surf->type_ann)) == 0)
-							held = true;
+						{
+							resume = ls;
+							ann_line = true;
+							break;
+						}
 						while (q < end && *q != '\n')
 							q++;
 						continue;
@@ -252,8 +257,9 @@ plx_lex(Ctx *cx)
 				}
 				p = resume;
 				line = resume_line;
-				if (q >= end)
-					continue;	/* trailing dedents handled at EOF */
+				if (ann_line || q >= end)
+					continue;	/* indentation is taken at the next real line;
+								 * trailing dedents are handled at EOF */
 				if (col > indent_stack[indent_sp])
 				{
 					/*
@@ -588,30 +594,29 @@ plx_is_param(Ctx *cx, const char *name, int len)
 
 /*
  * Locals are kept in declaration order (cx->locals, which DECLARE emission
- * walks) and indexed by lower-cased name in cx->lhash. A linear scan made a
- * body with many distinct variables quadratic: 40,000 assignments took most
- * of a minute, uninterruptibly. Names too long for a key (PostgreSQL would
- * truncate them anyway) fall back to the scan.
+ * walks) and indexed in cx->lhash. A linear scan made a body with many
+ * distinct variables quadratic: 40,000 assignments took most of a minute.
+ *
+ * The key is the name as PostgreSQL itself reads an unquoted identifier:
+ * down-cased and truncated to NAMEDATALEN - 1 bytes (downcase_truncate_
+ * identifier). Two names that plpgsql would treat as one variable therefore
+ * share an entry, any name can be indexed (an over-long one no longer forces a
+ * fallback scan), and case folding matches the server's for every encoding.
  */
-#define PLX_LKEY 128
-
 typedef struct
 {
-	char		key[PLX_LKEY];
+	char		key[NAMEDATALEN];
 	PlxLocal2  *l;
 } PlxLocalEnt;
 
-static bool
+static void
 plx_local_key(const char *name, int len, char *key)
 {
-	int			i;
+	char	   *k = downcase_truncate_identifier(name, len, false);
 
-	if (len >= PLX_LKEY)
-		return false;
-	for (i = 0; i < len; i++)
-		key[i] = pg_ascii_tolower((unsigned char) name[i]);
-	memset(key + len, 0, PLX_LKEY - len);
-	return true;
+	memset(key, 0, NAMEDATALEN);
+	strlcpy(key, k, NAMEDATALEN);
+	pfree(k);
 }
 
 void
@@ -621,34 +626,29 @@ plx_locals_reset(Ctx *cx)
 	if (cx->lhash)
 		hash_destroy(cx->lhash);
 	cx->lhash = NULL;
-	cx->lhash_off = false;
 }
 
 PlxLocal2 *
 plx_local_find(Ctx *cx, const char *name, int len)
 {
-	PlxLocal2  *l;
-	char		key[PLX_LKEY];
+	char		key[NAMEDATALEN];
+	PlxLocalEnt *e;
 
 	CHECK_FOR_INTERRUPTS();
-	if (cx->lhash && plx_local_key(name, len, key))
-	{
-		PlxLocalEnt *e = hash_search(cx->lhash, key, HASH_FIND, NULL);
-
-		return e ? e->l : NULL;
-	}
-	for (l = cx->locals; l; l = l->next)
-		if ((int) strlen(l->name) == len && pg_strncasecmp(l->name, name, len) == 0)
-			return l;
-	return NULL;
+	if (!cx->lhash)
+		return NULL;
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+	return e ? e->l : NULL;
 }
 
 PlxLocal2 *
 plx_local_add(Ctx *cx, const char *name, int len)
 {
 	PlxLocal2  *l = palloc0(sizeof(PlxLocal2));
-
-	char		key[PLX_LKEY];
+	char		key[NAMEDATALEN];
+	bool		found;
+	PlxLocalEnt *e;
 
 	l->name = pnstrdup(name, len);
 	if (cx->ltail)
@@ -657,13 +657,11 @@ plx_local_add(Ctx *cx, const char *name, int len)
 		cx->locals = l;
 	cx->ltail = l;
 
-	if (cx->lhash_off)
-		return l;
 	if (!cx->lhash)
 	{
 		HASHCTL		ctl;
 
-		ctl.keysize = PLX_LKEY;
+		ctl.keysize = NAMEDATALEN;
 		ctl.entrysize = sizeof(PlxLocalEnt);
 		ctl.hcxt = CurrentMemoryContext;
 #if PG_VERSION_NUM >= 140000
@@ -674,22 +672,10 @@ plx_local_add(Ctx *cx, const char *name, int len)
 								HASH_ELEM | HASH_CONTEXT);	/* string keys */
 #endif
 	}
-	if (plx_local_key(name, len, key))
-	{
-		bool		found;
-		PlxLocalEnt *e = hash_search(cx->lhash, key, HASH_ENTER, &found);
-
-		/* keep the first declaration, as the linear scan did */
-		if (!found)
-			e->l = l;
-	}
-	else
-	{
-		/* a long name defeats the index: drop it so finds scan the list */
-		hash_destroy(cx->lhash);
-		cx->lhash = NULL;
-		cx->lhash_off = true;
-	}
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_ENTER, &found);
+	if (!found)
+		e->l = l;				/* keep the first declaration */
 	return l;
 }
 
@@ -2830,6 +2816,162 @@ djb2(const char *s)
 	return h;
 }
 
+static bool
+sql_ident_char(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '$' || IS_HIGHBIT_SET(c);
+}
+
+/*
+ * Rewrite every standard string literal in the generated plpgsql that contains
+ * a backslash as an escape string: 'C:\' becomes E'C:\\'.
+ *
+ * plpgsql reads a function body with the caller's standard_conforming_strings,
+ * which any role may set. With it off, a backslash in an ordinary '...'
+ * literal is an escape, so a literal ending in one swallows its closing quote
+ * and the following text runs as code; a SECURITY DEFINER function's
+ * behaviour would then depend on its caller. An E'...' literal reads the same
+ * either way, and with the setting on (the default) the rewritten literal has
+ * exactly the value of the original. Doing this once over the finished body
+ * covers every dialect's literal emitters, and SQL the author passed through.
+ *
+ * A small SQL lexer: skips comments (nested block comments too), quoted
+ * identifiers, dollar-quoted strings, E'' strings (already safe) and U&''
+ * strings (where a backslash introduces a Unicode escape).
+ */
+static char *
+escape_backslash_literals(const char *s)
+{
+	StringInfoData o;
+	const char *p = s;
+
+	if (!strchr(s, '\\'))
+		return (char *) s;
+	initStringInfo(&o);
+	while (*p)
+	{
+		const char *q;
+
+		if (p[0] == '-' && p[1] == '-')
+		{
+			q = strchr(p, '\n');
+			q = q ? q + 1 : p + strlen(p);
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '/' && p[1] == '*')
+		{
+			int			depth = 1;
+
+			q = p + 2;
+			while (*q && depth > 0)
+			{
+				if (q[0] == '/' && q[1] == '*')
+				{
+					depth++;
+					q += 2;
+				}
+				else if (q[0] == '*' && q[1] == '/')
+				{
+					depth--;
+					q += 2;
+				}
+				else
+					q++;
+			}
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '"')
+		{
+			q = p + 1;
+			while (*q && !(q[0] == '"' && q[1] != '"'))
+				q += (q[0] == '"') ? 2 : 1;
+			if (*q)
+				q++;
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '$' && (p == s || !sql_ident_char(p[-1])))
+		{
+			/* $tag$ ... $tag$; the tag cannot start with a digit ($1 is a param) */
+			const char *t = p + 1;
+
+			if (*t != '$' && ((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') ||
+							  *t == '_' || IS_HIGHBIT_SET(*t)))
+				while (sql_ident_char(*t) && *t != '$')
+					t++;
+			if (*t == '$')
+			{
+				int			taglen = (int) (t - p) + 1;
+				char	   *tag = pnstrdup(p, taglen);
+				const char *end = strstr(t + 1, tag);
+
+				q = end ? end + taglen : p + strlen(p);
+				appendBinaryStringInfo(&o, p, q - p);
+				p = q;
+				pfree(tag);
+				continue;
+			}
+		}
+		if (p[0] == '\'')
+		{
+			bool		estr = p > s && (p[-1] == 'E' || p[-1] == 'e') &&
+				(p - 1 == s || !sql_ident_char(p[-2]));
+			bool		ustr = p - 1 > s && p[-1] == '&' &&
+				(p[-2] == 'U' || p[-2] == 'u') &&
+				(p - 2 == s || !sql_ident_char(p[-3]));
+			/* B'..', X'..', N'..' and the like: leave other prefixes alone */
+			bool		prefixed = !estr && !ustr && p > s && sql_ident_char(p[-1]);
+			bool		has_bs = false;
+
+			q = p + 1;
+			while (*q)
+			{
+				if (estr && q[0] == '\\' && q[1])
+					q += 2;
+				else if (q[0] == '\'' && q[1] == '\'')
+					q += 2;
+				else if (q[0] == '\'')
+					break;
+				else
+				{
+					if (q[0] == '\\')
+						has_bs = true;
+					q++;
+				}
+			}
+			if (has_bs && !estr && !ustr && !prefixed)
+			{
+				const char *c;
+
+				appendStringInfoString(&o, "E'");
+				for (c = p + 1; c < q; c++)
+				{
+					if (*c == '\\')
+						appendStringInfoChar(&o, '\\');
+					appendStringInfoChar(&o, *c);
+				}
+			}
+			else
+				appendBinaryStringInfo(&o, p, q - p);
+			if (*q)
+			{
+				appendStringInfoChar(&o, '\'');
+				q++;
+			}
+			p = q;
+			continue;
+		}
+		appendStringInfoChar(&o, *p++);
+	}
+	return o.data;
+}
+
 char *
 plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 			  MemoryContext scratch)
@@ -2889,5 +3031,5 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 	}
 	appendStringInfo(&asm_, "/*plx-orig:b64$%s$plx-orig*/\n", b64_encode_body(body));
 
-	return asm_.data;
+	return escape_backslash_literals(asm_.data);
 }

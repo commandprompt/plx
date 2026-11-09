@@ -30,19 +30,34 @@ PUBLIC has USAGE by default).
   emitted once per exit path, so a finally nested inside a finally doubled the
   output per level: a 668-byte function stored a 94 MB body, and a slightly
   deeper one drove a backend to gigabytes of memory. Nesting a finally inside a
-  finally is now limited to 8 levels.
+  finally is now limited to 8 levels. This bounds the depth, not the size: at
+  the limit the output can still be some 2^8 times the source (a 195 KB body
+  stores about 144 MB), so a large body can still demand a lot of memory until
+  the finally body is emitted once.
 - **String literal escaping its quotes.** A dialect string that ended in a lone
   backslash, inside an interpolation (plxjs/plxts `${'...\'}`, plxpython3
   f-strings), was emitted with that backslash bare inside an `E'...'` literal,
   where it escaped the closing quote. The next string literal in the body then
   ran as code, so a function whose source showed only inert string assignments
-  could execute arbitrary SQL. Literal backslashes are now always escaped.
+  could execute arbitrary SQL.
+- **String literals that depend on `standard_conforming_strings`.** plpgsql
+  reads a function body with the caller's setting, which any role may change.
+  Literals that plxgo, plxtsql, plxplsql and plxcobol emit, and Ruby and PHP
+  single-quoted strings, were written as plain `'...'`, so with the setting off
+  a literal ending in a backslash swallowed its closing quote and the following
+  text ran as code; the caller could change what a `SECURITY DEFINER` function
+  did. The finished body is now rewritten so that every ordinary literal
+  containing a backslash is an `E'...'` literal with the backslash doubled,
+  which reads the same under either setting and, with it on, has the value the
+  original had. This covers every dialect, and SQL passed through verbatim.
 - **Quadratic, uninterruptible transpile time.** Local-variable lookup was a
   linear scan, so a body with 40,000 distinct variables took 47 seconds; the
   plxpython3 lexer rescanned every run of blank lines from each newline, so
   400,000 blank lines took 43 seconds. Neither honoured `statement_timeout`.
-  Locals are now hashed, blank lines are scanned once, and the lexer, rewriter
-  and local table check for interrupts. (The same fix stops plxpython3 from
+  Locals are now hashed (keyed as PostgreSQL reads an identifier, down-cased
+  and truncated to 63 bytes, so no name defeats the index), blank and
+  annotation lines are scanned once, and the lexer, rewriter and local table
+  check for interrupts. (The same fix stops plxpython3 from
   counting blank lines twice in error line numbers.)
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
