@@ -442,8 +442,10 @@ cob_is_array(Cb *cb, const char *name)
  * noise word, figurative constants, ** -> ^, data-name mapping, and array
  * subscripts (WS-ARR(I) -> ws_arr[i]).
  */
+static void cob_emit_range(Cb *cb, int a, int b, StringInfo out);
+
 static void
-cob_emit_range(Cb *cb, int a, int b, StringInfo out)
+cob_emit_range_inner(Cb *cb, int a, int b, StringInfo out)
 {
 	CbTok	   *t = cb->t;
 	int			i = a;
@@ -619,6 +621,21 @@ cob_emit_range(Cb *cb, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/*
+ * Recursion guard for the expression emitter. Nested calls, subscripts and
+ * literals recurse through here once per level; without check_stack_depth()
+ * hostile nesting overflows the C stack and crashes the backend (SIGSEGV).
+ */
+static void
+cob_emit_range(Cb *cb, int a, int b, StringInfo out)
+{
+	check_stack_depth();
+	if (++cb->cx->depth > PLX_MAX_DEPTH)
+		cob_err(cb, "expression nested too deeply");
+	cob_emit_range_inner(cb, a, b, out);
+	cb->cx->depth--;
 }
 
 /* true if the current token stops a value scan */
@@ -1240,6 +1257,7 @@ static void
 cob_evaluate(Cb *cb, int ind)
 {
 	bool		searched;
+	bool		has_other = false;
 
 	cb->pos++;								/* EVALUATE */
 	searched = cob_ci(cob_cur(cb), "TRUE");
@@ -1269,6 +1287,7 @@ cob_evaluate(Cb *cb, int ind)
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfoString(&cb->cx->out, "ELSE\n");
 			cob_block(cb, ind + 2);
+			has_other = true;
 			break;
 		}
 		if (searched)
@@ -1310,6 +1329,15 @@ cob_evaluate(Cb *cb, int ind)
 		}
 	}
 	cob_expect(cb, "END-EVALUATE");
+	/* no WHEN OTHER: an unmatched EVALUATE is a no-op in COBOL, but a plpgsql
+	 * CASE with no match raises case_not_found */
+	if (!has_other)
+	{
+		plx_indent(&cb->cx->out, ind + 1);
+		appendStringInfoString(&cb->cx->out, "ELSE\n");
+		plx_indent(&cb->cx->out, ind + 2);
+		appendStringInfoString(&cb->cx->out, "NULL;\n");
+	}
 	plx_indent(&cb->cx->out, ind);
 	appendStringInfoString(&cb->cx->out, "END CASE;\n");
 }

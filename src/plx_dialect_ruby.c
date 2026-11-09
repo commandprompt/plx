@@ -484,8 +484,10 @@ parse_begin(Ctx *cx, int ind)
 
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)
 	{
+		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos++;
 		ensure_body = capture_block(cx, ind + 1);
+		cx->ensuredepth--;
 	}
 
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
@@ -493,44 +495,7 @@ parse_begin(Ctx *cx, int ind)
 	else
 		plx_err(cx, bl, "unterminated begin block");
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
 }
 
 /* rewrite a comma-separated value list (for CASE WHEN v1, v2) */
@@ -623,6 +588,15 @@ parse_case(Ctx *cx, int ind)
 		appendStringInfoString(o, "ELSE\n");
 		cx->pos++;
 		parse_block(cx, ind + 2);
+	}
+	else
+	{
+		/* no default arm: falling through is a no-op in the source language, but a
+		 * plpgsql CASE with no match raises case_not_found */
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "ELSE\n");
+		plx_indent(o, ind + 2);
+		appendStringInfoString(o, "NULL;\n");
 	}
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
 		cx->pos++;

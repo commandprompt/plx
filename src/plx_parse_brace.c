@@ -427,51 +427,16 @@ parse_try_brace(Ctx *cx, int ind)
 	{
 		StringInfoData saved = cx->out;
 
+		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos++;
 		initStringInfo(&cx->out);
 		parse_brace_block(cx, ind + 1);
+		cx->ensuredepth--;
 		ensure_body = cx->out.data;
 		cx->out = saved;
 	}
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
 	(void) line;
 }
 
@@ -638,6 +603,15 @@ parse_switch_brace(Ctx *cx, int ind)
 	if (when_count == 0)
 		plx_err(cx, line,
 				"switch needs at least one case (a switch with only default is not supported)");
+	/* no default arm: falling through is a no-op in the source language, but a
+	 * plpgsql CASE with no match raises case_not_found */
+	if (!seen_default)
+	{
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "ELSE\n");
+		plx_indent(o, ind + 2);
+		appendStringInfoString(o, "NULL;\n");
+	}
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
 }

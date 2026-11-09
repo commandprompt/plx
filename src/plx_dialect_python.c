@@ -354,52 +354,17 @@ parse_py_try(Ctx *cx, int ind)
 		colon = py_header_colon(cx, cx->pos + 1);
 		if (colon < 0)
 			plx_err(cx, cx->t[cx->pos].line, "finally requires ':'");
+		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos = colon + 1;
 		saved = cx->out;
 		initStringInfo(&cx->out);
 		parse_py_block(cx, ind + 1);
+		cx->ensuredepth--;
 		ensure_body = cx->out.data;
 		cx->out = saved;
 	}
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
 }
 
 /* raise / raise Class("msg") */
