@@ -34,6 +34,8 @@ differentialcheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/finally_diff.py 300 1
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/finally_diff.py 300 1 plxcsharp
 
 # Corpus check: replay the Ruby corpus in test/corpus.json and compare each
 # case's output to its recorded expectation. Needs the extension installed and
