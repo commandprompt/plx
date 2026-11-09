@@ -4,6 +4,34 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+Extension version 2.1.0. Install the new build, then run
+`ALTER EXTENSION plx UPDATE` in each database. The update changes no SQL
+objects; it records the extension as non-relocatable (below).
+
+### Security
+
+- **Generated code names plx's own objects with plx's schema.** A string
+  append (`s << x`, `$s .= x`, `s += x`, `STRING-APPEND`) declared the
+  variable as `plx_strbuild` and called `plx_sb_append(...)` unqualified, so
+  they were resolved through `search_path` every time the function ran. That
+  broke the standard hardening for a `SECURITY DEFINER` function
+  (`SET search_path = pg_catalog`: `type "plx_strbuild" does not exist`), broke
+  functions when plx was installed in a schema not on the path, and let a
+  same-named function planted earlier on the path run in their place, with the
+  definer's privileges for a `SECURITY DEFINER` function. Generated code now
+  writes `<plx schema>.plx_strbuild` and `<plx schema>.plx_sb_append`.
+
+### Changed
+
+- **The extension is no longer relocatable** (`relocatable = false`).
+  Functions now store plx's schema name, so `ALTER EXTENSION plx SET SCHEMA`
+  would leave them pointing at the old schema; it now fails with
+  `extension "plx" does not support SET SCHEMA`. Choose the schema at
+  `CREATE EXTENSION plx SCHEMA ...` time. Existing functions keep the
+  unqualified names they were generated with until their DDL is run again.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

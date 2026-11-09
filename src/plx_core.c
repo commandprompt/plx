@@ -23,6 +23,7 @@
 #include "commands/proclang.h"
 #include "nodes/parsenodes.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -36,6 +37,8 @@ PG_MODULE_MAGIC;
 
 #define PLX_MAX_DIALECTS 32
 static const PlxDialect *plx_dialects[PLX_MAX_DIALECTS];
+
+Oid			plx_ext_namespace = InvalidOid;
 static int	plx_ndialects = 0;
 
 void
@@ -126,6 +129,8 @@ plx_generic_validator(FunctionCallInfo fcinfo, const PlxDialect *d)
 		bool		repl[Natts_pg_proc];
 
 		build_meta(&meta, tuple, funcoid);
+		/* the validator is an extension member, so it lives in our schema */
+		plx_ext_namespace = get_func_namespace(fcinfo->flinfo->fn_oid);
 		plpgsql = d->transpile(rubysrc, &meta);
 
 		memset(nulls, false, sizeof(nulls));
@@ -162,6 +167,7 @@ plx_generic_inline_handler(FunctionCallInfo fcinfo, const PlxDialect *d)
 	Form_pg_language langform;
 	Oid			inline_oid;
 
+	plx_ext_namespace = get_func_namespace(fcinfo->flinfo->fn_oid);
 	transpiled = d->transpile(codeblock->source_text, NULL);
 
 	plpgsql_lang = get_language_oid("plpgsql", false);
