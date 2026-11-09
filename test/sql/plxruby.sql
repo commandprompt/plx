@@ -295,3 +295,12 @@ END $d$;
 -- (not called: plpgsql's own compile of 60,000 variables is slow, and is not plx's)
 SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
 RESET statement_timeout;
+-- ensure runs on return
+CREATE FUNCTION rb_ensure_return(x int) RETURNS int LANGUAGE plxruby AS $$
+  begin
+    return x * 2
+  ensure
+    raise warning: "ruby ensure"
+  end
+$$;
+SELECT rb_ensure_return(4);

@@ -350,8 +350,10 @@ parse_try_brace(Ctx *cx, int ind)
 	StringInfoData arms;
 	int			nrescue = 0;
 	char	   *ensure_body = NULL;
+	PlxFin	   *fin;
 
 	cx->pos++;					/* try */
+	fin = plx_fin_push(cx);
 	{
 		StringInfoData saved = cx->out;
 
@@ -423,20 +425,19 @@ parse_try_brace(Ctx *cx, int ind)
 		nrescue++;
 		plx_skip_seps(cx);
 	}
+	plx_fin_pop(cx, fin);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)	/* finally */
 	{
 		StringInfoData saved = cx->out;
 
-		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos++;
 		initStringInfo(&cx->out);
 		parse_brace_block(cx, ind + 1);
-		cx->ensuredepth--;
 		ensure_body = cx->out.data;
 		cx->out = saved;
 	}
 
-	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
+	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure_body, fin);
 	(void) line;
 }
 
@@ -623,6 +624,7 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 	{
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;			/* consume name and ':' */
 		tk = &cx->t[cx->pos];
 	}

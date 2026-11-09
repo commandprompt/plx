@@ -415,3 +415,18 @@ SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
 (1 row)
 
 RESET statement_timeout;
+-- ensure runs on return
+CREATE FUNCTION rb_ensure_return(x int) RETURNS int LANGUAGE plxruby AS $$
+  begin
+    return x * 2
+  ensure
+    raise warning: "ruby ensure"
+  end
+$$;
+SELECT rb_ensure_return(4);
+WARNING:  ruby ensure
+ rb_ensure_return 
+------------------
+                8
+(1 row)
+

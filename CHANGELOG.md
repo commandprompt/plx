@@ -29,11 +29,8 @@ PUBLIC has USAGE by default).
 - **Exponential output from nested `finally`/`ensure`.** Each finally body is
   emitted once per exit path, so a finally nested inside a finally doubled the
   output per level: a 668-byte function stored a 94 MB body, and a slightly
-  deeper one drove a backend to gigabytes of memory. Nesting a finally inside a
-  finally is now limited to 8 levels. This bounds the depth, not the size: at
-  the limit the output can still be some 2^8 times the source (a 195 KB body
-  stores about 144 MB), so a large body can still demand a lot of memory until
-  the finally body is emitted once.
+  deeper one drove a backend to gigabytes of memory. The finally body is now
+  emitted once (see Changed), so output grows linearly with nesting.
 - **String literal escaping its quotes.** A dialect string that ended in a lone
   backslash, inside an interpolation (plxjs/plxts `${'...\'}`, plxpython3
   f-strings), was emitted with that backslash bare inside an `E'...'` literal,
@@ -66,6 +63,21 @@ PUBLIC has USAGE by default).
   quote consumed half of the escaped `''` pair, so text inside a Go string
   literal could end up as SQL in the generated body. Such directives now fall
   back to the `format()` lowering, which keeps the text literal.
+
+### Changed
+
+- **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
+  plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
+  `return` inside `try` left the function without running `finally`. The
+  finally body is now emitted once: an exit from the try (or from a catch arm)
+  records which exit is pending, leaves the block, runs the finally body, then
+  completes the exit; an error is caught, the finally body runs, and the error
+  is re-raised with its SQLSTATE, message, detail and hint. A `return` or an
+  error in the finally body replaces the pending exit or error, as in the
+  source languages. Behaviour difference to be aware of: an error re-raised
+  after `finally` carries the location of the re-raise in its `CONTEXT`, not
+  the original statement's. Only functions created or replaced after upgrading
+  are affected; stored functions keep the plpgsql they were created with.
 
 ### Fixed
 

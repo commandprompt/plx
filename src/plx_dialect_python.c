@@ -274,11 +274,13 @@ parse_py_try(Ctx *cx, int ind)
 				arms;
 	int			nrescue = 0;
 	char	   *ensure_body = NULL;
+	PlxFin	   *fin;
 
 	colon = py_header_colon(cx, cx->pos + 1);
 	if (colon < 0)
 		plx_err(cx, hd, "try requires ':'");
 	cx->pos = colon + 1;
+	fin = plx_fin_push(cx);
 	saved = cx->out;
 	initStringInfo(&cx->out);
 	parse_py_block(cx, ind + 1);
@@ -349,22 +351,21 @@ parse_py_try(Ctx *cx, int ind)
 		appendStringInfoString(&arms, hb);
 		nrescue++;
 	}
+	plx_fin_pop(cx, fin);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)	/* finally */
 	{
 		colon = py_header_colon(cx, cx->pos + 1);
 		if (colon < 0)
 			plx_err(cx, cx->t[cx->pos].line, "finally requires ':'");
-		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos = colon + 1;
 		saved = cx->out;
 		initStringInfo(&cx->out);
 		parse_py_block(cx, ind + 1);
-		cx->ensuredepth--;
 		ensure_body = cx->out.data;
 		cx->out = saved;
 	}
 
-	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
+	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure_body, fin);
 }
 
 /* raise / raise Class("msg") */
@@ -430,6 +431,7 @@ parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 	{
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;
 		tk = &cx->t[cx->pos];
 	}

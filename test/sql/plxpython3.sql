@@ -171,3 +171,16 @@ DO $d$ BEGIN
   EXECUTE E'DO LANGUAGE plxpython3 $b$\nx = 1\n' || repeat(E'#:: int\n', 40000) || E'$b$';
 EXCEPTION WHEN syntax_error OR feature_not_supported THEN NULL; END $d$;
 RESET statement_timeout;
+-- finally runs on return and continue
+CREATE FUNCTION py_fin_return(x int) RETURNS int LANGUAGE plxpython3 AS $$
+for i in range(1, 10):
+    try:
+        if i == 3:
+            return i * x
+        if i == 1:
+            continue
+    finally:
+        raise("warning", f"py finally {i}")
+return 0
+$$;
+SELECT py_fin_return(5);

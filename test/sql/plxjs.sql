@@ -174,12 +174,14 @@ CREATE FUNCTION js_ann_cond(x int) RETURNS int LANGUAGE plxjs AS $$
 $$;
 SELECT js_ann_cond(3), js_ann_cond(-3);
 
--- finally inside finally is capped (each level doubles the generated body)
+-- finally inside finally is emitted once per level, so deep nesting stays
+-- linear in size (each level used to double the generated body)
 DO $d$ DECLARE s text := 'x = 1;'; BEGIN
-  FOR i IN 1..12 LOOP s := 'try { x = x + 1; } finally { ' || s || ' }'; END LOOP;
+  FOR i IN 1..40 LOOP s := 'try { x = x + 1; } finally { ' || s || ' }'; END LOOP;
   EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x /*:: int */ = 0; '
     || s || ' return x; $b$';
-EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+END $d$;
+SELECT js_fin_deep(), length(prosrc) < 200000 AS linear FROM pg_proc WHERE proname = 'js_fin_deep';
 
 -- a finally body that throws runs once, not again from the error path
 DO LANGUAGE plxjs $p$
@@ -196,3 +198,71 @@ return b;
 $q$;
 SELECT js_bs_escape() LIKE '%set_config%' AS literal_kept,
        current_setting('plx.test_pwned', true) IS NULL AS not_run;
+
+-- finally runs on return, break and continue, and after an error, once each
+CREATE FUNCTION js_fin_return() RETURNS int LANGUAGE plxjs AS $$
+  let x = 1;
+  try { return x; } finally { x = 99; raise("warning", "finally after return"); }
+$$;
+SELECT js_fin_return();   -- 1: the value is taken before finally runs
+CREATE FUNCTION js_fin_loop() RETURNS int LANGUAGE plxjs AS $$
+  let n = 0; let i = 0;
+  while (i < 10) {
+    i = i + 1;
+    try { if (i == 2) { continue; } if (i == 5) { break; } n = n + i; }
+    finally { n = n + 100; }
+  }
+  return n;
+$$;
+SELECT js_fin_loop();     -- 508
+CREATE FUNCTION js_fin_nested() RETURNS text LANGUAGE plxjs AS $$
+  try { try { return "r"; } finally { raise("warning", "inner"); } }
+  finally { raise("warning", "outer"); }
+$$;
+SELECT js_fin_nested();
+CREATE FUNCTION js_fin_label() RETURNS int LANGUAGE plxjs AS $$
+  let n = 0;
+  outer: for (let i = 0; i < 3; i++) {
+    try {
+      for (let j = 0; j < 3; j++) { if (j == 1) { break; } n = n + 1; }
+      if (i == 1) { break outer; }
+    } finally { n = n + 10; }
+  }
+  return n;
+$$;
+SELECT js_fin_label();    -- 22
+-- an error is re-raised after finally with its SQLSTATE, detail and hint
+CREATE FUNCTION js_fin_fail() RETURNS int LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION USING ERRCODE = '22012', MESSAGE = 'boom', DETAIL = 'd1', HINT = 'h1'; END $$;
+CREATE FUNCTION js_fin_err() RETURNS int LANGUAGE plxjs AS $$
+  try { return js_fin_fail(); } finally { raise("warning", "cleanup"); }
+$$;
+DO $d$ DECLARE st text; dt text; ht text; BEGIN PERFORM js_fin_err();
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, dt = PG_EXCEPTION_DETAIL, ht = PG_EXCEPTION_HINT;
+  RAISE WARNING 'caught: % % % %', st, SQLERRM, dt, ht;
+END $d$;
+-- a return in finally replaces the error; a return from catch runs finally
+CREATE FUNCTION js_fin_override() RETURNS int LANGUAGE plxjs AS $$
+  try { return js_fin_fail(); } finally { return 7; }
+$$;
+SELECT js_fin_override();
+CREATE FUNCTION js_fin_catch() RETURNS int LANGUAGE plxjs AS $$
+  try { return js_fin_fail(); } catch (e) { return -1; } finally { raise("warning", "after catch"); }
+$$;
+SELECT js_fin_catch();
+-- a trigger returning NEW, and a set-returning function's bare return
+CREATE TABLE js_fin_t(a int);
+CREATE FUNCTION js_fin_trg() RETURNS trigger LANGUAGE plxjs AS $$
+  try { NEW.a = NEW.a * 2; return NEW; } finally { raise("warning", "trigger finally"); }
+$$;
+CREATE TRIGGER js_fin_t1 BEFORE INSERT ON js_fin_t FOR EACH ROW EXECUTE FUNCTION js_fin_trg();
+INSERT INTO js_fin_t VALUES (21);
+SELECT * FROM js_fin_t;
+DROP TABLE js_fin_t CASCADE;
+CREATE FUNCTION js_fin_srf() RETURNS SETOF int LANGUAGE plxjs AS $$
+  emit 1;
+  try { emit 2; return; } finally { emit 3; }
+  emit 4;
+$$;
+SELECT * FROM js_fin_srf();
