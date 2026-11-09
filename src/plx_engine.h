@@ -91,6 +91,8 @@ typedef struct PlxCtx
 	const PlxSurface *surf;
 	StringInfoData out;			/* emitted BEGIN..END body */
 	PlxLocal2  *locals, *ltail;
+	struct HTAB *lhash;			/* lower-cased name -> local (see plx_local_find) */
+	bool		lhash_off;		/* a name too long to index was declared */
 	int			loopdepth;
 	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */
@@ -141,6 +143,7 @@ void plx_emit_try(StringInfo o, int ind, const char *body, int nrescue,
 				  const char *arms, const char *ensure_body);
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+void plx_locals_reset(Ctx *cx);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */

@@ -31,6 +31,22 @@ PUBLIC has USAGE by default).
   output per level: a 668-byte function stored a 94 MB body, and a slightly
   deeper one drove a backend to gigabytes of memory. Nesting a finally inside a
   finally is now limited to 8 levels.
+- **String literal escaping its quotes.** A dialect string that ended in a lone
+  backslash, inside an interpolation (plxjs/plxts `${'...\'}`, plxpython3
+  f-strings), was emitted with that backslash bare inside an `E'...'` literal,
+  where it escaped the closing quote. The next string literal in the body then
+  ran as code, so a function whose source showed only inert string assignments
+  could execute arbitrary SQL. Literal backslashes are now always escaped.
+- **Quadratic, uninterruptible transpile time.** Local-variable lookup was a
+  linear scan, so a body with 40,000 distinct variables took 47 seconds; the
+  plxpython3 lexer rescanned every run of blank lines from each newline, so
+  400,000 blank lines took 43 seconds. Neither honoured `statement_timeout`.
+  Locals are now hashed, blank lines are scanned once, and the lexer, rewriter
+  and local table check for interrupts. (The same fix stops plxpython3 from
+  counting blank lines twice in error line numbers.)
+- **Memory amplification in chained ternaries.** Each `?:` level kept its own
+  copy of the rest of the chain, so peak memory was depth times source length
+  (568 MB for a 1 MB body). Intermediate results are now freed.
 - **plxgo `fmt.Sprintf` directive without a letter verb.** A `%` followed by a
   quote consumed half of the escaped `''` pair, so text inside a Go string
   literal could end up as SQL in the generated body. Such directives now fall
@@ -40,6 +56,8 @@ PUBLIC has USAGE by default).
 
 - A `finally`/`ensure` body that raised an error on the normal path ran a
   second time from the error path. It now runs once.
+- plxpython3 `call(f"...")` emitted an unterminated quoted identifier. An
+  f-string procedure name is now rejected.
 
 ## [2.0.1] - 2026-08-25
 

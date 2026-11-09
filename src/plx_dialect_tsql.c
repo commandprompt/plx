@@ -1534,7 +1534,7 @@ plx_tsql_parse_body(Ctx *cx)
 		tq.pos = save;
 		cx->out.len = 0;
 		cx->out.data[0] = '\0';
-		cx->locals = cx->ltail = NULL;
+		plx_locals_reset(cx);
 	}
 	while (tq_cur(&tq)->kind != TQ_EOF)
 	{

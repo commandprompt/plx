@@ -26,6 +26,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 
 #include "plx.h"
 #include "plx_int.h"
@@ -69,6 +70,7 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	char	   *r;
 
 	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, 0, "expression nested too deeply");
 	r = rewrite_expr_inner(cx, s, len, boolctx);
@@ -188,6 +190,7 @@ plx_lex(Ctx *cx)
 	{
 		const char *tokstart = p;
 
+		CHECK_FOR_INTERRUPTS();
 		if (*p == ' ' || *p == '\t' || *p == '\r')
 		{
 			p++;
@@ -204,8 +207,18 @@ plx_lex(Ctx *cx)
 			PUSH0(T_NEWLINE);
 			if (indent_mode)
 			{
-				/* find the next real line's indentation, skipping blanks/comments */
+				/*
+				 * Find the next real line's indentation, skipping blanks and
+				 * comments. Resume lexing after the skipped lines (up to the
+				 * first type-annotation line, which still has to be lexed)
+				 * rather than at the next newline: rescanning the run from
+				 * every newline made K blank lines cost O(K^2) and counted
+				 * their line numbers twice.
+				 */
 				const char *q = p;
+				const char *resume = p;
+				int			resume_line = line;
+				bool		held = false;
 				int			col = 0;
 
 				for (;;)
@@ -219,17 +232,26 @@ plx_lex(Ctx *cx)
 					if (q < end && *q == '\n')
 					{
 						q++;
-						line++;
+						if (!held)
+						{
+							resume = q;
+							resume_line++;
+						}
 						continue;
 					}
 					if (q < end && *q == '#')
 					{
+						if (surf->type_ann &&
+							strncmp(q, surf->type_ann, strlen(surf->type_ann)) == 0)
+							held = true;
 						while (q < end && *q != '\n')
 							q++;
 						continue;
 					}
 					break;		/* real line, or EOF */
 				}
+				p = resume;
+				line = resume_line;
 				if (q >= end)
 					continue;	/* trailing dedents handled at EOF */
 				if (col > indent_stack[indent_sp])
@@ -564,11 +586,57 @@ plx_is_param(Ctx *cx, const char *name, int len)
 	return false;
 }
 
+/*
+ * Locals are kept in declaration order (cx->locals, which DECLARE emission
+ * walks) and indexed by lower-cased name in cx->lhash. A linear scan made a
+ * body with many distinct variables quadratic: 40,000 assignments took most
+ * of a minute, uninterruptibly. Names too long for a key (PostgreSQL would
+ * truncate them anyway) fall back to the scan.
+ */
+#define PLX_LKEY 128
+
+typedef struct
+{
+	char		key[PLX_LKEY];
+	PlxLocal2  *l;
+} PlxLocalEnt;
+
+static bool
+plx_local_key(const char *name, int len, char *key)
+{
+	int			i;
+
+	if (len >= PLX_LKEY)
+		return false;
+	for (i = 0; i < len; i++)
+		key[i] = pg_ascii_tolower((unsigned char) name[i]);
+	memset(key + len, 0, PLX_LKEY - len);
+	return true;
+}
+
+void
+plx_locals_reset(Ctx *cx)
+{
+	cx->locals = cx->ltail = NULL;
+	if (cx->lhash)
+		hash_destroy(cx->lhash);
+	cx->lhash = NULL;
+	cx->lhash_off = false;
+}
+
 PlxLocal2 *
 plx_local_find(Ctx *cx, const char *name, int len)
 {
 	PlxLocal2  *l;
+	char		key[PLX_LKEY];
 
+	CHECK_FOR_INTERRUPTS();
+	if (cx->lhash && plx_local_key(name, len, key))
+	{
+		PlxLocalEnt *e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+
+		return e ? e->l : NULL;
+	}
 	for (l = cx->locals; l; l = l->next)
 		if ((int) strlen(l->name) == len && pg_strncasecmp(l->name, name, len) == 0)
 			return l;
@@ -580,12 +648,48 @@ plx_local_add(Ctx *cx, const char *name, int len)
 {
 	PlxLocal2  *l = palloc0(sizeof(PlxLocal2));
 
+	char		key[PLX_LKEY];
+
 	l->name = pnstrdup(name, len);
 	if (cx->ltail)
 		cx->ltail->next = l;
 	else
 		cx->locals = l;
 	cx->ltail = l;
+
+	if (cx->lhash_off)
+		return l;
+	if (!cx->lhash)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = PLX_LKEY;
+		ctl.entrysize = sizeof(PlxLocalEnt);
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_CONTEXT);	/* string keys */
+#endif
+	}
+	if (plx_local_key(name, len, key))
+	{
+		bool		found;
+		PlxLocalEnt *e = hash_search(cx->lhash, key, HASH_ENTER, &found);
+
+		/* keep the first declaration, as the linear scan did */
+		if (!found)
+			e->l = l;
+	}
+	else
+	{
+		/* a long name defeats the index: drop it so finds scan the list */
+		hash_destroy(cx->lhash);
+		cx->lhash = NULL;
+		cx->lhash_off = true;
+	}
 	return l;
 }
 
@@ -843,6 +947,19 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			s++;
 			continue;
 		}
+		/*
+		 * A backslash that reaches here is literal content (a raw string, or
+		 * a lone trailing backslash). Escape it and force the E'' form: left
+		 * bare inside an E'' literal it would escape the closing quote and
+		 * let the next literal's text run on as code.
+		 */
+		if (s[0] == '\\')
+		{
+			appendStringInfoString(&lit, "\\\\");
+			need_e = true;
+			s++;
+			continue;
+		}
 		appendStringInfoChar(&lit, *s);
 		s++;
 	}
@@ -992,6 +1109,12 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				a = plx_rewrite_expr(cx, s + q + 1, c - q - 1, false);
 				b = plx_rewrite_expr(cx, s + c + 1, len - c - 1, false);
 				r = psprintf("CASE WHEN %s THEN %s ELSE %s END", cond, a, b);
+				/* free the parts: a chain of ternaries nests one level per
+				 * '?', and keeping every level's copy of the rest of the chain
+				 * made peak memory depth * length */
+				pfree(cond);
+				pfree(a);
+				pfree(b);
 				return r;
 			}
 		}
@@ -1064,7 +1187,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != c)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -1090,7 +1213,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != q)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -2214,6 +2337,9 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			{
 				Tok		   *pn = &cx->t[as[0]];
 
+				/* an f-string's prefix would be unquoted as part of the name */
+				if (pn->fstr)
+					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
 				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}
 			else

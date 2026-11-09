@@ -186,3 +186,13 @@ DO LANGUAGE plxjs $p$
   try { raise("warning", "body"); }
   finally { raise("warning", "finally ran"); throw new Exception("boom"); }
 $p$;
+
+-- a string ending in a lone backslash cannot escape its quotes: the second
+-- assignment stays an inert string instead of running set_config
+CREATE FUNCTION js_bs_escape() RETURNS text LANGUAGE plxjs AS $q$
+let a = `${'\n\'}`;
+let b = " || set_config($x$plx.test_pwned$x$, $x$yes$x$, false)); --";
+return b;
+$q$;
+SELECT js_bs_escape() LIKE '%set_config%' AS literal_kept,
+       current_setting('plx.test_pwned', true) IS NULL AS not_run;

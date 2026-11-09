@@ -145,3 +145,16 @@ DO LANGUAGE plxpython3 $p$
 assert(#:: int
   1 > 0)
 $p$;
+
+-- call() takes a plain string name; an f-string used to emit a broken identifier
+DO $d$ BEGIN
+  EXECUTE E'DO LANGUAGE plxpython3 $b$\ncall(f"noop")\n$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- blank lines and comments are counted once in error line numbers
+DO $d$ DECLARE d text; BEGIN
+  EXECUTE E'DO LANGUAGE plxpython3 $b$\nx = 1\n\n\n# c\n\nclass Foo:\n    pass\n$b$';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS d = PG_EXCEPTION_DETAIL;
+  RAISE WARNING 'caught: % (%)', SQLERRM, d;
+END $d$;
