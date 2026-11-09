@@ -310,19 +310,13 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 			appendStringInfo(o, "%.*s := -1;\n", cx->t[var2_a].len, cx->t[var2_a].s);
 		}
 		plx_indent(o, ind);
-		if (n == 1 && plx_arg_is_string_literal(cx, as[0], ae[0]))
 		{
-			appendStringInfo(o, "FOR %.*s IN ", cx->t[var1_a].len, cx->t[var1_a].s);
-			plx_emit_string_as_sql(cx, &cx->t[as[0]], o);
-			appendStringInfoString(o, " LOOP\n");
-		}
-		else
-		{
-			char	   *st = plx_span_text(cx, as[0], ae[0]);
-			char	   *sqlv = plx_rewrite_expr(cx, st, (int) strlen(st), false);
-			char	   *binds = plx_binds_text(cx, as, ae, n);
+			char	   *sqlv, *binds;
 
-			if (binds)
+			if (!plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+				appendStringInfo(o, "FOR %.*s IN %s LOOP\n",
+								 cx->t[var1_a].len, cx->t[var1_a].s, sqlv);
+			else if (binds)
 				appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
 								 cx->t[var1_a].len, cx->t[var1_a].s, sqlv, binds);
 			else
@@ -484,8 +478,10 @@ parse_begin(Ctx *cx, int ind)
 
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)
 	{
+		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos++;
 		ensure_body = capture_block(cx, ind + 1);
+		cx->ensuredepth--;
 	}
 
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
@@ -493,44 +489,7 @@ parse_begin(Ctx *cx, int ind)
 	else
 		plx_err(cx, bl, "unterminated begin block");
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
 }
 
 /* rewrite a comma-separated value list (for CASE WHEN v1, v2) */

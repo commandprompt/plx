@@ -54,6 +54,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - User guide: USERGUIDE.md
+  - Interpolation in SQL: DYNAMIC-SQL.md
   - Migrating to PostgreSQL: MIGRATION.md
   - Dialects:
       - Ruby (plxruby): plxruby.md
