@@ -32,7 +32,8 @@ expressions are passed through to plpgsql and SQL unchanged.
 Declare locals with `let`, `const`, or `var`; the keyword is removed in the
 generated plpgsql. plx infers the type from the first value when it is an
 integer, numeric, text, or boolean literal. Otherwise annotate the variable with
-a `/*:: type */` comment before the `;`.
+a `/*:: type */` comment before the `;`. An annotation before an initializer
+(`let n /*:: bigint */ = 3;`) is rejected; write `let n = 3 /*:: bigint */;`.
 
 ```sql
 let n = 42;             // inferred integer
@@ -41,7 +42,9 @@ let amount /*:: numeric */;
 amount = principal * rate;
 ```
 
-The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 let e /*:: emp%ROWTYPE */;

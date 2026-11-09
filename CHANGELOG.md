@@ -4,6 +4,26 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Security
+
+- A local variable's type is spliced into the plpgsql `DECLARE` section, and
+  plpgsql reads a declaration up to its `;`. A type annotation could therefore
+  carry an initializer or more statements. For example, `x #:: int := f()` or
+  `let x /*:: int DEFAULT f() */;` ran `f()` on entry, while the source showed
+  only a type, and in plxjs only a comment. Every type that reaches `DECLARE`
+  (annotations, plxts types, plxgo and plxtsql declarations, the plxcobol `TYPE`
+  clause) must now be a type name accepted by the SQL type-name grammar, or
+  `name%TYPE` / `name%ROWTYPE`. Anything else is rejected at `CREATE FUNCTION`.
+
+### Fixed
+
+- In plxjs and plxphp, a block annotation placed before an initializer
+  (`let n /*:: bigint */ = 3;`) silently dropped the initializer, so `n` was
+  NULL. That form is now rejected with a hint to write
+  `let n = 3 /*:: bigint */;`.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

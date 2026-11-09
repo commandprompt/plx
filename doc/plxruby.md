@@ -42,8 +42,9 @@ amount = principal * rate
 A first assignment of a constant literal at the top level is folded into the
 declaration, so `n = 42` becomes `DECLARE n integer := 42;`.
 
-The annotation text is emitted verbatim as the plpgsql type, so `%TYPE` and
-`%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 e #:: emp%ROWTYPE
