@@ -295,3 +295,13 @@ END $d$;
 -- (not called: plpgsql's own compile of 60,000 variables is slow, and is not plx's)
 SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
 RESET statement_timeout;
+-- a case with no matching when and no else does nothing
+CREATE FUNCTION rb_case_noelse(x int) RETURNS int LANGUAGE plxruby AS $$
+  r = 0
+  case x
+  when 1
+    r = 10
+  end
+  return r
+$$;
+SELECT rb_case_noelse(1), rb_case_noelse(2);

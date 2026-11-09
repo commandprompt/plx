@@ -415,3 +415,18 @@ SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
 (1 row)
 
 RESET statement_timeout;
+-- a case with no matching when and no else does nothing
+CREATE FUNCTION rb_case_noelse(x int) RETURNS int LANGUAGE plxruby AS $$
+  r = 0
+  case x
+  when 1
+    r = 10
+  end
+  return r
+$$;
+SELECT rb_case_noelse(1), rb_case_noelse(2);
+ rb_case_noelse | rb_case_noelse 
+----------------+----------------
+             10 |              0
+(1 row)
+

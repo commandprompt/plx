@@ -389,3 +389,17 @@ PROCEDURE DIVISION.
     GOBACK.
 $b$';
 EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- an EVALUATE with no matching WHEN and no WHEN OTHER does nothing
+CREATE FUNCTION cob_eval_noother(x int) RETURNS int LANGUAGE plxcobol AS $$
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01 R PIC 9(9) VALUE 0.
+PROCEDURE DIVISION.
+    EVALUATE X
+        WHEN 1
+            MOVE 10 TO R
+    END-EVALUATE
+    RETURN R.
+$$;
+SELECT cob_eval_noother(1), cob_eval_noother(2);

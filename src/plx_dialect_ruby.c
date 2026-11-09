@@ -589,6 +589,15 @@ parse_case(Ctx *cx, int ind)
 		cx->pos++;
 		parse_block(cx, ind + 2);
 	}
+	else
+	{
+		/* no default arm: falling through is a no-op in the source language, but a
+		 * plpgsql CASE with no match raises case_not_found */
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "ELSE\n");
+		plx_indent(o, ind + 2);
+		appendStringInfoString(o, "NULL;\n");
+	}
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
 		cx->pos++;
 	else

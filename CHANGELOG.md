@@ -73,6 +73,11 @@ PUBLIC has USAGE by default).
   second time from the error path. It now runs once.
 - plxpython3 `call(f"...")` emitted an unterminated quoted identifier. An
   f-string procedure name is now rejected.
+- A `switch` (plxjs, plxts, plxphp), `case` (plxruby) or `EVALUATE` (plxcobol)
+  with no default arm raised `case not found` when no arm matched, because a
+  plpgsql `CASE` statement without `ELSE` does. It now does nothing, as in the
+  source language. plxplsql keeps the error, which is also Oracle's behaviour.
+- plxgo `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
 
 ## [2.0.1] - 2026-08-25
 
