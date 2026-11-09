@@ -121,7 +121,11 @@ per-dialect branching in the driver.
   lowering, and implements `parse_body` by transforming `cx->body` into
   `cx->out`. The text-family dialects (`php`/`js`/`ts`) share a brace parser in
   `plx_parse_brace.c`; Ruby (keyword-`end`) and Python (indentation) parse on
-  top of the shared lexer inside their own translation units; and the
+  top of the shared lexer inside their own translation units; Lua parses on the
+  shared lexer too, with its lexemes switched on by surface flags, and installs
+  its own expression translator as the surface's `rewrite_expr` hook (and its
+  string decoder as `str_value`), so the shared intrinsics rewrite their
+  arguments as Lua; and the
   standalone dialects (COBOL, PL/SQL, T-SQL, Go) run their own tokenizer and
   emitter, calling back into the engine only for shared services.
 
@@ -148,6 +152,7 @@ src/plx_dialect_go.c          the plxgo surface + Go front end
 src/plx_dialect_cobol.c       the plxcobol surface + COBOL front end
 src/plx_dialect_plsql.c       the plxplsql surface + PL/SQL front end
 src/plx_dialect_tsql.c        the plxtsql surface + T-SQL front end
+src/plx_dialect_lua.c         the plxlua surface + Lua front end
 ```
 
 Everything links into a single `plx.so`. A dialect is a `PlxSurface` (including
@@ -222,4 +227,4 @@ instead of passing over it.
 - The per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
   [plxjs](plxjs.md), [plxts](plxts.md), [plxpython3](plxpython3.md),
   [plxgo](plxgo.md), [plxcobol](plxcobol.md), [plxplsql](plxplsql.md),
-  [plxtsql](plxtsql.md).
+  [plxtsql](plxtsql.md), [plxlua](plxlua.md).

@@ -42,6 +42,27 @@ the exceptions are cursors and transaction control, which plxtsql does not
 support.
 See [plxtsql.md](plxtsql.md).
 
+**plxlua** (Lua) is not shown as a separate column. It keeps Lua's
+keyword-`end` blocks and reaches each construct as follows: assignment
+`x = e`; `IF` as `if ... then ... elseif ... else ... end`; simple and searched
+`CASE` as `if`/`elseif` (footnote ¹); `LOOP` as `while true do` or
+`repeat ... until false`; `WHILE` as `while c do`; integer `FOR` as
+`for i = a, b [, step] do`; `FOR` over a query, static or dynamic, as
+`for r in query(sql, ...) do`; `FOREACH` as `for i, v in ipairs(arr) do`;
+`EXIT` and `CONTINUE` as `break` and `goto continue` with `::continue::` ending
+the body; a loop label as a `goto` to an outer loop's `::continue::` or to a
+label right after a loop; `RETURN` as `return e`; `RETURN NEXT` as `emit(v)`;
+`RETURN QUERY` as `return_query(sql)`; `PERFORM`, `EXECUTE`, `SELECT INTO`,
+cursors, `CALL`, `COMMIT` and `ROLLBACK` with the shared call-form intrinsics;
+`RAISE` as `error(m)`, `error{message = ..., sqlstate = ...}`,
+`raise("notice", m)` or `print(...)`; `ASSERT` as `assert(c, m)`; exception
+handling as `local ok, err = pcall(function() ... end)`, with a specific
+condition tested through `err.sqlstate`; `GET DIAGNOSTICS` as `row_count()`;
+`FOUND` as `found()`; `GET STACKED DIAGNOSTICS` as `err.detail`,
+`err.constraint`, ...; `CONSTANT` as `local x <const> = 5`; `%TYPE` and
+`%ROWTYPE` as `local e --:: t%ROWTYPE`; triggers as `NEW.col = e` and
+`return NEW`. Locals are block scoped. See [plxlua.md](plxlua.md).
+
 ## Control flow
 
 | plpgsql | plxruby | plxphp | plxjs | plxpython3 | plxcobol |
