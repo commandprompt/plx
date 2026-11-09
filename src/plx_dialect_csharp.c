@@ -1609,6 +1609,8 @@ struct CsNode
 	bool		is_path;		/* name or name.field chain */
 	bool		empty_coll;		/* [] or {} awaiting a declared array type */
 	bool		intlit;			/* N_TEXT: a non-negative integer literal */
+	int			tcap;			/* N_TEXT unknown name: allocated size of text (0:
+								 * not growable); slen holds its length */
 	const char *intrin;			/* fetch_one, query, ...: valid only on its own */
 	const char *name;			/* base variable (for loop analysis) */
 	int			line;
@@ -1951,6 +1953,37 @@ chain_add(CsP *P, CsNode *c, const char *op, CsNode *kid)
 }
 
 /*
+ * "a" + $"b{x}": string literals and interpolated strings joined by '+' become
+ * one interpolated string, so a SQL statement split across '+' is still a
+ * single template whose values are bound. The left operand is extended in
+ * place, so a long chain stays linear.
+ */
+static CsNode *
+str_join(CsP *P, CsNode *a, CsNode *b)
+{
+	CsNode	   *acc = a;
+	int			i;
+
+	if (a->k == N_STR)
+	{
+		acc = nd_new(P, N_FSTR, PR_ATOM, TY_TEXT);
+		acc->line = a->line;
+		nd_push(acc, a->sval, NULL, 0);
+	}
+	if (b->k == N_STR)
+		nd_push(acc, b->sval, NULL, 0);
+	else
+		for (i = 0; i < b->nitems; i++)
+		{
+			nd_push(acc, b->items[i].text, b->items[i].kid, b->items[i].minprec);
+			if (b->items[i].kid && b->items[i].kid->has_call)
+				acc->has_call = true;
+		}
+	acc->ty = TY_TEXT;
+	return acc;
+}
+
+/*
  * Combine left OP right, where OP is a C# binary operator. Operand types pick
  * the SQL operator: '+' on a string is '||', '&' on booleans is AND, and so
  * on. A chain of the same SQL precedence is extended in place, so a long
@@ -1973,6 +2006,9 @@ bin_step(CsP *P, CsNode *left, const char *op, CsNode *right)
 			if ((lt.k == TY_CHAR && (ty2.k == TY_CHAR || ty_numeric(ty2))) ||
 				(ty2.k == TY_CHAR && ty_numeric(lt)))
 				perr(P, "arithmetic on char values is not supported (C# would add character codes); convert with (int)c or concatenate strings");
+			if ((left->k == N_STR || left->k == N_FSTR) && !left->sealed &&
+				(right->k == N_STR || right->k == N_FSTR) && !right->sealed)
+				return str_join(P, left, right);
 			sqlop = "||";
 			prec = PR_OTHER;
 			rt = TY_TEXT;
@@ -3584,6 +3620,7 @@ parse_ident_primary(CsP *P)
 		CsNode	   *n = nd_text(P, pnstrdup(t->s, t->len), PR_ATOM, TY_UNK);
 
 		n->is_path = true;
+		n->slen = t->len;
 		return n;
 	}
 }
@@ -3633,6 +3670,36 @@ parse_primary(CsP *P)
 	return NULL;
 }
 
+/*
+ * Extend an unknown dotted name (a.b.c) in place. The text grows by doubling,
+ * so a long chain costs linear time and space rather than a copy per segment.
+ */
+static void
+path_append(CsNode *n, const char *m, int mlen)
+{
+	int			need = n->slen + 1 + mlen + 1;
+	char	   *buf = (char *) n->text;
+
+	if (need > n->tcap)
+	{
+		int			cap = Max(need, n->tcap * 2);
+
+		if (n->tcap)
+			buf = repalloc(buf, cap);
+		else
+		{
+			buf = palloc(cap);
+			memcpy(buf, n->text, n->slen);
+		}
+		n->tcap = cap;
+	}
+	buf[n->slen] = '.';
+	memcpy(buf + n->slen + 1, m, mlen);
+	n->slen += 1 + mlen;
+	buf[n->slen] = '\0';
+	n->text = buf;
+}
+
 static CsNode *
 parse_postfix(CsP *P)
 {
@@ -3658,7 +3725,8 @@ parse_postfix(CsP *P)
 			memset(&a, 0, sizeof(a));
 			if (call)
 				parse_args(P, &a);
-			if (n->k == N_TEXT && n->is_path && !n->intrin && n->ty.k == TY_UNKNOWN)
+			if (n->k == N_TEXT && n->is_path && !n->intrin && !n->sealed &&
+				n->ty.k == TY_UNKNOWN)
 			{
 				/* an unknown name: schema.function(...) or a qualified name */
 				if (call)
@@ -3670,10 +3738,7 @@ parse_postfix(CsP *P)
 					n = cn;
 				}
 				else
-				{
-					n = nd_text(P, psprintf("%s.%.*s", n->text, m->len, m->s), PR_ATOM, TY_UNK);
-					n->is_path = true;
-				}
+					path_append(n, m->s, m->len);
 				continue;
 			}
 			n = inst_member(P, n, m, call, &a);
@@ -3881,8 +3946,9 @@ parse_switch_expr(CsP *P, CsNode *subj)
 	expect(P, "}");
 	if (n == 0)
 		perr(P, "a switch expression needs at least one arm");
-	if (!simple && subj->k != N_IDENT && subj->k != N_TEXT && subj->k != N_STR)
-		perr(P, "a switch expression with null, relational or when patterns needs a variable as its subject");
+	/* the searched form repeats the subject in every arm, so it must be small */
+	if (!simple && subj->k != N_IDENT)
+		perr(P, "a switch expression with null, relational or when patterns needs a variable as its subject; store the value in a variable first");
 	out = nd_new(P, N_SEQ, PR_ATOM, rt.k == TY_NULL ? TY_UNK : rt);
 	nd_push(out, "CASE ", NULL, 0);
 	if (simple)
@@ -4066,6 +4132,7 @@ parse_expr(CsP *P)
 
 static void st_stmt(CsP *P);
 static void st_block(CsP *P);
+static void check_type_text(CsP *P, const char *t, bool in_code);
 
 /* a condition must be a bool in C#; refuse the obviously wrong ones */
 static void
@@ -4211,6 +4278,10 @@ render_se(CsP *P, CsSE *se)
 	CsNode	   *l = se->lhs;
 	CsNode	   *c;
 
+	/* x op= e reads the target and writes it: a call in it would run twice */
+	if (se->k != 0 && l->k != N_IDENT && l->has_call)
+		plx_err(P->cx, se->line,
+				"the target of a compound assignment cannot call a function; store the index in a variable first");
 	switch (se->k)
 	{
 		case 0:
@@ -4227,6 +4298,7 @@ render_se(CsP *P, CsSE *se)
 			{
 				if (l->ty.k != TY_ARRAY || !l->ty.sql)
 					plx_err(P->cx, se->line, "an empty collection needs a declared array type");
+				check_type_text(P, l->ty.sql, true);
 				c = nd_text(P, psprintf("ARRAY[]::%s", l->ty.sql), PR_CAST, l->ty);
 			}
 			else
@@ -4269,6 +4341,27 @@ render_se(CsP *P, CsSE *se)
 	out_node(P, c);
 }
 
+/*
+ * A type name reaches the normalized program from the C# source (checked by
+ * the parser) or from the catalog (a parameter's type, via format_type_be),
+ * which can hold any characters. In a type annotation it must not end the
+ * comment early; written as code it must be plain words.
+ */
+static void
+check_type_text(CsP *P, const char *t, bool in_code)
+{
+	const char *c;
+
+	for (c = t; *c; c++)
+	{
+		if ((unsigned char) *c < 0x20 || (c[0] == '*' && c[1] == '/') ||
+			(c[0] == '/' && c[1] == '*'))
+			perr(P, "the type %s cannot be used here; declare the variable with an explicit type", t);
+		if (in_code && !(cs_ident_char(*c) || strchr(" .,()[]", *c)))
+			perr(P, "the type %s cannot be used here; declare the variable with an explicit type", t);
+	}
+}
+
 static void
 emit_let(CsP *P, const char *name, CsNode *init, const char *sqlt, bool is_const)
 {
@@ -4286,8 +4379,37 @@ emit_let(CsP *P, const char *name, CsNode *init, const char *sqlt, bool is_const
 			out_s(P, ")");
 	}
 	if (sqlt)
+	{
+		check_type_text(P, sqlt, false);
 		appendStringInfo(P->o, " /*:: %s%s */", sqlt, is_const ? " const" : "");
+	}
 	out_s(P, ";");
+}
+
+/*
+ * A const is initialized in DECLARE, before any statement runs, so its value
+ * may use only literals, other constants and mapped constants (Math.PI), as
+ * C# requires anyway.
+ */
+static bool
+const_expr(CsP *P, CsNode *n)
+{
+	int			i;
+
+	check_stack_depth();
+	if (n->has_call)
+		return false;
+	if (n->k == N_IDENT)
+	{
+		CsSym	   *s = sym_find(P, n->text, (int) strlen(n->text));
+
+		if (!s || !s->is_const)
+			return false;
+	}
+	for (i = 0; i < n->nitems; i++)
+		if (n->items[i].kid && !const_expr(P, n->items[i].kid))
+			return false;
+	return true;
 }
 
 static void
@@ -4350,6 +4472,9 @@ decl_init(CsP *P, CsTok *nt, CsType *ti, CsNode *init, bool is_const)
 		emit_let(P, name, init, t.sql, false);
 		return;
 	}
+	if (is_const && !const_expr(P, init))
+		perr(P, "the value of const '%s' must be a constant expression (literals and other constants)",
+			 name);
 	sym_declare(P, nt, ti->ty, is_const, false);
 	emit_let(P, name, init, ti->ty.sql, is_const);
 }
@@ -4901,6 +5026,8 @@ st_for(CsP *P)
 			out_node(P, hi);
 			appendStringInfo(P->o, "; %s %s %s) ", vs->name, up ? "+=" : "-=", k);
 			appendBinaryStringInfo(P->o, body.data, body.len);
+			pfree(body.data);
+			pfree(pre.data);
 			return;
 		}
 	}
@@ -4919,6 +5046,8 @@ st_for(CsP *P)
 	}
 	out_s(P, ") ");
 	appendBinaryStringInfo(P->o, body.data, body.len);
+	pfree(body.data);
+	pfree(pre.data);
 }
 
 static void
@@ -5797,6 +5926,21 @@ s2_loop_body(Ctx *cx, CsS2 *S, int ind, CsLoop *fr)
 	return r;
 }
 
+/* a loop body written straight into the output, with its frame pushed */
+static void
+s2_loop_inline(Ctx *cx, CsS2 *S, int ind)
+{
+	CsLoop		fr;
+
+	memset(&fr, 0, sizeof(fr));
+	fr.outer = S->loops;
+	S->loops = &fr;
+	cx->loopdepth++;
+	(void) s2_block(cx, S, ind);
+	cx->loopdepth--;
+	S->loops = fr.outer;
+}
+
 static char *
 s2_flag(Ctx *cx, CsS2 *S, const char *kind)
 {
@@ -5856,17 +6000,14 @@ s2_while(Ctx *cx, CsS2 *S, int ind)
 	StringInfo	o = &cx->out;
 	int			a,
 				b;
-	char	   *cond,
-			   *body;
-	CsLoop		fr;
+	char	   *cond;
 
 	cx->pos++;
 	s2_paren(cx, &a, &b);
 	cond = s2_rw(cx, a, b);
-	body = s2_loop_body(cx, S, ind + 1, &fr);
 	plx_indent(o, ind);
 	appendStringInfo(o, "WHILE %s LOOP\n", cond);
-	appendStringInfoString(o, body);
+	s2_loop_inline(cx, S, ind + 1);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 	return false;
@@ -5923,6 +6064,7 @@ s2_do(Ctx *cx, CsS2 *S, int ind)
 		appendStringInfo(o, "%s := true;\n", flag);
 		appendStringInfoString(o, body);
 	}
+	pfree(body);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 	return false;
@@ -5943,10 +6085,8 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 			   *step;
 	char	   *lo,
 			   *hi,
-			   *k,
-			   *body;
+			   *k;
 	bool		down;
-	CsLoop		fr;
 
 	cx->pos++;
 	s2_paren(cx, &a, &b);
@@ -5964,7 +6104,6 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 	hi = s2_rw(cx, s1 + 3, s2);
 	k = s2_rw(cx, s2 + 3, b);
 	down = plx_tok_is(step, "-=");
-	body = s2_loop_body(cx, S, ind + 1, &fr);
 	plx_indent(o, ind);
 	appendStringInfo(o, "FOR %.*s IN %s%s..", v->len, v->s, down ? "REVERSE " : "", lo);
 	if (plx_tok_is(cmp, "<"))
@@ -5976,7 +6115,7 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 	if (strcmp(k, "1") != 0)
 		appendStringInfo(o, " BY %s", k);
 	appendStringInfoString(o, " LOOP\n");
-	appendStringInfoString(o, body);
+	s2_loop_inline(cx, S, ind + 1);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 	return false;
@@ -6029,21 +6168,37 @@ s2_genfor(Ctx *cx, CsS2 *S, int ind)
 	cond = s2_rw(cx, a, s1);
 	always = (strcmp(cond, "true") == 0);
 	nosteps = (s1 + 1 >= b);
-	body = s2_loop_body(cx, S, ind + 1, &fr);
-	if (nosteps || !fr.cont_used)
+	if (nosteps)
 	{
+		/* no iterators: the form is known before the body, so write in place */
+		plx_indent(o, ind);
+		if (always)
+			appendStringInfoString(o, "LOOP\n");
+		else
+			appendStringInfo(o, "WHILE %s LOOP\n", cond);
+		s2_loop_inline(cx, S, ind + 1);
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END LOOP;\n");
+		return false;
+	}
+	body = s2_loop_body(cx, S, ind + 1, &fr);
+	if (!fr.cont_used)
+	{
+		char	   *steps = s2_steps(cx, s1 + 1, b, ind + 1);
+
 		plx_indent(o, ind);
 		if (always)
 			appendStringInfoString(o, "LOOP\n");
 		else
 			appendStringInfo(o, "WHILE %s LOOP\n", cond);
 		appendStringInfoString(o, body);
-		if (!nosteps)
-			appendStringInfoString(o, s2_steps(cx, s1 + 1, b, ind + 1));
+		appendStringInfoString(o, steps);
+		pfree(steps);
 	}
 	else
 	{
 		char	   *flag = s2_flag(cx, S, "for");
+		char	   *steps = s2_steps(cx, s1 + 1, b, ind + 2);
 
 		plx_indent(o, ind);
 		appendStringInfo(o, "%s := false;\n", flag);
@@ -6051,7 +6206,8 @@ s2_genfor(Ctx *cx, CsS2 *S, int ind)
 		appendStringInfoString(o, "LOOP\n");
 		plx_indent(o, ind + 1);
 		appendStringInfo(o, "IF %s THEN\n", flag);
-		appendStringInfoString(o, s2_steps(cx, s1 + 1, b, ind + 2));
+		appendStringInfoString(o, steps);
+		pfree(steps);
 		plx_indent(o, ind + 1);
 		appendStringInfoString(o, "END IF;\n");
 		plx_indent(o, ind + 1);
@@ -6063,6 +6219,7 @@ s2_genfor(Ctx *cx, CsS2 *S, int ind)
 		}
 		appendStringInfoString(o, body);
 	}
+	pfree(body);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 	return false;
@@ -6078,8 +6235,6 @@ s2_foreach(Ctx *cx, CsS2 *S, int ind)
 				b,
 				ra;
 	Tok		   *v;
-	char	   *body;
-	CsLoop		fr;
 
 	cx->pos++;
 	s2_paren(cx, &a, &b);
@@ -6129,10 +6284,10 @@ s2_foreach(Ctx *cx, CsS2 *S, int ind)
 		appendStringInfo(&head, "FOREACH %.*s IN ARRAY %s LOOP\n", v->len, v->s,
 						 s2_rw(cx, ra, b));
 	}
-	body = s2_loop_body(cx, S, ind + 1, &fr);
 	plx_indent(o, ind);
 	appendStringInfoString(o, head.data);
-	appendStringInfoString(o, body);
+	pfree(head.data);
+	s2_loop_inline(cx, S, ind + 1);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 	return false;
@@ -6223,7 +6378,6 @@ s2_switch(Ctx *cx, CsS2 *S, int ind)
 		bool		is_default = false,
 					term;
 		int			nvals = 0;
-		char	   *body;
 
 		plx_skip_seps(cx);
 		if (s2_cur(cx)->kind == T_RBRACE)
@@ -6276,27 +6430,31 @@ s2_switch(Ctx *cx, CsS2 *S, int ind)
 			plx_err(cx, s2_cur(cx)->line, "a switch section must start with a case or default label");
 		if (is_default && has_default)
 			plx_err(cx, s2_cur(cx)->line, "a switch can have only one default section");
+		/* the section is written straight into its buffer, not copied */
 		saved = cx->out;
-		initStringInfo(&cx->out);
-		term = s2_arm(cx, S, ind + 2);
-		body = cx->out.data;
-		cx->out = saved;
-		plx_skip_seps(cx);
-		if (!term && s2_cur(cx)->kind != T_RBRACE)
-			plx_err(cx, s2_cur(cx)->line,
-					"control cannot fall through from one case to another; end the section with break, return, throw or continue");
 		if (is_default)
 		{
 			has_default = true;
-			appendStringInfoString(&dflt, body);
+			cx->out = dflt;
 		}
 		else
 		{
 			nwhen++;
 			plx_indent(&whens, ind + 1);
 			appendStringInfo(&whens, "WHEN %s THEN\n", vals.data);
-			appendStringInfoString(&whens, body);
+			cx->out = whens;
 		}
+		pfree(vals.data);
+		term = s2_arm(cx, S, ind + 2);
+		if (is_default)
+			dflt = cx->out;
+		else
+			whens = cx->out;
+		cx->out = saved;
+		plx_skip_seps(cx);
+		if (!term && s2_cur(cx)->kind != T_RBRACE)
+			plx_err(cx, s2_cur(cx)->line,
+					"control cannot fall through from one case to another; end the section with break, return, throw or continue");
 	}
 	S->loops = fr.outer;
 	if (fr.brk_used)
@@ -6327,6 +6485,8 @@ s2_switch(Ctx *cx, CsS2 *S, int ind)
 	}
 	else
 		appendStringInfoString(o, dflt.data);
+	pfree(whens.data);
+	pfree(dflt.data);
 	if (fr.brk_used)
 	{
 		plx_indent(o, ind);
@@ -6393,6 +6553,8 @@ s2_try(Ctx *cx, CsS2 *S, int ind)
 		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
 		appendStringInfoString(&arms, pfx);
 		appendStringInfoString(&arms, hb);
+		pfree(pfx);
+		pfree(hb);
 		nrescue++;
 		if (!term)
 			all = false;
@@ -6406,6 +6568,7 @@ s2_try(Ctx *cx, CsS2 *S, int ind)
 		if (term)
 			all = true;
 	}
+	/* plx_emit_try frees body, arms and ensure */
 	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure, fin);
 	return all;
 }
@@ -6577,6 +6740,12 @@ s2_typed_fetch(Ctx *cx, int a, int b, int ind)
 	return true;
 }
 
+/*
+ * Indentation stops growing past this many levels, so deeply nested input
+ * does not produce output that grows with the nesting depth times its size.
+ */
+#define S2_MAX_INDENT 24
+
 /* one statement; returns whether it always leaves (return/throw/break/continue) */
 static bool
 s2_stmt(Ctx *cx, CsS2 *S, int ind, bool top)
@@ -6587,6 +6756,8 @@ s2_stmt(Ctx *cx, CsS2 *S, int ind, bool top)
 	check_stack_depth();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, cx->t[cx->pos].line, "statements nested too deeply");
+	if (ind > S2_MAX_INDENT)
+		ind = S2_MAX_INDENT;
 	plx_skip_seps(cx);
 	tk = s2_cur(cx);
 	if (tk->kind == T_EOF || tk->kind == T_RBRACE)

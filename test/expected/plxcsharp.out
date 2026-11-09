@@ -694,6 +694,32 @@ SELECT cs_lookup('1'), cs_lookup($x$1' OR '1' = '1$x$) AS injection_blocked;
          3 |                 0
 (1 row)
 
+-- string literals and interpolated strings joined with + are one template,
+-- so a statement split across lines still binds its values
+CREATE FUNCTION cs_split(name text) RETURNS bigint LANGUAGE plxcsharp AS $$
+long n = fetch_one("SELECT count(*) " +
+                   "FROM cs_orders " +
+                   $"WHERE grp::text = '{name}'");
+return n;
+$$;
+SELECT cs_split('1'), cs_split($x$1' OR '1' = '1$x$) AS injection_blocked;
+ cs_split | injection_blocked 
+----------+-------------------
+        3 |                 0
+(1 row)
+
+SELECT cs_src('cs_split');
+                                             cs_src                                              
+-------------------------------------------------------------------------------------------------
+ DECLARE                                                                                        +
+   n bigint;                                                                                    +
+ BEGIN                                                                                          +
+   SELECT * INTO n FROM (SELECT count(*) FROM cs_orders WHERE grp::text = (name)) AS __plx_fo_1;+
+   RETURN n;                                                                                    +
+ END;                                                                                           +
+ 
+(1 row)
+
 -- fetch_one! raises when there is no row
 CREATE FUNCTION cs_strict(i int) RETURNS bigint LANGUAGE plxcsharp AS $$
 var r = fetch_one!($"SELECT amount FROM cs_orders WHERE id = {i}");
@@ -1088,6 +1114,12 @@ CREATE FUNCTION cs_bad29() RETURNS int LANGUAGE plxcsharp AS $$ int x = int.TryP
 ERROR:  plxcsharp: ref, out and in arguments are not supported
 CREATE FUNCTION cs_bad30() RETURNS int LANGUAGE plxcsharp AS $$ try { return 1; } catch (Exception e) when (e.Message.Contains("x")) { return 2; } $$;
 ERROR:  plxcsharp: a catch filter compares e.SqlState with a five-character SQLSTATE string or a PostgresErrorCodes name
+CREATE FUNCTION cs_bad32() RETURNS int LANGUAGE plxcsharp AS $$ int a = 1; const int B = a + 1; return B; $$;
+ERROR:  plxcsharp: the value of const 'B' must be a constant expression (literals and other constants)
+CREATE FUNCTION cs_bad33() RETURNS int LANGUAGE plxcsharp AS $$ int[] a = {1}; a[random_index()] += 1; return 1; $$;
+ERROR:  plxcsharp: the target of a compound assignment cannot call a function; store the index in a variable first
+CREATE FUNCTION cs_bad34() RETURNS int LANGUAGE plxcsharp AS $$ return "abc" switch { null => 0, _ => 1 }; $$;
+ERROR:  plxcsharp: a switch expression with null, relational or when patterns needs a variable as its subject; store the value in a variable first
 \set VERBOSITY default
 -- line numbers point at the C# source, also after a multi-line string
 CREATE FUNCTION cs_bad31() RETURNS int LANGUAGE plxcsharp AS $$
@@ -1212,5 +1244,25 @@ SELECT cs_try('return ' || repeat('a ? b : ', 3000) || 'c;');
             cs_try            
 ------------------------------
  plxcsharp: nested too deeply
+(1 row)
+
+-- long dotted names and deep nesting produce output linear in the input
+SELECT cs_try('int y = 0; y = q' || repeat('.a', 40000) || '; return 1;');
+ cs_try 
+--------
+ ok
+(1 row)
+
+SELECT cs_try('int y = 0; ' || repeat('try { ', 400) || 'if (y == 0) return "x";' || repeat(' y = 1;', 2000) ||
+              repeat(' } finally { y = 2; }', 400) || ' return "y";');
+ cs_try 
+--------
+ ok
+(1 row)
+
+SELECT length(prosrc) < 2000000 AS linear FROM pg_proc WHERE proname = 'cs_probe';
+ linear 
+--------
+ t
 (1 row)
 

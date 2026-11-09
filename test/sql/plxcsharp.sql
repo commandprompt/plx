@@ -340,6 +340,17 @@ return n;
 $$;
 SELECT cs_lookup('1'), cs_lookup($x$1' OR '1' = '1$x$) AS injection_blocked;
 
+-- string literals and interpolated strings joined with + are one template,
+-- so a statement split across lines still binds its values
+CREATE FUNCTION cs_split(name text) RETURNS bigint LANGUAGE plxcsharp AS $$
+long n = fetch_one("SELECT count(*) " +
+                   "FROM cs_orders " +
+                   $"WHERE grp::text = '{name}'");
+return n;
+$$;
+SELECT cs_split('1'), cs_split($x$1' OR '1' = '1$x$) AS injection_blocked;
+SELECT cs_src('cs_split');
+
 -- fetch_one! raises when there is no row
 CREATE FUNCTION cs_strict(i int) RETURNS bigint LANGUAGE plxcsharp AS $$
 var r = fetch_one!($"SELECT amount FROM cs_orders WHERE id = {i}");
@@ -573,6 +584,9 @@ CREATE FUNCTION cs_bad27() RETURNS int LANGUAGE plxcsharp AS $$ int x = 1; switc
 CREATE FUNCTION cs_bad28() RETURNS int LANGUAGE plxcsharp AS $$ public static int F() { return 1; } $$;
 CREATE FUNCTION cs_bad29() RETURNS int LANGUAGE plxcsharp AS $$ int x = int.TryParse("1", out var y); return 1; $$;
 CREATE FUNCTION cs_bad30() RETURNS int LANGUAGE plxcsharp AS $$ try { return 1; } catch (Exception e) when (e.Message.Contains("x")) { return 2; } $$;
+CREATE FUNCTION cs_bad32() RETURNS int LANGUAGE plxcsharp AS $$ int a = 1; const int B = a + 1; return B; $$;
+CREATE FUNCTION cs_bad33() RETURNS int LANGUAGE plxcsharp AS $$ int[] a = {1}; a[random_index()] += 1; return 1; $$;
+CREATE FUNCTION cs_bad34() RETURNS int LANGUAGE plxcsharp AS $$ return "abc" switch { null => 0, _ => 1 }; $$;
 \set VERBOSITY default
 -- line numbers point at the C# source, also after a multi-line string
 CREATE FUNCTION cs_bad31() RETURNS int LANGUAGE plxcsharp AS $$
@@ -604,3 +618,8 @@ SELECT cs_try('return ' || repeat('-', 3000) || '1;');
 SELECT cs_try('return (' || repeat('1 + ', 20000) || '1).ToString();');
 SELECT cs_try('string s = "";' || repeat(' s += "x";', 20000) || ' return s;');
 SELECT cs_try('return ' || repeat('a ? b : ', 3000) || 'c;');
+-- long dotted names and deep nesting produce output linear in the input
+SELECT cs_try('int y = 0; y = q' || repeat('.a', 40000) || '; return 1;');
+SELECT cs_try('int y = 0; ' || repeat('try { ', 400) || 'if (y == 0) return "x";' || repeat(' y = 1;', 2000) ||
+              repeat(' } finally { y = 2; }', 400) || ' return "y";');
+SELECT length(prosrc) < 2000000 AS linear FROM pg_proc WHERE proname = 'cs_probe';

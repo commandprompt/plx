@@ -78,7 +78,9 @@ numeric(10,2) amount = 0;       // a PostgreSQL type name works as written
 orders row;                     // so does a table row type
 ```
 
-Several declarators may share one statement (`int a = 1, b = 2;`).
+Several declarators may share one statement (`int a = 1, b = 2;`). A `const` is
+initialized before any statement runs, so its value must be a constant
+expression: literals, other constants, and mapped constants such as `Math.PI`.
 
 ### Type mapping
 
@@ -426,6 +428,19 @@ inject SQL. `ident(x)` splices a quoted identifier, `literal(x)` a quoted
 literal, and `raw(x)` trusted SQL text. A plain string is static SQL. See
 [DYNAMIC-SQL.md](DYNAMIC-SQL.md).
 
+String literals and interpolated strings joined with `+` are one template, so a
+statement split across lines still binds its values:
+
+```csharp
+long n = fetch_one("SELECT count(*) " +
+                   "FROM orders " +
+                   $"WHERE grp = {g}");
+```
+
+SQL built any other way (in a variable, with `string.Format`, or with `+` and a
+variable) is run as dynamic SQL text, exactly as written; pass values as bind
+arguments then: `execute(sql, a, b)`.
+
 ```sql
 CREATE TABLE orders (id int PRIMARY KEY, grp int, amount bigint);
 INSERT INTO orders VALUES (1, 1, 100), (2, 1, 250), (3, 1, 75), (4, 2, 500);
@@ -714,7 +729,8 @@ Rejected at `CREATE FUNCTION` time with a source line number:
   other than array initializers.
 - `goto`, labels, `lock`, `checked`/`unchecked`, `async`/`await`, and `yield` in
   anything but a set-returning function.
-- An assignment, `++` or `--` inside an expression (`x = y = 0`, `a[i++]`).
+- An assignment, `++` or `--` inside an expression (`x = y = 0`, `a[i++]`), and
+  a function call in the target of a compound assignment (`a[f()] += 1`).
 - `case` labels with patterns (`case int n:`, `case > 5:`, `case null:`, `when`
   guards, `or`/`and`); use stacked constant labels or `if`.
 - `is` and switch-expression patterns other than those listed above, and `as`.
