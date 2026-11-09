@@ -36,6 +36,8 @@ available today:
 - [**plxts**](plxts.md): a TypeScript dialect (plxjs plus type annotations)
 - [**plxpython3**](plxpython3.md): a Python dialect
 - [**plxgo**](plxgo.md): a Go dialect
+- [**plxcsharp**](plxcsharp.md): a C# dialect
+- [**plxlua**](plxlua.md): a Lua dialect
 - [**plxcobol**](plxcobol.md): a COBOL dialect (ISO/IEC 1989:2023)
 - [**plxplsql**](plxplsql.md): an Oracle PL/SQL dialect
 - [**plxtsql**](plxtsql.md): a Transact-SQL (SQL Server) dialect

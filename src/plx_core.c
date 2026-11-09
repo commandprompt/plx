@@ -377,4 +377,6 @@ _PG_init(void)
 	plx_register_dialect(&plx_ts_dialect);
 	plx_register_dialect(&plx_tsql_dialect);
 	plx_register_dialect(&plx_go_dialect);
+	plx_register_dialect(&plx_csharp_dialect);
+	plx_register_dialect(&plx_lua_dialect);
 }

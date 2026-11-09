@@ -1,0 +1,10 @@
+-- plxcsharp regression tests
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = warning;
+SELECT lanname, lanpltrusted FROM pg_language WHERE lanname = 'plxcsharp';
+  lanname  | lanpltrusted 
+-----------+--------------
+ plxcsharp | t
+(1 row)
+

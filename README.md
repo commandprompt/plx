@@ -4,8 +4,8 @@
 
 <p align="center">
   <b>Write PostgreSQL functions in the language you already know.</b><br>
-  Ruby, PHP, JavaScript, TypeScript, Python, Go, COBOL, Oracle PL/SQL, or
-  Transact-SQL syntax, compiled to plpgsql at <code>CREATE FUNCTION</code> time.
+  Ruby, PHP, JavaScript, TypeScript, Python, Go, C#, Lua, COBOL, Oracle PL/SQL,
+  or Transact-SQL syntax, compiled to plpgsql at <code>CREATE FUNCTION</code> time.
 </p>
 
 <p align="center">
@@ -47,6 +47,8 @@ dialects available today are:
 - `plxts`: a TypeScript dialect (plxjs plus type annotations). See [doc/plxts.md](doc/plxts.md).
 - `plxtsql`: a Transact-SQL (SQL Server) dialect. See [doc/plxtsql.md](doc/plxtsql.md).
 - `plxgo`: a Go dialect. See [doc/plxgo.md](doc/plxgo.md).
+- `plxcsharp`: a C# dialect. See [doc/plxcsharp.md](doc/plxcsharp.md).
+- `plxlua`: a Lua dialect. See [doc/plxlua.md](doc/plxlua.md).
 
 Every plpgsql statement type is reachable from every dialect. See
 [doc/PARITY.md](doc/PARITY.md) for the construct matrix. The language names carry
@@ -233,7 +235,8 @@ can be recovered from the function itself (see
 - Per-dialect chapters: [plxruby](doc/plxruby.md), [plxphp](doc/plxphp.md),
   [plxjs](doc/plxjs.md), [plxpython3](doc/plxpython3.md),
   [plxcobol](doc/plxcobol.md), [plxplsql](doc/plxplsql.md),
-  [plxts](doc/plxts.md), [plxtsql](doc/plxtsql.md), [plxgo](doc/plxgo.md). Each
+  [plxts](doc/plxts.md), [plxtsql](doc/plxtsql.md), [plxgo](doc/plxgo.md),
+  [plxcsharp](doc/plxcsharp.md), [plxlua](doc/plxlua.md). Each
   covers the full syntax, supported constructs with examples, semantic
   differences, and what is rejected.
 - [Cookbooks](doc/cookbook/index.md): verified, runnable recipes for each dialect
