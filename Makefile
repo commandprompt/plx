@@ -8,7 +8,7 @@ DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx-
 # pg_regress suite (make installcheck). test/run_corpus.py is an additional
 # Ruby corpus runner, and test/differential.py checks each dialect against a
 # plpgsql reference (make differentialcheck).
-REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_output plx_strbuild plx_errors
+REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_output plx_strbuild plx_errors plx_privileges
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Point at the source-built PG 18 (not any distro pg_config on PATH).

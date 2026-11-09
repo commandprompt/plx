@@ -4,6 +4,20 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Security
+
+- **Revoking plpgsql now revokes plx.** A plx function is stored and run as
+  plpgsql, but a role that kept USAGE on a plx language could still create
+  plpgsql functions and run DO blocks after
+  `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC` (for example with
+  `DO LANGUAGE plxplsql`, or a body that already carried the transpiled
+  header). `CREATE FUNCTION` and `DO` in a plx language now also require USAGE
+  on plpgsql, failing with `permission denied for language plpgsql`. As with
+  plpgsql, functions that already exist keep running, and superusers are
+  unaffected.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no
