@@ -256,7 +256,7 @@ SELECT js_ann_cond(3), js_ann_cond(-3);
 -- finally inside finally is capped (each level doubles the generated body)
 DO $d$ DECLARE s text := 'x = 1;'; BEGIN
   FOR i IN 1..12 LOOP s := 'try { x = x + 1; } finally { ' || s || ' }'; END LOOP;
-  EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x /*:: int */ = 0; '
+  EXECUTE 'CREATE FUNCTION js_fin_deep() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
     || s || ' return x; $b$';
 EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
 WARNING:  caught: plxjs: finally/ensure blocks nested too deeply inside one another
