@@ -135,6 +135,7 @@ int plx_stmt_end(Ctx *cx, int from);
 void plx_indent(StringInfo o, int n);
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+char *plx_ext_object(const char *name);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */

@@ -26,6 +26,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 #include "plx.h"
 #include "plx_int.h"
@@ -562,6 +563,23 @@ plx_is_param(Ctx *cx, const char *name, int len)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * An extension object's name as generated code should spell it: qualified
+ * with the extension's schema, so a function with its own SET search_path
+ * (the usual hardening for SECURITY DEFINER) still finds it, and an object
+ * of the same name earlier on the caller's path cannot stand in for it.
+ */
+char *
+plx_ext_object(const char *name)
+{
+	char	   *nsp = OidIsValid(plx_ext_namespace)
+		? get_namespace_name(plx_ext_namespace) : NULL;
+
+	if (!nsp)
+		return pstrdup(name);
+	return psprintf("%s.%s", quote_identifier(nsp), quote_identifier(name));
 }
 
 PlxLocal2 *
@@ -2298,13 +2316,14 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				l = plx_local_add(cx, t0->s, t0->len);
 			if (l->is_const)
 				plx_err(cx, t0->line, "cannot append to a constant");
-			l->typ = pstrdup("plx_strbuild");
+			l->typ = plx_ext_object("plx_strbuild");
 			rhs = plx_span_text(cx, app_rhs, rb);
 			r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
 			plx_indent(o, ind);
 			/* cast the appended value to text (int, numeric, etc. render) */
-			appendStringInfo(o, "%.*s := plx_sb_append(%.*s, (%s)::text);\n",
-							 t0->len, t0->s, t0->len, t0->s, r);
+			appendStringInfo(o, "%.*s := %s(%.*s, (%s)::text);\n",
+							 t0->len, t0->s, plx_ext_object("plx_sb_append"),
+							 t0->len, t0->s, r);
 			return;
 		}
 	}

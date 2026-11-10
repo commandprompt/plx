@@ -191,6 +191,16 @@ Then, in a database:
 CREATE EXTENSION plx;
 ```
 
+plx cannot be moved to another schema once created, so choose the schema at
+`CREATE EXTENSION plx SCHEMA ...` time. A function that appends to a string
+(`s << x`, `$s .= x`, `s += x`, `STRING-APPEND`) stores plx's schema name in its
+generated code. If such a function is restored into a database where plx is in
+a different schema (from a `pg_dump -n` of one schema, say), it fails when it
+runs with `schema "..." does not exist`. Install plx in the same schema in the
+target database, or run the function's DDL again there; its original source
+can be recovered from the function itself (see
+[DEBUGGING.md](doc/DEBUGGING.md#recover-your-original-source)).
+
 ## Documentation
 
 - Per-dialect chapters: [plxruby](doc/plxruby.md), [plxphp](doc/plxphp.md),
