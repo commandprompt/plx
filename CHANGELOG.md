@@ -8,7 +8,10 @@ version in `plx.control` (currently `1.0`).
 
 Extension version 2.1.0. Install the new build, then run
 `ALTER EXTENSION plx UPDATE` in each database. The update changes no SQL
-objects; it records the extension as non-relocatable (below).
+objects; it records the extension as non-relocatable (below). Run it straight
+after installing the build: until it runs, the new build already writes plx's
+schema into functions, but `ALTER EXTENSION plx SET SCHEMA` is still allowed and
+would break them.
 
 ### Security
 
@@ -31,6 +34,11 @@ objects; it records the extension as non-relocatable (below).
   `extension "plx" does not support SET SCHEMA`. Choose the schema at
   `CREATE EXTENSION plx SCHEMA ...` time. Existing functions keep the
   unqualified names they were generated with until their DDL is run again.
+  For the same reason, a function that uses a string append and is restored
+  into a database where plx is in a different schema (a `pg_dump -n` of one
+  schema, say) fails when it runs, with `schema "..." does not exist`: install
+  plx in the same schema in the target, or run the function's DDL again after
+  restoring. Functions without a string append are not affected.
 
 ## [2.0.1] - 2026-08-25
 
