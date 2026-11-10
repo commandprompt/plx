@@ -280,26 +280,46 @@ SELECT lua_repcont();
 (1 row)
 
 SELECT lua_src('lua_repcont');
-                     lua_src                      
---------------------------------------------------
- DECLARE                                         +
-   out public.plx_strbuild := '';                +
-   k integer := 0;                               +
- BEGIN                                           +
-   LOOP                                          +
-     <<__plx_rb_1>>                              +
-     BEGIN                                       +
-       k := k + 1;                               +
-       IF k = 2 THEN                             +
-         EXIT __plx_rb_1;                        +
-       END IF;                                   +
-       out := public.plx_sb_append(out, k::text);+
-     END;                                        +
-     EXIT WHEN k >= 4;                           +
-   END LOOP;                                     +
-   RETURN out;                                   +
- END;                                            +
+                    lua_src                     
+------------------------------------------------
+ DECLARE                                       +
+   out public.plx_strbuild := '';              +
+   k integer := 0;                             +
+ BEGIN                                         +
+   LOOP                                        +
+     <<__plx_rb_1>>                            +
+     BEGIN                                     +
+     k := k + 1;                               +
+     IF k = 2 THEN                             +
+       EXIT __plx_rb_1;                        +
+     END IF;                                   +
+     out := public.plx_sb_append(out, k::text);+
+     END;                                      +
+     EXIT WHEN k >= 4;                         +
+   END LOOP;                                   +
+   RETURN out;                                 +
+ END;                                          +
  
+(1 row)
+
+-- a multi-line string inside such a body keeps its value (the body used to be
+-- re-indented line by line, which added spaces inside the literal)
+CREATE FUNCTION lua_repcont_str() RETURNS bool LANGUAGE plxlua AS $$
+local i, r = 0, ""
+repeat
+  i = i + 1
+  if i == 1 then goto continue end
+  local row = fetch_one([[select 'a
+b' as v]])
+  r = row.v
+  ::continue::
+until i >= 2
+return r == "a\nb"
+$$;
+SELECT lua_repcont_str();
+ lua_repcont_str 
+-----------------
+ t
 (1 row)
 
 -- break out of an outer loop (a label right after it), continue an outer loop

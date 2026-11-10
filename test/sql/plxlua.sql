@@ -148,6 +148,22 @@ $$;
 SELECT lua_repcont();
 SELECT lua_src('lua_repcont');
 
+-- a multi-line string inside such a body keeps its value (the body used to be
+-- re-indented line by line, which added spaces inside the literal)
+CREATE FUNCTION lua_repcont_str() RETURNS bool LANGUAGE plxlua AS $$
+local i, r = 0, ""
+repeat
+  i = i + 1
+  if i == 1 then goto continue end
+  local row = fetch_one([[select 'a
+b' as v]])
+  r = row.v
+  ::continue::
+until i >= 2
+return r == "a\nb"
+$$;
+SELECT lua_repcont_str();
+
 -- break out of an outer loop (a label right after it), continue an outer loop
 CREATE FUNCTION lua_nested(n int) RETURNS text LANGUAGE plxlua AS $$
 local out = ""

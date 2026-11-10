@@ -3168,24 +3168,6 @@ lua_capture(Lua *L, int ind)
 	return r;
 }
 
-/* indent every line of s by one more level */
-static char *
-lua_reindent(const char *s)
-{
-	StringInfoData o;
-	bool		bol = true;
-
-	initStringInfo(&o);
-	for (; *s; s++)
-	{
-		if (bol && *s != '\n')
-			appendStringInfoString(&o, "  ");
-		appendStringInfoChar(&o, *s);
-		bol = (*s == '\n');
-	}
-	return o.data;
-}
-
 static bool
 lua_toplevel(Lua *L)
 {
@@ -3494,6 +3476,7 @@ lua_pcall(Lua *L, int ind, int pc, const char *okpg, const char *errpg)
 
 		initStringInfo(&cx->out);
 		appendStringInfoString(&cx->out, body);
+		pfree(body);
 		lua_pc_success(L, f, ind + 1);
 		body = cx->out.data;
 		cx->out = saved;
@@ -3511,6 +3494,7 @@ lua_pcall(Lua *L, int ind, int pc, const char *okpg, const char *errpg)
 	plx_indent(o, ind);
 	appendStringInfoString(o, "BEGIN\n");
 	appendStringInfoString(o, body);
+	pfree(body);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
 	if (f->pc_ok)
@@ -4235,6 +4219,7 @@ lua_while(Lua *L, int ind)
 	lua_scope_pop(L);
 	lua_loop_pop(L);
 	lua_loop_emit(L, ind, lp, psprintf("WHILE %s LOOP", c), NULL, body);
+	pfree(body);
 }
 
 static void
@@ -4274,15 +4259,21 @@ lua_repeat(Lua *L, int ind)
 		appendStringInfo(&full, "<<__plx_rb_%d>>\n", lp->id);
 		plx_indent(&full, ind + 1);
 		appendStringInfoString(&full, "BEGIN\n");
-		appendStringInfoString(&full, lua_reindent(body));
+		/*
+		 * Not re-indented: a newline inside a string literal in the body
+		 * would gain the indentation and change the value.
+		 */
+		appendStringInfoString(&full, body);
 		plx_indent(&full, ind + 1);
 		appendStringInfoString(&full, "END;\n");
 	}
 	else
 		appendStringInfoString(&full, body);
+	pfree(body);
 	plx_indent(&full, ind + 1);
 	appendStringInfo(&full, "EXIT WHEN %s;\n", c);
 	lua_loop_emit(L, ind, lp, "LOOP", NULL, full.data);
+	pfree(full.data);
 	cx->pos = ue;
 }
 
@@ -4400,6 +4391,7 @@ lua_numfor(Lua *L, int ind, int a, int dok)
 	lua_scope_pop(L);
 	lua_loop_pop(L);
 	lua_loop_emit(L, ind, lp, header, prologue, body);
+	pfree(body);
 }
 
 /* for names in iterator do ... end */
@@ -4559,6 +4551,7 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 	lua_scope_pop(L);
 	lua_loop_pop(L);
 	lua_loop_emit(L, ind, lp, header, prologue, body);
+	pfree(body);
 }
 
 static void
