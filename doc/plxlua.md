@@ -142,7 +142,7 @@ iteration.
 | `return e` | `RETURN e;` |
 | `return a, b` (OUT parameters) | assigns the OUT parameters, then `RETURN;` |
 | `emit(v)`, `return_next(v)` | `RETURN NEXT v;` |
-| `local ok, err = pcall(function() ... end)` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
+| `local ok, err = pcall(function() ... end)` | `BEGIN ... EXCEPTION WHEN OTHERS OR assert_failure THEN ... END;` |
 | `error("m")`, `error{message = ..., sqlstate = ...}` | `RAISE EXCEPTION ...` |
 | `assert(c, m)` | `ASSERT c, m;` |
 | `print(a, b)` | `RAISE NOTICE` |
@@ -526,7 +526,7 @@ BEGIN
     r := floor(a::numeric / b)::integer;
     ok := true;
     err := NULL;
-  EXCEPTION WHEN OTHERS THEN
+  EXCEPTION WHEN OTHERS OR assert_failure THEN
     ok := false;
     err := SQLERRM;
   END;
@@ -541,8 +541,10 @@ END;
 The forms are `local ok, err = pcall(...)` (or `local ok = ...`, or an
 assignment to existing variables), a bare `pcall(...)` statement that ignores
 the error, and `if pcall(...) then` / `if not pcall(...) then`. The function
-takes no parameters. A bare `return` inside it leaves the protected block
-successfully; returning a value is rejected, and so are `break` and `goto` out
+takes no parameters. As in Lua, `pcall` catches every error raised inside it,
+a failed `assert` included (plpgsql's `OTHERS` alone leaves that one out); a
+cancelled statement (a query cancel or `statement_timeout`) is not caught. A
+bare `return` inside it leaves the protected block successfully; returning a value is rejected, and so are `break` and `goto` out
 of it.
 
 `err` is the error message (`SQLERRM`), so it can be printed and concatenated.

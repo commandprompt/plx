@@ -1251,26 +1251,26 @@ SELECT lua_safediv(10, 3), lua_safediv(1, 0), lua_safediv(NULL, 2);
 (1 row)
 
 SELECT lua_src('lua_safediv');
-                 lua_src                  
-------------------------------------------
- DECLARE                                 +
-   r int;                                +
-   ok boolean;                           +
-   err text;                             +
- BEGIN                                   +
-   BEGIN                                 +
-     r := floor(a::numeric / b)::integer;+
-     ok := true;                         +
-     err := NULL;                        +
-   EXCEPTION WHEN OTHERS THEN            +
-     ok := false;                        +
-     err := SQLERRM;                     +
-   END;                                  +
-   IF NOT ok THEN                        +
-     RETURN -1;                          +
-   END IF;                               +
-   RETURN r;                             +
- END;                                    +
+                    lua_src                     
+------------------------------------------------
+ DECLARE                                       +
+   r int;                                      +
+   ok boolean;                                 +
+   err text;                                   +
+ BEGIN                                         +
+   BEGIN                                       +
+     r := floor(a::numeric / b)::integer;      +
+     ok := true;                               +
+     err := NULL;                              +
+   EXCEPTION WHEN OTHERS OR assert_failure THEN+
+     ok := false;                              +
+     err := SQLERRM;                           +
+   END;                                        +
+   IF NOT ok THEN                              +
+     RETURN -1;                                +
+   END IF;                                     +
+   RETURN r;                                   +
+ END;                                          +
  
 (1 row)
 
@@ -1307,7 +1307,7 @@ SELECT lua_src('lua_ins');
      ok := true;                                                                                                                                                                    +
      err := NULL;                                                                                                                                                                   +
      __plx_e1_sqlstate := NULL; __plx_e1_detail := NULL; __plx_e1_hint := NULL; __plx_e1_constraint := NULL;                                                                        +
-   EXCEPTION WHEN OTHERS THEN                                                                                                                                                       +
+   EXCEPTION WHEN OTHERS OR assert_failure THEN                                                                                                                                     +
      ok := false;                                                                                                                                                                   +
      err := SQLERRM;                                                                                                                                                                +
      GET STACKED DIAGNOSTICS __plx_e1_sqlstate = RETURNED_SQLSTATE, __plx_e1_detail = PG_EXCEPTION_DETAIL, __plx_e1_hint = PG_EXCEPTION_HINT, __plx_e1_constraint = CONSTRAINT_NAME;+
@@ -1345,6 +1345,20 @@ SELECT lua_caught('SELECT lua_ins(NULL)');
                                                       lua_caught                                                       
 -----------------------------------------------------------------------------------------------------------------------
  23502 null value in column "id" of relation "lua_uniq" violates not-null constraint / Failing row contains (null). / 
+(1 row)
+
+-- a failed assert is caught by pcall, as in Lua (OTHERS alone misses it)
+CREATE FUNCTION lua_pcassert(n int) RETURNS text LANGUAGE plxlua AS $$
+local ok, err = pcall(function()
+  assert(n > 0, "n must be positive")
+end)
+if ok then return "ok" end
+return err.sqlstate .. ": " .. err
+$$;
+SELECT lua_pcassert(1), lua_pcassert(0);
+ lua_pcassert |       lua_pcassert        
+--------------+---------------------------
+ ok           | P0004: n must be positive
 (1 row)
 
 -- if not pcall(...) then, a pcall statement, return inside the function,
@@ -1385,7 +1399,7 @@ SELECT lua_src('lua_pcforms');
    BEGIN                                                  +
      PERFORM * FROM (SELECT 1/0) AS __plx_p_1;            +
      __plx_ok_1 := true;                                  +
-   EXCEPTION WHEN OTHERS THEN                             +
+   EXCEPTION WHEN OTHERS OR assert_failure THEN           +
      __plx_ok_1 := false;                                 +
    END;                                                   +
    IF NOT __plx_ok_1 THEN                                 +
@@ -1393,7 +1407,7 @@ SELECT lua_src('lua_pcforms');
    END IF;                                                +
    BEGIN                                                  +
      EXECUTE 'INSERT INTO lua_uniq VALUES ($1)' USING 1;  +
-   EXCEPTION WHEN OTHERS THEN                             +
+   EXCEPTION WHEN OTHERS OR assert_failure THEN           +
      NULL;                                                +
    END;                                                   +
    <<__plx_pc_4>>                                         +
@@ -1405,7 +1419,7 @@ SELECT lua_src('lua_pcforms');
      EXECUTE 'INSERT INTO lua_uniq VALUES ($1)' USING 100;+
      RAISE EXCEPTION '%', 'negative';                     +
      ok := true;                                          +
-   EXCEPTION WHEN OTHERS THEN                             +
+   EXCEPTION WHEN OTHERS OR assert_failure THEN           +
      ok := false;                                         +
    END;                                                   +
    RETURN out::text || ',' || ok::text;                   +

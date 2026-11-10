@@ -3496,7 +3496,9 @@ lua_pcall(Lua *L, int ind, int pc, const char *okpg, const char *errpg)
 	appendStringInfoString(o, body);
 	pfree(body);
 	plx_indent(o, ind);
-	appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
+	/* OTHERS leaves out a failed ASSERT, which Lua's pcall catches like any
+	 * other error; a query cancel stays uncaught */
+	appendStringInfoString(o, "EXCEPTION WHEN OTHERS OR assert_failure THEN\n");
 	if (f->pc_ok)
 		lua_emit_assign(L, ind + 1, f->pc_ok, "false");
 	if (f->pc_err)

@@ -630,6 +630,16 @@ $$;
 SELECT lua_caught('SELECT lua_rethrow()');
 SELECT lua_caught('SELECT lua_ins(NULL)');
 
+-- a failed assert is caught by pcall, as in Lua (OTHERS alone misses it)
+CREATE FUNCTION lua_pcassert(n int) RETURNS text LANGUAGE plxlua AS $$
+local ok, err = pcall(function()
+  assert(n > 0, "n must be positive")
+end)
+if ok then return "ok" end
+return err.sqlstate .. ": " .. err
+$$;
+SELECT lua_pcassert(1), lua_pcassert(0);
+
 -- if not pcall(...) then, a pcall statement, return inside the function,
 -- and the database work of a failed call is rolled back
 CREATE FUNCTION lua_pcforms(n int) RETURNS text LANGUAGE plxlua AS $$
