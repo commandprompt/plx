@@ -184,3 +184,15 @@ for i in range(1, 10):
 return 0
 $$;
 SELECT py_fin_return(5);
+CREATE FUNCTION py_fin_label_reuse() RETURNS int LANGUAGE plxpython3 AS $$
+r = 0
+outer: for i in range(0, 2):
+    try:
+        outer: for j in range(0, 1):
+            r = r * 10 + 1
+        break outer
+    finally:
+        r = r * 10 + 9
+return r
+$$;
+SELECT py_fin_label_reuse();   -- 19

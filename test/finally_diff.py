@@ -55,8 +55,9 @@ def run_py(body):
     exec(src, ns)
     try:
         return str(ns["f"]())
-    except ValueError:
-        return "ERROR"
+    except ValueError as e:
+        # plx raises it as P0001 with the same message
+        return f"ERROR P0001:{e}"
 cases = []
 for n in range(N):
     body = prog()
@@ -65,7 +66,7 @@ sql = ["SET client_min_messages = warning;"]
 for n, body, _ in cases:
     b = "\n".join(body)
     sql.append(f"CREATE OR REPLACE FUNCTION fd{n}() RETURNS bigint LANGUAGE plxpython3 AS $plx$\nacc #:: bigint\n{b}\n$plx$;")
-    sql.append(f"DO $d$ BEGIN RAISE WARNING 'R{n}=%', fd{n}(); EXCEPTION WHEN OTHERS THEN RAISE WARNING 'R{n}=ERROR %', SQLERRM; END $d$;")
+    sql.append(f"DO $d$ BEGIN RAISE WARNING 'R{n}=%', fd{n}(); EXCEPTION WHEN OTHERS THEN RAISE WARNING 'R{n}=ERROR %:%', SQLSTATE, SQLERRM; END $d$;")
 r = subprocess.run([os.environ.get("PLX_PSQL", "psql"), "-q", "-X"], input="\n".join(sql),
                    capture_output=True, text=True)
 got = {}
@@ -78,8 +79,7 @@ other = [l for l in r.stderr.splitlines() if "WARNING" not in l]
 bad = 0
 for n, body, exp in cases:
     g = got.get(n, "MISSING")
-    gg = "ERROR" if g.startswith("ERROR") else g
-    if gg != exp:
+    if g != exp:
         bad += 1
         if bad <= 3:
             print(f"--- case {n}: python={exp} plx={g}\n" + "\n".join(body))

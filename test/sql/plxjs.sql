@@ -187,11 +187,19 @@ SELECT js_fin_deep(), length(prosrc) < 200000 AS linear FROM pg_proc WHERE prona
 -- stays linear in the source (indentation is capped), and each level's text is
 -- freed once emitted (it used to be kept, which took 3.6 GB at 490 levels)
 DO $d$ DECLARE s text := 'x = 1;'; BEGIN
-  FOR i IN 1..300 LOOP s := 'try { if (x > 5) { return 1; } ' || s || ' } finally { x = x + 1; }'; END LOOP;
-  EXECUTE 'CREATE FUNCTION js_fin_ret_deep() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
-    || s || ' return x; $b$';
+  FOR i IN 1..300 LOOP
+    s := 'try { if (x > 5) { return 1; } ' || s || ' } finally { x = x + 1; }';
+    IF i IN (150, 300) THEN
+      EXECUTE 'CREATE FUNCTION js_fin_ret_deep' || i || '() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
+        || s || ' return x; $b$';
+    END IF;
+  END LOOP;
 END $d$;
-SELECT js_fin_ret_deep(), length(prosrc) < 1200000 AS linear FROM pg_proc WHERE proname = 'js_fin_ret_deep';
+-- twice the depth gives about twice the code (2.06 times: the first levels are
+-- less indented); growing indentation made it over three times
+SELECT js_fin_ret_deep300(),
+       (SELECT length(prosrc) FROM pg_proc WHERE proname = 'js_fin_ret_deep300') <
+       2.5 * (SELECT length(prosrc) FROM pg_proc WHERE proname = 'js_fin_ret_deep150') AS linear;
 
 -- a finally body that throws runs once, not again from the error path
 DO LANGUAGE plxjs $p$
@@ -241,6 +249,20 @@ CREATE FUNCTION js_fin_label() RETURNS int LANGUAGE plxjs AS $$
   return n;
 $$;
 SELECT js_fin_label();    -- 22
+-- a loop label reused inside the try still crosses the finally: a break or
+-- continue resolves to the enclosing loop once the inner one has closed
+CREATE FUNCTION js_fin_label_reuse(c bool) RETURNS int LANGUAGE plxjs AS $$
+  let r = 0;
+  outer: for (let i = 0; i < 2; i++) {
+    try {
+      outer: for (let j = 0; j < 1; j++) { r = r * 10 + 1; }
+      if (c) { continue outer; }
+      break outer;
+    } finally { r = r * 10 + 9; }
+  }
+  return r;
+$$;
+SELECT js_fin_label_reuse(false), js_fin_label_reuse(true);   -- 19, 1919
 -- an error is re-raised after finally with its SQLSTATE, detail and hint
 CREATE FUNCTION js_fin_fail() RETURNS int LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION USING ERRCODE = '22012', MESSAGE = 'boom', DETAIL = 'd1', HINT = 'h1'; END $$;
@@ -251,6 +273,26 @@ DO $d$ DECLARE st text; dt text; ht text; BEGIN PERFORM js_fin_err();
 EXCEPTION WHEN OTHERS THEN
   GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, dt = PG_EXCEPTION_DETAIL, ht = PG_EXCEPTION_HINT;
   RAISE WARNING 'caught: % % % %', st, SQLERRM, dt, ht;
+END $d$;
+-- ... and with the names of the objects it is about (table, constraint, type)
+CREATE TABLE js_fin_objt (id int CONSTRAINT js_fin_objt_pk PRIMARY KEY);
+INSERT INTO js_fin_objt VALUES (1);
+CREATE DOMAIN js_fin_pos AS int CONSTRAINT js_fin_pos_ck CHECK (VALUE > 0);
+CREATE FUNCTION js_fin_objs(k int) RETURNS void LANGUAGE plxjs AS $$
+  try {
+    if (k == 1) { execute("INSERT INTO js_fin_objt VALUES (1)"); }
+    else { execute("SELECT (-1)::js_fin_pos"); }
+  } finally { let z = 1; }
+$$;
+DO $d$ DECLARE st text; sc text; tb text; co text; ty text; cl text; BEGIN
+  FOR k IN 1..2 LOOP
+    BEGIN PERFORM js_fin_objs(k);
+    EXCEPTION WHEN OTHERS THEN
+      GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, sc = SCHEMA_NAME, tb = TABLE_NAME,
+        co = CONSTRAINT_NAME, ty = PG_DATATYPE_NAME, cl = COLUMN_NAME;
+      RAISE WARNING 'caught %: schema=% table=% constraint=% type=% column=%', st, sc, tb, co, ty, cl;
+    END;
+  END LOOP;
 END $d$;
 -- a return in finally replaces the error; a return from catch runs finally
 CREATE FUNCTION js_fin_override() RETURNS int LANGUAGE plxjs AS $$

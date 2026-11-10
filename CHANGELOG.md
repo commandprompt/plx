@@ -72,12 +72,18 @@ PUBLIC has USAGE by default).
   finally body is now emitted once: an exit from the try (or from a catch arm)
   records which exit is pending, leaves the block, runs the finally body, then
   completes the exit; an error is caught, the finally body runs, and the error
-  is re-raised with its SQLSTATE, message, detail and hint. A `return` or an
-  error in the finally body replaces the pending exit or error, as in the
-  source languages. Behaviour difference to be aware of: an error re-raised
-  after `finally` carries the location of the re-raise in its `CONTEXT`, not
-  the original statement's. Only functions created or replaced after upgrading
-  are affected; stored functions keep the plpgsql they were created with.
+  is re-raised with its SQLSTATE, message, detail, hint and object names
+  (schema, table, column, constraint, type). A `return` or an error in the
+  finally body replaces the pending exit or error, as in the source languages.
+  Behaviour differences to be aware of: an error re-raised after `finally`
+  carries the location of the re-raise in its `CONTEXT`, not the original
+  statement's; when it names any object, the object names it does not have
+  are sent as empty fields rather than left out (psql shows them in verbose
+  mode). As before, the finally body does not run when the statement is
+  cancelled (a query cancel or `statement_timeout`) or an `assert` fails:
+  `WHEN OTHERS` does not catch those two errors. Only functions created or
+  replaced after upgrading are affected; stored functions keep the plpgsql
+  they were created with.
 
 ### Fixed
 

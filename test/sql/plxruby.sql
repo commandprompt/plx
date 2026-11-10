@@ -304,3 +304,18 @@ CREATE FUNCTION rb_ensure_return(x int) RETURNS int LANGUAGE plxruby AS $$
   end
 $$;
 SELECT rb_ensure_return(4);
+CREATE FUNCTION rb_ensure_label_reuse() RETURNS int LANGUAGE plxruby AS $$
+  r = 0
+  outer: for i in 0..1
+    begin
+      outer: for j in 0..0
+        r = r * 10 + 1
+      end
+      break outer
+    ensure
+      r = r * 10 + 9
+    end
+  end
+  return r
+$$;
+SELECT rb_ensure_label_reuse();   -- 19

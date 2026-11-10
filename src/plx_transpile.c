@@ -1852,9 +1852,11 @@ fin_resolve(Ctx *cx, PlxFin *f, const char *s, bool routed, int *ncodes)
  *   IF __plx_pend_N = 1 THEN RETURN __plx_ret; ELSIF ... END IF;
  *
  * So the finally body runs on normal completion, on an error (which is then
- * re-raised with its SQLSTATE, message, detail and hint), and on a return,
- * break or continue out of the try. An error raised by the finally body, or a
- * return from it, replaces the pending one, as in the source languages.
+ * re-raised with its SQLSTATE, message, detail, hint and object names), and
+ * on a return, break or continue out of the try. An error raised by the
+ * finally body, or a return from it, replaces the pending one, as in the
+ * source languages. It does not run on a query cancel or a failed ASSERT,
+ * which WHEN OTHERS does not catch.
  *
  * body, arms and ensure_body (NULL when there is no finally) must be palloc'd;
  * this function frees them. Each nesting level holds the text of every level
@@ -1875,10 +1877,11 @@ plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 	if (fin)
 	{
 		PlxLocal2  *l;
-		static const char *const errv[] = {"es", "em", "ed", "eh"};
+		static const char *const errv[] = {"es", "em", "ed", "eh", "ecol",
+		"econ", "etyp", "etab", "esch"};
 		int			i;
 
-		for (i = 0; i < 4; i++)
+		for (i = 0; i < lengthof(errv); i++)
 		{
 			char	   *nm = psprintf("__plx_%s_%d", errv[i], f->id);
 
@@ -1924,32 +1927,77 @@ plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 	plx_indent(o, ind);
 	appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
 	plx_indent(o, ind + 1);
-	appendStringInfo(o, "GET STACKED DIAGNOSTICS __plx_es_%d = RETURNED_SQLSTATE, "
-					 "__plx_em_%d = MESSAGE_TEXT, __plx_ed_%d = PG_EXCEPTION_DETAIL, "
-					 "__plx_eh_%d = PG_EXCEPTION_HINT;\n", f->id, f->id, f->id, f->id);
+	appendStringInfo(o, "GET STACKED DIAGNOSTICS __plx_es_%1$d = RETURNED_SQLSTATE, "
+					 "__plx_em_%1$d = MESSAGE_TEXT, __plx_ed_%1$d = PG_EXCEPTION_DETAIL, "
+					 "__plx_eh_%1$d = PG_EXCEPTION_HINT, __plx_ecol_%1$d = COLUMN_NAME, "
+					 "__plx_econ_%1$d = CONSTRAINT_NAME, __plx_etyp_%1$d = PG_DATATYPE_NAME, "
+					 "__plx_etab_%1$d = TABLE_NAME, __plx_esch_%1$d = SCHEMA_NAME;\n",
+					 f->id);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END;\n");
 	appendStringInfoString(o, ensure_body);
 	pfree(ensure_body);
 
-	/* re-raise; a RAISE option may not be NULL, and '' would print an empty line */
+	/*
+	 * Re-raise. A RAISE option may not be NULL, and an empty one is not the
+	 * same as an absent one: an empty DETAIL or HINT prints an empty line,
+	 * and an empty object name is sent to the client as a present field (psql
+	 * prints it in verbose mode). Absent fields come back from GET STACKED
+	 * DIAGNOSTICS as '', so pass each group only when it is non-empty: DETAIL
+	 * and HINT each, and the five object names as one group, which keeps this
+	 * to eight RAISEs. The cost: an error that names some objects (a unique
+	 * violation names the schema, table and constraint) is re-raised with the
+	 * others present but empty.
+	 */
 	plx_indent(o, ind);
 	appendStringInfo(o, "IF __plx_es_%d IS NOT NULL THEN\n", f->id);
 	plx_indent(o, ind + 1);
-	appendStringInfo(o, "IF __plx_ed_%1$d <> '' AND __plx_eh_%1$d <> '' THEN "
-					 "RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, MESSAGE = __plx_em_%1$d, "
-					 "DETAIL = __plx_ed_%1$d, HINT = __plx_eh_%1$d;\n", f->id);
-	plx_indent(o, ind + 1);
-	appendStringInfo(o, "ELSIF __plx_ed_%1$d <> '' THEN "
-					 "RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, MESSAGE = __plx_em_%1$d, "
-					 "DETAIL = __plx_ed_%1$d;\n", f->id);
-	plx_indent(o, ind + 1);
-	appendStringInfo(o, "ELSIF __plx_eh_%1$d <> '' THEN "
-					 "RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, MESSAGE = __plx_em_%1$d, "
-					 "HINT = __plx_eh_%1$d;\n", f->id);
-	plx_indent(o, ind + 1);
-	appendStringInfo(o, "ELSE RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, "
-					 "MESSAGE = __plx_em_%1$d;\n", f->id);
+	appendStringInfo(o, "IF __plx_ecol_%1$d || __plx_econ_%1$d || __plx_etyp_%1$d || "
+					 "__plx_etab_%1$d || __plx_esch_%1$d <> '' THEN\n", f->id);
+	{
+		int			k;
+
+		for (k = 7; k >= 0; k--)
+		{
+			bool		obj = (k & 4) != 0,
+						det = (k & 2) != 0,
+						hnt = (k & 1) != 0;
+
+			if (k == 3)
+			{
+				plx_indent(o, ind + 1);
+				appendStringInfoString(o, "ELSE\n");
+			}
+			plx_indent(o, ind + 2);
+			if ((k & 3) == 0)
+				appendStringInfoString(o, "ELSE ");
+			else
+			{
+				appendStringInfoString(o, (k & 3) == 3 ? "IF " : "ELSIF ");
+				if (det)
+					appendStringInfo(o, "__plx_ed_%d <> ''%s", f->id, hnt ? " AND " : "");
+				if (hnt)
+					appendStringInfo(o, "__plx_eh_%d <> ''", f->id);
+				appendStringInfoString(o, " THEN ");
+			}
+			appendStringInfo(o, "RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, "
+							 "MESSAGE = __plx_em_%1$d", f->id);
+			if (det)
+				appendStringInfo(o, ", DETAIL = __plx_ed_%d", f->id);
+			if (hnt)
+				appendStringInfo(o, ", HINT = __plx_eh_%d", f->id);
+			if (obj)
+				appendStringInfo(o, ", COLUMN = __plx_ecol_%1$d, CONSTRAINT = __plx_econ_%1$d, "
+								 "DATATYPE = __plx_etyp_%1$d, TABLE = __plx_etab_%1$d, "
+								 "SCHEMA = __plx_esch_%1$d", f->id);
+			appendStringInfoString(o, ";\n");
+			if ((k & 3) == 0)
+			{
+				plx_indent(o, ind + 2);
+				appendStringInfoString(o, "END IF;\n");
+			}
+		}
+	}
 	plx_indent(o, ind + 1);
 	appendStringInfoString(o, "END IF;\n");
 	plx_indent(o, ind);

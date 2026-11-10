@@ -258,3 +258,20 @@ WARNING:  py finally 3
             15
 (1 row)
 
+CREATE FUNCTION py_fin_label_reuse() RETURNS int LANGUAGE plxpython3 AS $$
+r = 0
+outer: for i in range(0, 2):
+    try:
+        outer: for j in range(0, 1):
+            r = r * 10 + 1
+        break outer
+    finally:
+        r = r * 10 + 9
+return r
+$$;
+SELECT py_fin_label_reuse();   -- 19
+ py_fin_label_reuse 
+--------------------
+                 19
+(1 row)
+
