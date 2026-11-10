@@ -97,6 +97,8 @@ typedef struct PlxCtx
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		diag_msg;		/* rewriting a RAISE message: interpolate NULL as '' */
+	int			ninterp;		/* string interpolations rendered so far; an
+								 * interpolating initializer is not folded */
 	bool		retset;
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;

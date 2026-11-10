@@ -143,3 +143,42 @@ rescue => e
 end
 $$;
 SELECT f_strict() AS strict_no_row;
+
+-- a first assignment from an interpolated string is not folded into DECLARE:
+-- the initializer would run when the function starts and read the old value
+CREATE FUNCTION f_fold_js() RETURNS text LANGUAGE plxjs AS $$
+let v = "v0";
+v = "v2";
+let s = `got ${v}`;
+return s;
+$$;
+CREATE FUNCTION f_fold_py() RETURNS text LANGUAGE plxpython3 AS $$
+v = "v0"
+v = "v2"
+s = f"got {v}"
+return s
+$$;
+CREATE FUNCTION f_fold_rb() RETURNS text LANGUAGE plxruby AS $$
+v = "v0"
+v = "v2"
+s = "got #{v}"
+return s
+$$;
+CREATE FUNCTION f_fold_php() RETURNS text LANGUAGE plxphp AS $$
+$v = "v0";
+$v = "v2";
+$s = "got $v";
+return $s;
+$$;
+SELECT f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php();
+-- a plain literal is still folded; a constant may use parameters and earlier
+-- constants
+CREATE FUNCTION f_fold_const(n int) RETURNS text LANGUAGE plxruby AS $$
+k = 10 #:: int const
+c = "n=#{n} k=#{k}" #:: text const
+s = "plain"
+return "#{c} #{s}"
+$$;
+SELECT f_fold_const(5);
+SELECT regexp_replace(prosrc, '/\*plx-orig.*', '') FROM pg_proc WHERE proname = 'f_fold_const';
+DROP FUNCTION f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php(), f_fold_const(int);

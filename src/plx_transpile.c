@@ -776,6 +776,7 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 				need_e = false;
 			}
 			rw = plx_rewrite_expr(cx, exs, exl, false);
+			cx->ninterp++;
 			s = nx;
 			if (nparts++)
 				appendStringInfoString(out, " || ");
@@ -1499,6 +1500,102 @@ const_literal_type(Ctx *cx, int a, int b)
 			return NULL;
 		default: return NULL;
 	}
+}
+
+/*
+ * The first local variable, other than a constant declared before self, that
+ * the generated SQL expression text reads; NULL when there is none. String
+ * literals, quoted identifiers, field names (after '.') and type names (after
+ * '::') are skipped. Used to reject a constant whose initializer reads a
+ * variable: the initializer runs when the function starts, so it would see
+ * the variable's initial value, not the one the source shows.
+ */
+static const char *
+first_local_ref(Ctx *cx, const char *s, PlxLocal2 *self)
+{
+	char		prev = 0;		/* last significant character before a word */
+	bool		after_cast = false;
+
+	while (*s)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (*s == '\'' || ((*s == 'E' || *s == 'e') && s[1] == '\''))
+		{
+			bool		esc = (*s != '\'');
+
+			s += esc ? 2 : 1;
+			while (*s)
+			{
+				if (esc && *s == '\\' && s[1])
+					s += 2;
+				else if (*s == '\'' && s[1] == '\'')
+					s += 2;
+				else if (*s == '\'')
+				{
+					s++;
+					break;
+				}
+				else
+					s++;
+			}
+			prev = '\'';
+			after_cast = false;
+			continue;
+		}
+		if (*s == '"')
+		{
+			for (s++; *s; s++)
+				if (*s == '"')
+				{
+					if (s[1] != '"')
+					{
+						s++;
+						break;
+					}
+					s++;
+				}
+			prev = '"';
+			continue;
+		}
+		if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_' ||
+			IS_HIGHBIT_SET(*s))
+		{
+			const char *w = s;
+			PlxLocal2  *l;
+
+			while ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+				   (*s >= '0' && *s <= '9') || *s == '_' || *s == '$' ||
+				   IS_HIGHBIT_SET(*s))
+				s++;
+			if (prev != '.' && !after_cast &&
+				(l = plx_local_find(cx, w, (int) (s - w))) != NULL &&
+				l != self && !l->is_const)
+				return l->name;
+			prev = 'a';
+			after_cast = false;
+			continue;
+		}
+		if (*s == ':' && s[1] == ':')
+		{
+			after_cast = true;
+			s += 2;
+			continue;
+		}
+		if (*s >= '0' && *s <= '9')
+		{
+			while ((*s >= '0' && *s <= '9') || *s == '.' || *s == 'e' || *s == 'E')
+				s++;
+			prev = '0';
+			continue;
+		}
+		if (*s != ' ' && *s != '\t' && *s != '\n' && *s != '\r')
+		{
+			prev = *s;
+			after_cast = false;
+		}
+		s++;
+	}
+	return NULL;
 }
 
 /* ---------------------------------------------------------------- indent */
@@ -2441,6 +2538,14 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 					plx_err(cx, t0->line, "constant \"%.*s\" requires a type annotation", t0->len, t0->s);
 				l->is_const = true;
 				l->init = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+				{
+					const char *v = first_local_ref(cx, l->init, l);
+
+					if (v)
+						plx_err(cx, t0->line,
+								"constant \"%.*s\" cannot use local variable \"%s\": a constant's value is computed when the function starts",
+								t0->len, t0->s, v);
+				}
 				return;
 			}
 
@@ -2448,11 +2553,25 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			if (toplevel && firstseen && !compound && littyp && !l->is_record)
 			{
 				char	   *rhs = plx_span_text(cx, rhs_a, rhs_b);
+				int			ninterp = cx->ninterp;
+				char	   *r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
 
 				if (!l->typ)
 					l->typ = pstrdup(littyp);
-				l->init = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
-				return;			/* statement folded into DECLARE; emit nothing */
+				/*
+				 * A DECLARE initializer runs when the function starts, before
+				 * the statements above this one. An interpolated string would
+				 * read its values (or call its functions) then, so it is
+				 * assigned here instead.
+				 */
+				if (cx->ninterp == ninterp)
+				{
+					l->init = r;
+					return;		/* statement folded into DECLARE; emit nothing */
+				}
+				plx_indent(o, ind);
+				appendStringInfo(o, "%.*s := %s;\n", t0->len, t0->s, r);
+				return;
 			}
 			/* otherwise infer type if still unknown */
 			if (!l->typ && littyp)

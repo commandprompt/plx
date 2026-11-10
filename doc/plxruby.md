@@ -56,6 +56,11 @@ A constant uses the `const` suffix on the annotation:
 pi = 3.14159 #:: numeric const
 ```
 
+A constant becomes a plpgsql `CONSTANT`, whose value is computed when the
+function starts. So it can use literals, parameters and earlier constants, but
+not another local variable: that would read the variable's initial value, not
+the one assigned above it, and is rejected.
+
 ## Control flow
 
 ### if / elsif / else, unless

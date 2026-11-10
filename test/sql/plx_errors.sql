@@ -294,3 +294,18 @@ END $outer$;
 CREATE FUNCTION e_js_hex_overflow() RETURNS numeric LANGUAGE plxjs AS $$
 return 0xFFFFFFFFFFFFFFFFFF;
 $$;
+
+-- a constant's initializer runs when the function starts, so it cannot read a
+-- local variable (it would see the initial value, not the one assigned above)
+CREATE FUNCTION e_rb_const_local() RETURNS int LANGUAGE plxruby AS $$
+v = 1
+v = 2
+c = v + 1 #:: int const
+return c
+$$;
+CREATE FUNCTION e_js_const_interp() RETURNS text LANGUAGE plxjs AS $$
+let v = "a";
+v = "b";
+let c = `got ${v}` /*:: text const */;
+return c;
+$$;
