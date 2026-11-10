@@ -1622,13 +1622,21 @@ const_literal_type(Ctx *cx, int a, int b)
 
 /* ---------------------------------------------------------------- indent */
 
+/*
+ * Indentation is cosmetic in plpgsql, so it stops growing past
+ * PLX_MAX_INDENT levels. Without the cap, generated code grows with the
+ * square of the nesting depth: 490 nested try blocks in a 15 KB body produced
+ * 5.8 MB of plpgsql, nearly all of it leading spaces.
+ */
+#define PLX_MAX_INDENT 32
+
 void
 plx_indent(StringInfo o, int n)
 {
-	int			i;
-
-	for (i = 0; i < n; i++)
-		appendStringInfoString(o, "  ");
+	if (n > PLX_MAX_INDENT)
+		n = PLX_MAX_INDENT;
+	if (n > 0)
+		appendStringInfoSpaces(o, n * 2);
 }
 
 /* ------------------------------------------------------- try/finally frames */
@@ -1847,18 +1855,22 @@ fin_resolve(Ctx *cx, PlxFin *f, const char *s, bool routed, int *ncodes)
  * re-raised with its SQLSTATE, message, detail and hint), and on a return,
  * break or continue out of the try. An error raised by the finally body, or a
  * return from it, replaces the pending one, as in the source languages.
+ *
+ * body, arms and ensure_body (NULL when there is no finally) must be palloc'd;
+ * this function frees them. Each nesting level holds the text of every level
+ * inside it, so keeping those copies until the end of the transpile made
+ * memory grow with the cube of the depth (3.6 GB for 490 levels).
  */
 void
 plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
-			 char *arms, const char *ensure_body, PlxFin *f)
+			 char *arms, char *ensure_body, PlxFin *f)
 {
 	bool		fin = (ensure_body != NULL);
 	int			in = fin ? ind + 1 : ind;
 	int			ncodes = 0;
 	int			code;
-
-	body = fin_resolve(cx, f, body, fin, &ncodes);
-	arms = fin_resolve(cx, f, arms, fin, &ncodes);
+	char	   *rbody = fin_resolve(cx, f, body, fin, &ncodes);
+	char	   *rarms = fin_resolve(cx, f, arms, fin, &ncodes);
 
 	if (fin)
 	{
@@ -1891,15 +1903,21 @@ plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 	}
 	plx_indent(o, in);
 	appendStringInfoString(o, "BEGIN\n");
-	appendStringInfoString(o, body);
+	appendStringInfoString(o, rbody);
 	if (nrescue)
 	{
 		plx_indent(o, in);
 		appendStringInfoString(o, "EXCEPTION\n");
-		appendStringInfoString(o, arms);
+		appendStringInfoString(o, rarms);
 	}
 	plx_indent(o, in);
 	appendStringInfoString(o, "END;\n");
+	if (rbody != body)
+		pfree(rbody);
+	if (rarms != arms)
+		pfree(rarms);
+	pfree(body);
+	pfree(arms);
 	if (!fin)
 		return;
 
@@ -1912,6 +1930,7 @@ plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END;\n");
 	appendStringInfoString(o, ensure_body);
+	pfree(ensure_body);
 
 	/* re-raise; a RAISE option may not be NULL, and '' would print an empty line */
 	plx_indent(o, ind);
@@ -2069,7 +2088,7 @@ plx_diag_prefix(int mask, int ind)
 	for (i = 0; i < (int) (sizeof(t) / sizeof(t[0])); i++)
 		if (mask & t[i].bit)
 		{
-			appendStringInfoSpaces(&p, ind * 2);
+			plx_indent(&p, ind);
 			appendStringInfo(&p, "GET STACKED DIAGNOSTICS __plx_%s = %s;\n", t[i].fld, t[i].item);
 		}
 	return p.data;

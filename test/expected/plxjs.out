@@ -266,6 +266,20 @@ SELECT js_fin_deep(), length(prosrc) < 200000 AS linear FROM pg_proc WHERE prona
            1 | t
 (1 row)
 
+-- a return at every level of deeply nested try/finally: the generated code
+-- stays linear in the source (indentation is capped), and each level's text is
+-- freed once emitted (it used to be kept, which took 3.6 GB at 490 levels)
+DO $d$ DECLARE s text := 'x = 1;'; BEGIN
+  FOR i IN 1..300 LOOP s := 'try { if (x > 5) { return 1; } ' || s || ' } finally { x = x + 1; }'; END LOOP;
+  EXECUTE 'CREATE FUNCTION js_fin_ret_deep() RETURNS int LANGUAGE plxjs AS $b$ let x = 0 /*:: int */; '
+    || s || ' return x; $b$';
+END $d$;
+SELECT js_fin_ret_deep(), length(prosrc) < 1200000 AS linear FROM pg_proc WHERE proname = 'js_fin_ret_deep';
+ js_fin_ret_deep | linear 
+-----------------+--------
+             301 | t
+(1 row)
+
 -- a finally body that throws runs once, not again from the error path
 DO LANGUAGE plxjs $p$
   try { raise("warning", "body"); }

@@ -476,10 +476,11 @@ parse_begin(Ctx *cx, int ind)
 			cx->exc_var = save_ev;
 			cx->exc_varlen = save_evl;
 
-			appendStringInfoSpaces(&arms, (ind + 1) * 2);
+			plx_indent(&arms, ind + 1);
 			appendStringInfo(&arms, "WHEN %s THEN\n", cond);
 			appendStringInfoString(&arms, pfx);
 			appendStringInfoString(&arms, hb);
+			pfree(hb);
 		}
 		nrescue++;
 	}

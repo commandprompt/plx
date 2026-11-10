@@ -182,7 +182,7 @@ void plx_label_note(Ctx *cx, const char *name, int len);
 void plx_emit_exit(Ctx *cx, StringInfo o, int ind, PlxExitKind kind,
 				   const char *label, const char *value, const char *cond);
 void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
-				  char *arms, const char *ensure_body, PlxFin *f);
+				  char *arms, char *ensure_body, PlxFin *f);	/* frees its strings */
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
 void plx_locals_reset(Ctx *cx);
