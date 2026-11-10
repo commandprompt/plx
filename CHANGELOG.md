@@ -4,6 +4,15 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Fixed
+
+- `.to_s`, `.to_i` and `.to_f` were rewritten as casts wherever the text
+  appeared, so a field whose name starts with one of them broke:
+  `r.to_status` became `r::texttatus`. They are now rewritten only as whole
+  words, and `x.to_s()` with an empty argument list works too.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

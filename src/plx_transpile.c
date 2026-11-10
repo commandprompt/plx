@@ -1379,14 +1379,24 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			}
 			continue;
 		}
-		/* .to_i / .to_s / .to_f casts */
-		if (c == '.' && i + 4 <= len && strncmp(s + i, ".to_", 4) == 0)
+		/*
+		 * .to_i / .to_s / .to_f casts, as whole words only: a field such as
+		 * r.to_status or r.to_s_name is left alone. An empty argument list,
+		 * x.to_s(), is dropped with the method name.
+		 */
+		if (c == '.' && i + 5 <= len && strncmp(s + i, ".to_", 4) == 0 &&
+			(s[i + 4] == 'i' || s[i + 4] == 's' || s[i + 4] == 'f') &&
+			!(i + 5 < len && (isalnum((unsigned char) s[i + 5]) || s[i + 5] == '_' ||
+							  s[i + 5] == '$' || IS_HIGHBIT_SET(s[i + 5]))))
 		{
-			char		k = (i + 4 < len) ? s[i + 4] : '?';
+			char		k = s[i + 4];
 
-			if (k == 'i') { appendStringInfoString(&out, "::integer"); i += 5; continue; }
-			if (k == 's') { appendStringInfoString(&out, "::text"); i += 5; continue; }
-			if (k == 'f') { appendStringInfoString(&out, "::double precision"); i += 5; continue; }
+			appendStringInfoString(&out, k == 'i' ? "::integer" :
+								   k == 's' ? "::text" : "::double precision");
+			i += 5;
+			if (i + 1 < len && s[i] == '(' && s[i + 1] == ')')
+				i += 2;
+			continue;
 		}
 		/* operator runs */
 		if (strchr("=!<>+-*/%&|?:~^", c))
