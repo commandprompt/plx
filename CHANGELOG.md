@@ -4,6 +4,94 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+Security fixes from a code audit. Code-only: no SQL objects change, so a new
+build and a server restart (or new sessions) pick them up without
+`ALTER EXTENSION`. Every fix concerns input to `CREATE FUNCTION` or `DO`, which
+any role with USAGE on a plx language can send (the languages are trusted, so
+PUBLIC has USAGE by default).
+
+### Security
+
+- **Backend crash on a type annotation at the start of an expression.** A
+  `/*:: T */` or `#:: T` annotation as the first token of an `if`/`while`
+  condition, a call argument, or a statement made the transpiler copy a span
+  from a NULL pointer, killing the backend with SIGSEGV (and resetting every
+  session on the server). Affected plxjs, plxts, plxphp, plxruby, plxpython3,
+  including DO blocks. Annotations are now skipped at span edges.
+- **Stack-overflow crash on deeply nested expressions in plxtsql, plxgo and
+  plxcobol.** Their expression emitters recursed once per nested call,
+  subscript or literal without `check_stack_depth()`, so a body like
+  `ISNULL(ISNULL(...))` or `int(int(...))` some 50,000 levels deep crashed the
+  backend. They now raise `expression nested too deeply`, like the shared
+  rewriter already did.
+- **Exponential output from nested `finally`/`ensure`.** Each finally body is
+  emitted once per exit path, so a finally nested inside a finally doubled the
+  output per level: a 668-byte function stored a 94 MB body, and a slightly
+  deeper one drove a backend to gigabytes of memory. The finally body is now
+  emitted once (see Changed), so output grows linearly with nesting.
+- **String literal escaping its quotes.** A dialect string that ended in a lone
+  backslash, inside an interpolation (plxjs/plxts `${'...\'}`, plxpython3
+  f-strings), was emitted with that backslash bare inside an `E'...'` literal,
+  where it escaped the closing quote. The next string literal in the body then
+  ran as code, so a function whose source showed only inert string assignments
+  could execute arbitrary SQL.
+- **String literals that depend on `standard_conforming_strings`.** plpgsql
+  reads a function body with the caller's setting, which any role may change.
+  Literals that plxgo, plxtsql, plxplsql and plxcobol emit, and Ruby and PHP
+  single-quoted strings, were written as plain `'...'`, so with the setting off
+  a literal ending in a backslash swallowed its closing quote and the following
+  text ran as code; the caller could change what a `SECURITY DEFINER` function
+  did. The finished body is now rewritten so that every ordinary literal
+  containing a backslash is an `E'...'` literal with the backslash doubled,
+  which reads the same under either setting and, with it on, has the value the
+  original had. This covers every dialect, and SQL passed through verbatim.
+- **Quadratic, uninterruptible transpile time.** Local-variable lookup was a
+  linear scan, so a body with 40,000 distinct variables took 47 seconds; the
+  plxpython3 lexer rescanned every run of blank lines from each newline, so
+  400,000 blank lines took 43 seconds. Neither honoured `statement_timeout`.
+  Locals are now hashed (keyed as PostgreSQL reads an identifier, down-cased
+  and truncated to 63 bytes, so no name defeats the index), blank and
+  annotation lines are scanned once, and the lexer, rewriter and local table
+  check for interrupts. (The same fix stops plxpython3 from
+  counting blank lines twice in error line numbers.)
+- **Memory amplification in chained ternaries.** Each `?:` level kept its own
+  copy of the rest of the chain, so peak memory was depth times source length
+  (568 MB for a 1 MB body). Intermediate results are now freed.
+- **plxgo `fmt.Sprintf` directive without a letter verb.** A `%` followed by a
+  quote consumed half of the escaped `''` pair, so text inside a Go string
+  literal could end up as SQL in the generated body. Such directives now fall
+  back to the `format()` lowering, which keeps the text literal.
+
+### Changed
+
+- **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
+  plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
+  `return` inside `try` left the function without running `finally`. The
+  finally body is now emitted once: an exit from the try (or from a catch arm)
+  records which exit is pending, leaves the block, runs the finally body, then
+  completes the exit; an error is caught, the finally body runs, and the error
+  is re-raised with its SQLSTATE, message, detail, hint and object names
+  (schema, table, column, constraint, type). A `return` or an error in the
+  finally body replaces the pending exit or error, as in the source languages.
+  Behaviour differences to be aware of: an error re-raised after `finally`
+  carries the location of the re-raise in its `CONTEXT`, not the original
+  statement's; when it names any object, the object names it does not have
+  are sent as empty fields rather than left out (psql shows them in verbose
+  mode). As before, the finally body does not run when the statement is
+  cancelled (a query cancel or `statement_timeout`) or an `assert` fails:
+  `WHEN OTHERS` does not catch those two errors. Only functions created or
+  replaced after upgrading are affected; stored functions keep the plpgsql
+  they were created with.
+
+### Fixed
+
+- A `finally`/`ensure` body that raised an error on the normal path ran a
+  second time from the error path. It now runs once.
+- plxpython3 `call(f"...")` emitted an unterminated quoted identifier. An
+  f-string procedure name is now rejected.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

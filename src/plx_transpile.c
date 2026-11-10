@@ -25,7 +25,10 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "catalog/pg_type.h"
+#include "parser/scansup.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 
 #include "plx.h"
 #include "plx_int.h"
@@ -69,6 +72,7 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	char	   *r;
 
 	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, 0, "expression nested too deeply");
 	r = rewrite_expr_inner(cx, s, len, boolctx);
@@ -188,6 +192,7 @@ plx_lex(Ctx *cx)
 	{
 		const char *tokstart = p;
 
+		CHECK_FOR_INTERRUPTS();
 		if (*p == ' ' || *p == '\t' || *p == '\r')
 		{
 			p++;
@@ -204,12 +209,25 @@ plx_lex(Ctx *cx)
 			PUSH0(T_NEWLINE);
 			if (indent_mode)
 			{
-				/* find the next real line's indentation, skipping blanks/comments */
+				/*
+				 * Find the next real line's indentation, skipping blanks and
+				 * comments, and resume lexing after the skipped lines rather
+				 * than at the next newline: rescanning the run from every
+				 * newline made K blank lines cost O(K^2) and counted their
+				 * line numbers twice. A type-annotation line ends the scan
+				 * (it has to be lexed); its newline scans on from there, so
+				 * a run of them is linear too.
+				 */
 				const char *q = p;
+				const char *resume = p;
+				int			resume_line = line;
+				bool		ann_line = false;
 				int			col = 0;
 
 				for (;;)
 				{
+					const char *ls = q;
+
 					col = 0;
 					while (*q == ' ' || *q == '\t')
 					{
@@ -219,19 +237,30 @@ plx_lex(Ctx *cx)
 					if (q < end && *q == '\n')
 					{
 						q++;
-						line++;
+						resume = q;
+						resume_line++;
 						continue;
 					}
 					if (q < end && *q == '#')
 					{
+						if (surf->type_ann &&
+							strncmp(q, surf->type_ann, strlen(surf->type_ann)) == 0)
+						{
+							resume = ls;
+							ann_line = true;
+							break;
+						}
 						while (q < end && *q != '\n')
 							q++;
 						continue;
 					}
 					break;		/* real line, or EOF */
 				}
-				if (q >= end)
-					continue;	/* trailing dedents handled at EOF */
+				p = resume;
+				line = resume_line;
+				if (ann_line || q >= end)
+					continue;	/* indentation is taken at the next real line;
+								 * trailing dedents are handled at EOF */
 				if (col > indent_stack[indent_sp])
 				{
 					/*
@@ -564,21 +593,63 @@ plx_is_param(Ctx *cx, const char *name, int len)
 	return false;
 }
 
+/*
+ * Locals are kept in declaration order (cx->locals, which DECLARE emission
+ * walks) and indexed in cx->lhash. A linear scan made a body with many
+ * distinct variables quadratic: 40,000 assignments took most of a minute.
+ *
+ * The key is the name as PostgreSQL itself reads an unquoted identifier:
+ * down-cased and truncated to NAMEDATALEN - 1 bytes (downcase_truncate_
+ * identifier). Two names that plpgsql would treat as one variable therefore
+ * share an entry, any name can be indexed (an over-long one no longer forces a
+ * fallback scan), and case folding matches the server's for every encoding.
+ */
+typedef struct
+{
+	char		key[NAMEDATALEN];
+	PlxLocal2  *l;
+} PlxLocalEnt;
+
+static void
+plx_local_key(const char *name, int len, char *key)
+{
+	char	   *k = downcase_truncate_identifier(name, len, false);
+
+	memset(key, 0, NAMEDATALEN);
+	strlcpy(key, k, NAMEDATALEN);
+	pfree(k);
+}
+
+void
+plx_locals_reset(Ctx *cx)
+{
+	cx->locals = cx->ltail = NULL;
+	if (cx->lhash)
+		hash_destroy(cx->lhash);
+	cx->lhash = NULL;
+}
+
 PlxLocal2 *
 plx_local_find(Ctx *cx, const char *name, int len)
 {
-	PlxLocal2  *l;
+	char		key[NAMEDATALEN];
+	PlxLocalEnt *e;
 
-	for (l = cx->locals; l; l = l->next)
-		if ((int) strlen(l->name) == len && pg_strncasecmp(l->name, name, len) == 0)
-			return l;
-	return NULL;
+	CHECK_FOR_INTERRUPTS();
+	if (!cx->lhash)
+		return NULL;
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+	return e ? e->l : NULL;
 }
 
 PlxLocal2 *
 plx_local_add(Ctx *cx, const char *name, int len)
 {
 	PlxLocal2  *l = palloc0(sizeof(PlxLocal2));
+	char		key[NAMEDATALEN];
+	bool		found;
+	PlxLocalEnt *e;
 
 	l->name = pnstrdup(name, len);
 	if (cx->ltail)
@@ -586,6 +657,26 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	else
 		cx->locals = l;
 	cx->ltail = l;
+
+	if (!cx->lhash)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = sizeof(PlxLocalEnt);
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_CONTEXT);	/* string keys */
+#endif
+	}
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_ENTER, &found);
+	if (!found)
+		e->l = l;				/* keep the first declaration */
 	return l;
 }
 
@@ -843,6 +934,19 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			s++;
 			continue;
 		}
+		/*
+		 * A backslash that reaches here is literal content (a raw string, or
+		 * a lone trailing backslash). Escape it and force the E'' form: left
+		 * bare inside an E'' literal it would escape the closing quote and
+		 * let the next literal's text run on as code.
+		 */
+		if (s[0] == '\\')
+		{
+			appendStringInfoString(&lit, "\\\\");
+			need_e = true;
+			s++;
+			continue;
+		}
 		appendStringInfoChar(&lit, *s);
 		s++;
 	}
@@ -992,6 +1096,12 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				a = plx_rewrite_expr(cx, s + q + 1, c - q - 1, false);
 				b = plx_rewrite_expr(cx, s + c + 1, len - c - 1, false);
 				r = psprintf("CASE WHEN %s THEN %s ELSE %s END", cond, a, b);
+				/* free the parts: a chain of ternaries nests one level per
+				 * '?', and keeping every level's copy of the rest of the chain
+				 * made peak memory depth * length */
+				pfree(cond);
+				pfree(a);
+				pfree(b);
 				return r;
 			}
 		}
@@ -1064,7 +1174,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != c)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -1090,7 +1200,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != q)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -1471,6 +1581,15 @@ plx_span_text(Ctx *cx, int a, int b)
 {
 	const char *st, *en;
 
+	/*
+	 * Type-annotation tokens carry no source span (s == NULL), so trim them
+	 * off both ends; a span that began on one used to compute its length
+	 * from a NULL pointer and crash the backend in pnstrdup.
+	 */
+	while (a < b && cx->t[a].s == NULL)
+		a++;
+	while (b > a && cx->t[b - 1].s == NULL)
+		b--;
 	if (b <= a)
 		return pstrdup("");
 	st = cx->t[a].s;
@@ -1503,13 +1622,408 @@ const_literal_type(Ctx *cx, int a, int b)
 
 /* ---------------------------------------------------------------- indent */
 
+/*
+ * Indentation is cosmetic in plpgsql, so it stops growing past
+ * PLX_MAX_INDENT levels. Without the cap, generated code grows with the
+ * square of the nesting depth: 490 nested try blocks in a 15 KB body produced
+ * 5.8 MB of plpgsql, nearly all of it leading spaces.
+ */
+#define PLX_MAX_INDENT 32
+
 void
 plx_indent(StringInfo o, int n)
 {
-	int			i;
+	if (n > PLX_MAX_INDENT)
+		n = PLX_MAX_INDENT;
+	if (n > 0)
+		appendStringInfoSpaces(o, n * 2);
+}
 
-	for (i = 0; i < n; i++)
-		appendStringInfoString(o, "  ");
+/* ------------------------------------------------------- try/finally frames */
+
+#define PLX_PH '\x01'			/* placeholder delimiter; rejected in source */
+
+PlxFin *
+plx_fin_push(Ctx *cx)
+{
+	PlxFin	   *f = palloc0(sizeof(PlxFin));
+
+	f->id = ++cx->fin_seq;
+	f->loopdepth = cx->loopdepth;
+	f->outer = cx->fin;
+	cx->fin = f;
+	return f;
+}
+
+void
+plx_fin_pop(Ctx *cx, PlxFin *f)
+{
+	Assert(cx->fin == f);
+	cx->fin = f->outer;
+}
+
+/* Record a loop label, so a labeled break/continue knows which frame its
+ * target loop is in. */
+void
+plx_label_note(Ctx *cx, const char *name, int len)
+{
+	PlxLabel   *l = palloc(sizeof(PlxLabel));
+
+	l->name = pnstrdup(name, len);
+	l->fin_id = cx->fin ? cx->fin->id : 0;
+	l->next = cx->labels;
+	cx->labels = l;
+}
+
+/*
+ * Does this exit leave frame f? A return always does. An unlabeled
+ * break/continue does when its loop (the innermost loop at `loopdepth`) is
+ * outside f; a labeled one when its label was recorded outside f.
+ */
+static bool
+exit_crosses(Ctx *cx, PlxFin *f, PlxExitKind kind, const char *label,
+			 int loopdepth)
+{
+	PlxLabel   *l;
+
+	if (!f)
+		return false;
+	if (kind == PLX_EXIT_RETURN)
+		return true;
+	if (!label)
+		return loopdepth == f->loopdepth;
+	for (l = cx->labels; l; l = l->next)
+		if (pg_strcasecmp(l->name, label) == 0)
+			return l->fin_id != f->id;
+	return false;				/* unknown label: let plpgsql report it */
+}
+
+/* Register an exit with f and return its placeholder text. */
+static char *
+fin_placeholder(PlxFin *f, PlxExitKind kind, const char *label, const char *value)
+{
+	PlxFinExit *e;
+
+	if (f->nexits >= f->cap)
+	{
+		f->cap = f->cap ? f->cap * 2 : 8;
+		f->exits = f->exits ? repalloc(f->exits, f->cap * sizeof(PlxFinExit))
+			: palloc(f->cap * sizeof(PlxFinExit));
+	}
+	e = &f->exits[f->nexits];
+	e->kind = kind;
+	e->label = label ? pstrdup(label) : NULL;
+	e->value = value ? pstrdup(value) : NULL;
+	e->code = 0;
+	return psprintf("%c%d.%d%c", PLX_PH, f->id, f->nexits++, PLX_PH);
+}
+
+/* The exit as a statement in the context of frame g (NULL = none): either
+ * the plain plpgsql statement, or a placeholder for g to resolve. */
+static char *
+render_exit(Ctx *cx, PlxFin *g, PlxExitKind kind, const char *label,
+			const char *value, int loopdepth)
+{
+	if (exit_crosses(cx, g, kind, label, loopdepth))
+		return fin_placeholder(g, kind, label, value);
+	if (kind == PLX_EXIT_RETURN)
+		return value ? psprintf("RETURN %s;", value) : pstrdup("RETURN;");
+	return psprintf("%s%s%s;", kind == PLX_EXIT_BREAK ? "EXIT" : "CONTINUE",
+					label ? " " : "", label ? label : "");
+}
+
+void
+plx_emit_exit(Ctx *cx, StringInfo o, int ind, PlxExitKind kind,
+			  const char *label, const char *value, const char *cond)
+{
+	plx_indent(o, ind);
+	if (!exit_crosses(cx, cx->fin, kind, label, cx->loopdepth))
+	{
+		/* unchanged from the pre-frame lowering */
+		if (kind == PLX_EXIT_RETURN)
+			appendStringInfo(o, value ? "RETURN %s;\n" : "RETURN;\n", value);
+		else
+			appendStringInfo(o, "%s%s%s%s%s;\n",
+							 kind == PLX_EXIT_BREAK ? "EXIT" : "CONTINUE",
+							 label ? " " : "", label ? label : "",
+							 cond ? " WHEN " : "", cond ? cond : "");
+		return;
+	}
+	if (cond)
+		appendStringInfo(o, "IF %s THEN %s END IF;\n", cond,
+						 fin_placeholder(cx->fin, kind, label, value));
+	else
+		appendStringInfo(o, "%s\n", fin_placeholder(cx->fin, kind, label, value));
+}
+
+/* The hoisted return-value variable, typed from the function's result. */
+static const char *
+plx_fin_ret_var(Ctx *cx)
+{
+	if (!cx->ret_declared)
+	{
+		PlxLocal2  *l = plx_local_add(cx, "__plx_ret", 9);
+		Oid			rt = cx->meta ? cx->meta->rettype : InvalidOid;
+
+		if (!OidIsValid(rt) || rt == VOIDOID)
+			l->typ = "text";	/* plpgsql rejects the RETURN value anyway */
+		else if (IsPolymorphicType(rt))
+			l->typ = "ALIAS FOR $0";
+		else if (rt == RECORDOID || rt == TRIGGEROID)
+			l->is_record = true;
+		else
+			l->typ = format_type_be(rt);
+		cx->ret_declared = true;
+	}
+	return "__plx_ret";
+}
+
+/*
+ * Replace frame f's placeholders in s. With a finally, an exit becomes
+ * "save the value, note which exit, leave the block"; the dispatch after the
+ * finally body completes it. Without one, the exit is re-rendered for the
+ * enclosing frame (plain, or a placeholder of its own).
+ */
+static char *
+fin_resolve(Ctx *cx, PlxFin *f, const char *s, bool routed, int *ncodes)
+{
+	StringInfoData r;
+
+	if (!strchr(s, PLX_PH))
+		return (char *) s;
+	initStringInfo(&r);
+	while (*s)
+	{
+		const char *q;
+		int			fid,
+					idx;
+		PlxFinExit *e;
+
+		if (*s != PLX_PH)
+		{
+			appendStringInfoChar(&r, *s++);
+			continue;
+		}
+		if (sscanf(s + 1, "%d.%d", &fid, &idx) != 2 || fid != f->id ||
+			idx < 0 || idx >= f->nexits || !(q = strchr(s + 1, PLX_PH)))
+			elog(ERROR, "plx: malformed try/finally placeholder");
+		e = &f->exits[idx];
+		if (!routed)
+			appendStringInfoString(&r, render_exit(cx, f->outer, e->kind, e->label,
+												   e->value, f->loopdepth));
+		else
+		{
+			int			i;
+
+			/* one dispatch code per distinct target */
+			for (i = 0; i < idx && !e->code; i++)
+				if (f->exits[i].code && f->exits[i].kind == e->kind &&
+					(f->exits[i].value != NULL) == (e->value != NULL) &&
+					((!f->exits[i].label && !e->label) ||
+					 (f->exits[i].label && e->label &&
+					  pg_strcasecmp(f->exits[i].label, e->label) == 0)))
+					e->code = f->exits[i].code;
+			if (!e->code)
+				e->code = ++*ncodes;
+			if (e->value)
+				appendStringInfo(&r, "%s := %s; ", plx_fin_ret_var(cx), e->value);
+			appendStringInfo(&r, "__plx_pend_%d := %d; EXIT __plx_try_%d;",
+							 f->id, e->code, f->id);
+		}
+		s = q + 1;
+	}
+	return r.data;
+}
+
+/*
+ * Emit a try/rescue[/finally] statement (shared by every front end). Without
+ * a finally it is BEGIN body EXCEPTION arms END. With one, the finally body
+ * is emitted once:
+ *
+ *   __plx_pend_N := 0; __plx_es_N := NULL;
+ *   <<__plx_try_N>>
+ *   BEGIN
+ *     BEGIN body EXCEPTION arms END;     -- exits: note + EXIT __plx_try_N
+ *   EXCEPTION WHEN OTHERS THEN
+ *     GET STACKED DIAGNOSTICS __plx_es_N = RETURNED_SQLSTATE, ...;
+ *   END;
+ *   finally body
+ *   IF __plx_es_N IS NOT NULL THEN RAISE (the saved error) END IF;
+ *   IF __plx_pend_N = 1 THEN RETURN __plx_ret; ELSIF ... END IF;
+ *
+ * So the finally body runs on normal completion, on an error (which is then
+ * re-raised with its SQLSTATE, message, detail, hint and object names), and
+ * on a return, break or continue out of the try. An error raised by the
+ * finally body, or a return from it, replaces the pending one, as in the
+ * source languages. It does not run on a query cancel or a failed ASSERT,
+ * which WHEN OTHERS does not catch.
+ *
+ * body, arms and ensure_body (NULL when there is no finally) must be palloc'd;
+ * this function frees them. Each nesting level holds the text of every level
+ * inside it, so keeping those copies until the end of the transpile made
+ * memory grow with the cube of the depth (3.6 GB for 490 levels).
+ */
+void
+plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
+			 char *arms, char *ensure_body, PlxFin *f)
+{
+	bool		fin = (ensure_body != NULL);
+	int			in = fin ? ind + 1 : ind;
+	int			ncodes = 0;
+	int			code;
+	char	   *rbody = fin_resolve(cx, f, body, fin, &ncodes);
+	char	   *rarms = fin_resolve(cx, f, arms, fin, &ncodes);
+
+	if (fin)
+	{
+		PlxLocal2  *l;
+		static const char *const errv[] = {"es", "em", "ed", "eh", "ecol",
+		"econ", "etyp", "etab", "esch"};
+		int			i;
+
+		for (i = 0; i < lengthof(errv); i++)
+		{
+			char	   *nm = psprintf("__plx_%s_%d", errv[i], f->id);
+
+			l = plx_local_add(cx, nm, (int) strlen(nm));
+			l->typ = "text";
+		}
+		if (ncodes)
+		{
+			char	   *nm = psprintf("__plx_pend_%d", f->id);
+
+			l = plx_local_add(cx, nm, (int) strlen(nm));
+			l->typ = "int";
+			plx_indent(o, ind);
+			appendStringInfo(o, "__plx_pend_%d := 0;\n", f->id);
+		}
+		plx_indent(o, ind);
+		appendStringInfo(o, "__plx_es_%d := NULL;\n", f->id);
+		plx_indent(o, ind);
+		appendStringInfo(o, "<<__plx_try_%d>>\n", f->id);
+		plx_indent(o, ind);
+		appendStringInfoString(o, "BEGIN\n");
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "BEGIN\n");
+	appendStringInfoString(o, rbody);
+	if (nrescue)
+	{
+		plx_indent(o, in);
+		appendStringInfoString(o, "EXCEPTION\n");
+		appendStringInfoString(o, rarms);
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "END;\n");
+	if (rbody != body)
+		pfree(rbody);
+	if (rarms != arms)
+		pfree(rarms);
+	pfree(body);
+	pfree(arms);
+	if (!fin)
+		return;
+
+	plx_indent(o, ind);
+	appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
+	plx_indent(o, ind + 1);
+	appendStringInfo(o, "GET STACKED DIAGNOSTICS __plx_es_%1$d = RETURNED_SQLSTATE, "
+					 "__plx_em_%1$d = MESSAGE_TEXT, __plx_ed_%1$d = PG_EXCEPTION_DETAIL, "
+					 "__plx_eh_%1$d = PG_EXCEPTION_HINT, __plx_ecol_%1$d = COLUMN_NAME, "
+					 "__plx_econ_%1$d = CONSTRAINT_NAME, __plx_etyp_%1$d = PG_DATATYPE_NAME, "
+					 "__plx_etab_%1$d = TABLE_NAME, __plx_esch_%1$d = SCHEMA_NAME;\n",
+					 f->id);
+	plx_indent(o, ind);
+	appendStringInfoString(o, "END;\n");
+	appendStringInfoString(o, ensure_body);
+	pfree(ensure_body);
+
+	/*
+	 * Re-raise. A RAISE option may not be NULL, and an empty one is not the
+	 * same as an absent one: an empty DETAIL or HINT prints an empty line,
+	 * and an empty object name is sent to the client as a present field (psql
+	 * prints it in verbose mode). Absent fields come back from GET STACKED
+	 * DIAGNOSTICS as '', so pass each group only when it is non-empty: DETAIL
+	 * and HINT each, and the five object names as one group, which keeps this
+	 * to eight RAISEs. The cost: an error that names some objects (a unique
+	 * violation names the schema, table and constraint) is re-raised with the
+	 * others present but empty.
+	 */
+	plx_indent(o, ind);
+	appendStringInfo(o, "IF __plx_es_%d IS NOT NULL THEN\n", f->id);
+	plx_indent(o, ind + 1);
+	appendStringInfo(o, "IF __plx_ecol_%1$d || __plx_econ_%1$d || __plx_etyp_%1$d || "
+					 "__plx_etab_%1$d || __plx_esch_%1$d <> '' THEN\n", f->id);
+	{
+		int			k;
+
+		for (k = 7; k >= 0; k--)
+		{
+			bool		obj = (k & 4) != 0,
+						det = (k & 2) != 0,
+						hnt = (k & 1) != 0;
+
+			if (k == 3)
+			{
+				plx_indent(o, ind + 1);
+				appendStringInfoString(o, "ELSE\n");
+			}
+			plx_indent(o, ind + 2);
+			if ((k & 3) == 0)
+				appendStringInfoString(o, "ELSE ");
+			else
+			{
+				appendStringInfoString(o, (k & 3) == 3 ? "IF " : "ELSIF ");
+				if (det)
+					appendStringInfo(o, "__plx_ed_%d <> ''%s", f->id, hnt ? " AND " : "");
+				if (hnt)
+					appendStringInfo(o, "__plx_eh_%d <> ''", f->id);
+				appendStringInfoString(o, " THEN ");
+			}
+			appendStringInfo(o, "RAISE EXCEPTION USING ERRCODE = __plx_es_%1$d, "
+							 "MESSAGE = __plx_em_%1$d", f->id);
+			if (det)
+				appendStringInfo(o, ", DETAIL = __plx_ed_%d", f->id);
+			if (hnt)
+				appendStringInfo(o, ", HINT = __plx_eh_%d", f->id);
+			if (obj)
+				appendStringInfo(o, ", COLUMN = __plx_ecol_%1$d, CONSTRAINT = __plx_econ_%1$d, "
+								 "DATATYPE = __plx_etyp_%1$d, TABLE = __plx_etab_%1$d, "
+								 "SCHEMA = __plx_esch_%1$d", f->id);
+			appendStringInfoString(o, ";\n");
+			if ((k & 3) == 0)
+			{
+				plx_indent(o, ind + 2);
+				appendStringInfoString(o, "END IF;\n");
+			}
+		}
+	}
+	plx_indent(o, ind + 1);
+	appendStringInfoString(o, "END IF;\n");
+	plx_indent(o, ind);
+	appendStringInfoString(o, "END IF;\n");
+
+	/* complete the pending exit, in the enclosing frame's context */
+	for (code = 1; code <= ncodes; code++)
+	{
+		int			i;
+
+		for (i = 0; i < f->nexits; i++)
+			if (f->exits[i].code == code)
+				break;
+		Assert(i < f->nexits);
+		plx_indent(o, ind);
+		appendStringInfo(o, "%s __plx_pend_%d = %d THEN %s\n",
+						 code == 1 ? "IF" : "ELSIF", f->id, code,
+						 render_exit(cx, f->outer, f->exits[i].kind, f->exits[i].label,
+									 f->exits[i].value ? plx_fin_ret_var(cx) : NULL,
+									 f->loopdepth));
+	}
+	if (ncodes)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END IF;\n");
+	}
 }
 
 /* ---------------------------------------------------------------- leaves */
@@ -1622,7 +2136,7 @@ plx_diag_prefix(int mask, int ind)
 	for (i = 0; i < (int) (sizeof(t) / sizeof(t[0])); i++)
 		if (mask & t[i].bit)
 		{
-			appendStringInfoSpaces(&p, ind * 2);
+			plx_indent(&p, ind);
 			appendStringInfo(&p, "GET STACKED DIAGNOSTICS __plx_%s = %s;\n", t[i].fld, t[i].item);
 		}
 	return p.data;
@@ -2143,6 +2657,9 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			{
 				Tok		   *pn = &cx->t[as[0]];
 
+				/* an f-string's prefix would be unquoted as part of the name */
+				if (pn->fstr)
+					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
 				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}
 			else
@@ -2191,10 +2708,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 	if (t0->kind == T_KW && t0->kw == KW_RETURN)
 	{
 		if (a + 1 >= b)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "RETURN;\n");
-		}
+			plx_emit_exit(cx, o, ind, PLX_EXIT_RETURN, NULL, NULL, NULL);
 		else
 		{
 			char	   *e = plx_rewrite_expr(cx, plx_span_text(cx, a + 1, b),
@@ -2202,8 +2716,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 
 			if (cx->retset)
 				plx_err(cx, t0->line, "use emit/return_next in a set-returning function, not 'return <value>'");
-			plx_indent(o, ind);
-			appendStringInfo(o, "RETURN %s;\n", e);
+			plx_emit_exit(cx, o, ind, PLX_EXIT_RETURN, NULL, e, NULL);
 		}
 		return;
 	}
@@ -2233,15 +2746,14 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 	/* next / break, optionally with a loop label */
 	if (t0->kind == T_KW && (t0->kw == KW_NEXT || t0->kw == KW_BREAK))
 	{
-		const char *kw = (t0->kw == KW_NEXT) ? "CONTINUE" : "EXIT";
+		PlxExitKind kind = (t0->kw == KW_NEXT) ? PLX_EXIT_CONTINUE : PLX_EXIT_BREAK;
 
 		if (cx->loopdepth == 0)
 			plx_err(cx, t0->line, "%s outside a loop", t0->kw == KW_NEXT ? "next" : "break");
-		plx_indent(o, ind);
-		if (a + 1 < b && cx->t[a + 1].kind == T_IDENT)
-			appendStringInfo(o, "%s %.*s;\n", kw, cx->t[a + 1].len, cx->t[a + 1].s);
-		else
-			appendStringInfo(o, "%s;\n", kw);
+		plx_emit_exit(cx, o, ind, kind,
+					  (a + 1 < b && cx->t[a + 1].kind == T_IDENT)
+					  ? pnstrdup(cx->t[a + 1].s, cx->t[a + 1].len) : NULL,
+					  NULL, NULL);
 		return;
 	}
 	/* raise */
@@ -2533,16 +3045,13 @@ plx_emit_leaf(Ctx *cx, int a, int b, int ind, bool toplevel)
 		/* next/break modifiers -> WHEN (optionally with a loop label) */
 		if (t0->kind == T_KW && (t0->kw == KW_NEXT || t0->kw == KW_BREAK))
 		{
-			char		lbl[NAMEDATALEN + 1] = "";
-
 			if (cx->loopdepth == 0)
 				plx_err(cx, t0->line, "%s outside a loop", t0->kw == KW_NEXT ? "next" : "break");
-			if (a + 1 < m && cx->t[a + 1].kind == T_IDENT)
-				snprintf(lbl, sizeof(lbl), " %.*s", cx->t[a + 1].len, cx->t[a + 1].s);
-			plx_indent(o, ind);
-			appendStringInfo(o, "%s%s WHEN %s%s%s;\n",
-							 t0->kw == KW_NEXT ? "CONTINUE" : "EXIT", lbl,
-							 neg ? "NOT (" : "", cond, neg ? ")" : "");
+			plx_emit_exit(cx, o, ind,
+						  t0->kw == KW_NEXT ? PLX_EXIT_CONTINUE : PLX_EXIT_BREAK,
+						  (a + 1 < m && cx->t[a + 1].kind == T_IDENT)
+						  ? pnstrdup(cx->t[a + 1].s, cx->t[a + 1].len) : NULL,
+						  NULL, neg ? psprintf("NOT (%s)", cond) : cond);
 			return;
 		}
 		if (mk == KW_IF || mk == KW_UNLESS)
@@ -2633,6 +3142,162 @@ djb2(const char *s)
 	return h;
 }
 
+static bool
+sql_ident_char(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '$' || IS_HIGHBIT_SET(c);
+}
+
+/*
+ * Rewrite every standard string literal in the generated plpgsql that contains
+ * a backslash as an escape string: 'C:\' becomes E'C:\\'.
+ *
+ * plpgsql reads a function body with the caller's standard_conforming_strings,
+ * which any role may set. With it off, a backslash in an ordinary '...'
+ * literal is an escape, so a literal ending in one swallows its closing quote
+ * and the following text runs as code; a SECURITY DEFINER function's
+ * behaviour would then depend on its caller. An E'...' literal reads the same
+ * either way, and with the setting on (the default) the rewritten literal has
+ * exactly the value of the original. Doing this once over the finished body
+ * covers every dialect's literal emitters, and SQL the author passed through.
+ *
+ * A small SQL lexer: skips comments (nested block comments too), quoted
+ * identifiers, dollar-quoted strings, E'' strings (already safe) and U&''
+ * strings (where a backslash introduces a Unicode escape).
+ */
+static char *
+escape_backslash_literals(const char *s)
+{
+	StringInfoData o;
+	const char *p = s;
+
+	if (!strchr(s, '\\'))
+		return (char *) s;
+	initStringInfo(&o);
+	while (*p)
+	{
+		const char *q;
+
+		if (p[0] == '-' && p[1] == '-')
+		{
+			q = strchr(p, '\n');
+			q = q ? q + 1 : p + strlen(p);
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '/' && p[1] == '*')
+		{
+			int			depth = 1;
+
+			q = p + 2;
+			while (*q && depth > 0)
+			{
+				if (q[0] == '/' && q[1] == '*')
+				{
+					depth++;
+					q += 2;
+				}
+				else if (q[0] == '*' && q[1] == '/')
+				{
+					depth--;
+					q += 2;
+				}
+				else
+					q++;
+			}
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '"')
+		{
+			q = p + 1;
+			while (*q && !(q[0] == '"' && q[1] != '"'))
+				q += (q[0] == '"') ? 2 : 1;
+			if (*q)
+				q++;
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '$' && (p == s || !sql_ident_char(p[-1])))
+		{
+			/* $tag$ ... $tag$; the tag cannot start with a digit ($1 is a param) */
+			const char *t = p + 1;
+
+			if (*t != '$' && ((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') ||
+							  *t == '_' || IS_HIGHBIT_SET(*t)))
+				while (sql_ident_char(*t) && *t != '$')
+					t++;
+			if (*t == '$')
+			{
+				int			taglen = (int) (t - p) + 1;
+				char	   *tag = pnstrdup(p, taglen);
+				const char *end = strstr(t + 1, tag);
+
+				q = end ? end + taglen : p + strlen(p);
+				appendBinaryStringInfo(&o, p, q - p);
+				p = q;
+				pfree(tag);
+				continue;
+			}
+		}
+		if (p[0] == '\'')
+		{
+			bool		estr = p > s && (p[-1] == 'E' || p[-1] == 'e') &&
+				(p - 1 == s || !sql_ident_char(p[-2]));
+			bool		ustr = p - 1 > s && p[-1] == '&' &&
+				(p[-2] == 'U' || p[-2] == 'u') &&
+				(p - 2 == s || !sql_ident_char(p[-3]));
+			/* B'..', X'..', N'..' and the like: leave other prefixes alone */
+			bool		prefixed = !estr && !ustr && p > s && sql_ident_char(p[-1]);
+			bool		has_bs = false;
+
+			q = p + 1;
+			while (*q)
+			{
+				if (estr && q[0] == '\\' && q[1])
+					q += 2;
+				else if (q[0] == '\'' && q[1] == '\'')
+					q += 2;
+				else if (q[0] == '\'')
+					break;
+				else
+				{
+					if (q[0] == '\\')
+						has_bs = true;
+					q++;
+				}
+			}
+			if (has_bs && !estr && !ustr && !prefixed)
+			{
+				const char *c;
+
+				appendStringInfoString(&o, "E'");
+				for (c = p + 1; c < q; c++)
+				{
+					if (*c == '\\')
+						appendStringInfoChar(&o, '\\');
+					appendStringInfoChar(&o, *c);
+				}
+			}
+			else
+				appendBinaryStringInfo(&o, p, q - p);
+			if (*q)
+			{
+				appendStringInfoChar(&o, '\'');
+				q++;
+			}
+			p = q;
+			continue;
+		}
+		appendStringInfoChar(&o, *p++);
+	}
+	return o.data;
+}
+
 char *
 plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 			  MemoryContext scratch)
@@ -2648,6 +3313,13 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 	cx.retset = meta ? meta->retset : false;
 	cx.mcx = scratch;
 	initStringInfo(&cx.out);
+
+	/* the try/finally lowering uses \x01 to delimit placeholders */
+	if (strchr(body, PLX_PH))
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("%s: function body contains the control character U+0001",
+						surf->lanname)));
 
 	/* Run the dialect front end (the vtable method): fills cx.out. */
 	surf->parse_body(&cx);
@@ -2692,5 +3364,5 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 	}
 	appendStringInfo(&asm_, "/*plx-orig:b64$%s$plx-orig*/\n", b64_encode_body(body));
 
-	return asm_.data;
+	return escape_backslash_literals(asm_.data);
 }

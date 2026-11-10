@@ -73,6 +73,44 @@ typedef struct PlxLocal2
 	struct PlxLocal2 *next;
 } PlxLocal2;
 
+/* ------------------------------------------------------- try/finally frames */
+
+/*
+ * A frame is pushed while a try body and its catch arms are parsed. A return,
+ * break or continue that would leave the frame is emitted as a placeholder
+ * (PlxFinExit) because the parser does not yet know whether a finally follows;
+ * plx_emit_try resolves the placeholders once it does. See plx_emit_try.
+ */
+typedef enum
+{
+	PLX_EXIT_RETURN, PLX_EXIT_BREAK, PLX_EXIT_CONTINUE
+} PlxExitKind;
+
+typedef struct PlxFinExit
+{
+	PlxExitKind kind;
+	char	   *label;			/* loop label, or NULL */
+	char	   *value;			/* rewritten return value, or NULL */
+	int			code;			/* dispatch code once routed through finally */
+} PlxFinExit;
+
+typedef struct PlxFin
+{
+	int			id;
+	int			loopdepth;		/* cx->loopdepth when the try began */
+	struct PlxFin *outer;
+	PlxFinExit *exits;
+	int			nexits,
+				cap;
+} PlxFin;
+
+typedef struct PlxLabel
+{
+	char	   *name;
+	int			fin_id;			/* frame the labeled loop is in (0 = none) */
+	struct PlxLabel *next;
+} PlxLabel;
+
 /* ---------------------------------------------------------------- context */
 
 /*
@@ -89,9 +127,14 @@ typedef struct PlxCtx
 	const PlxSurface *surf;
 	StringInfoData out;			/* emitted BEGIN..END body */
 	PlxLocal2  *locals, *ltail;
+	struct HTAB *lhash;			/* lower-cased name -> local (see plx_local_find) */
 	int			loopdepth;
 	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */
+	struct PlxFin *fin;			/* innermost enclosing try-with-finally frame */
+	int			fin_seq;		/* frame id counter */
+	struct PlxLabel *labels;	/* loop labels seen so far, most recent first */
+	bool		ret_declared;	/* __plx_ret hoisted (see plx_fin_ret_var) */
 	int			subq;			/* __plx_fo_N / __plx_p_N counter */
 	const char *exc_var;		/* current rescue exception var name */
 	int			exc_varlen;
@@ -133,8 +176,16 @@ bool plx_tok_is(Tok *tk, const char *op);
 bool plx_name_eq(Tok *tk, const char *w);
 int plx_stmt_end(Ctx *cx, int from);
 void plx_indent(StringInfo o, int n);
+PlxFin *plx_fin_push(Ctx *cx);
+void plx_fin_pop(Ctx *cx, PlxFin *f);
+void plx_label_note(Ctx *cx, const char *name, int len);
+void plx_emit_exit(Ctx *cx, StringInfo o, int ind, PlxExitKind kind,
+				   const char *label, const char *value, const char *cond);
+void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
+				  char *arms, char *ensure_body, PlxFin *f);	/* frees its strings */
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+void plx_locals_reset(Ctx *cx);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */

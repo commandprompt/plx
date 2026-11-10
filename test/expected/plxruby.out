@@ -398,3 +398,55 @@ SELECT rb_hex();
     255
 (1 row)
 
+-- many distinct locals transpile in linear time, even after an over-long name
+-- (which used to disable the index); a regression takes tens of seconds
+SET statement_timeout = '20s';
+DO $d$ BEGIN
+  EXECUTE 'CREATE FUNCTION rb_many_locals() RETURNS int LANGUAGE plxruby AS $b$'
+    || 'v' || repeat('a', 130) || E' = 0\n'
+    || (SELECT string_agg(format('v%s = %s', i, i), E'\n') FROM generate_series(1, 60000) AS i)
+    || E'\nreturn 1\n$b$';
+END $d$;
+-- (not called: plpgsql's own compile of 60,000 variables is slow, and is not plx's)
+SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
+ count 
+-------
+     1
+(1 row)
+
+RESET statement_timeout;
+-- ensure runs on return
+CREATE FUNCTION rb_ensure_return(x int) RETURNS int LANGUAGE plxruby AS $$
+  begin
+    return x * 2
+  ensure
+    raise warning: "ruby ensure"
+  end
+$$;
+SELECT rb_ensure_return(4);
+WARNING:  ruby ensure
+ rb_ensure_return 
+------------------
+                8
+(1 row)
+
+CREATE FUNCTION rb_ensure_label_reuse() RETURNS int LANGUAGE plxruby AS $$
+  r = 0
+  outer: for i in 0..1
+    begin
+      outer: for j in 0..0
+        r = r * 10 + 1
+      end
+      break outer
+    ensure
+      r = r * 10 + 9
+    end
+  end
+  return r
+$$;
+SELECT rb_ensure_label_reuse();   -- 19
+ rb_ensure_label_reuse 
+-----------------------
+                    19
+(1 row)
+

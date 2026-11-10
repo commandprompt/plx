@@ -274,11 +274,13 @@ parse_py_try(Ctx *cx, int ind)
 				arms;
 	int			nrescue = 0;
 	char	   *ensure_body = NULL;
+	PlxFin	   *fin;
 
 	colon = py_header_colon(cx, cx->pos + 1);
 	if (colon < 0)
 		plx_err(cx, hd, "try requires ':'");
 	cx->pos = colon + 1;
+	fin = plx_fin_push(cx);
 	saved = cx->out;
 	initStringInfo(&cx->out);
 	parse_py_block(cx, ind + 1);
@@ -343,12 +345,14 @@ parse_py_try(Ctx *cx, int ind)
 		cx->exc_var = save_ev;
 		cx->exc_varlen = save_evl;
 
-		appendStringInfoSpaces(&arms, (ind + 1) * 2);
+		plx_indent(&arms, ind + 1);
 		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
 		appendStringInfoString(&arms, pfx);
 		appendStringInfoString(&arms, hb);
+		pfree(hb);
 		nrescue++;
 	}
+	plx_fin_pop(cx, fin);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)	/* finally */
 	{
 		colon = py_header_colon(cx, cx->pos + 1);
@@ -362,44 +366,7 @@ parse_py_try(Ctx *cx, int ind)
 		cx->out = saved;
 	}
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure_body, fin);
 }
 
 /* raise / raise Class("msg") */
@@ -463,10 +430,17 @@ parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		cx->t[cx->pos + 2].kind == T_KW &&
 		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
 	{
+		PlxLabel   *mark = cx->labels;
+
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;
-		tk = &cx->t[cx->pos];
+		/* the label is in scope only inside its loop: a later loop may
+		 * reuse the name, and a break must not resolve to a closed one */
+		parse_py_stmt_inner(cx, ind, toplevel);
+		cx->labels = mark;
+		return;
 	}
 	if (tk->kind == T_KW)
 	{

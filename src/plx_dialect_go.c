@@ -489,6 +489,36 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 	pfree(raw.data);
 }
 
+/*
+ * Index of the verb of the fmt directive whose '%' is at raw->data[pct], after
+ * skipping flags, width and precision; -1 when that character is not an ASCII
+ * letter (or the directive runs into the closing quote).
+ */
+static int
+go_sprintf_verb(StringInfo raw, int pct)
+{
+	int			j = pct + 1;
+
+	while (j + 1 < raw->len && (raw->data[j] == '-' || raw->data[j] == '+' ||
+								raw->data[j] == ' ' || raw->data[j] == '#' ||
+								raw->data[j] == '0'))
+		j++;
+	while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+		j++;
+	if (j + 1 < raw->len && raw->data[j] == '.')
+	{
+		j++;
+		while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+			j++;
+	}
+	if (j + 1 >= raw->len)
+		return -1;
+	if (!((raw->data[j] >= 'a' && raw->data[j] <= 'z') ||
+		  (raw->data[j] >= 'A' && raw->data[j] <= 'Z')))
+		return -1;
+	return j;
+}
+
 /* fmt.Sprintf with a literal format string, lowered to a || chain.
 
  * format() renders a NULL operand as the empty string and cannot be made to do
@@ -564,6 +594,17 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 		{
 			i++;
 			continue;
+		}
+		/*
+		 * The verb must be a letter. raw is already a SQL literal ('
+		 * doubled), so a quote here would otherwise be consumed as the verb
+		 * and leave half of a '' pair unescaped in the output; fall back to
+		 * the format() path, which validates verbs, instead.
+		 */
+		if (go_sprintf_verb(&raw, i) < 0)
+		{
+			pfree(raw.data);
+			return false;
 		}
 		ndir++;
 	}
@@ -961,7 +1002,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 
 /* emit tokens [a,b) as a plpgsql expression */
 static void
-go_emit_range(Go *g, int a, int b, StringInfo out)
+go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 {
 	int			i = a;
 
@@ -1115,6 +1156,21 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/*
+ * Recursion guard for the expression emitter. Nested calls, subscripts and
+ * literals recurse through here once per level; without check_stack_depth()
+ * hostile nesting overflows the C stack and crashes the backend (SIGSEGV).
+ */
+static void
+go_emit_range(Go *g, int a, int b, StringInfo out)
+{
+	check_stack_depth();
+	if (++g->cx->depth > PLX_MAX_DEPTH)
+		go_err(g, "expression nested too deeply");
+	go_emit_range_inner(g, a, b, out);
+	g->cx->depth--;
 }
 
 /* end of a simple statement: the next top-level ; (brackets/braces nest) */
