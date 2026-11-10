@@ -334,3 +334,21 @@ return 0xFFFFFFFFFFFFFFFFFF;
 $$;
 ERROR:  plxjs: integer literal out of range: 0xFFFFFFFFFFFFFFFFFF
 DETAIL:  at plxjs source line 0
+-- a constant's initializer runs when the function starts, so it cannot read a
+-- local variable (it would see the initial value, not the one assigned above)
+CREATE FUNCTION e_rb_const_local() RETURNS int LANGUAGE plxruby AS $$
+v = 1
+v = 2
+c = v + 1 #:: int const
+return c
+$$;
+ERROR:  plxruby: constant "c" cannot use local variable "v": a constant's value is computed when the function starts
+DETAIL:  at plxruby source line 4
+CREATE FUNCTION e_js_const_interp() RETURNS text LANGUAGE plxjs AS $$
+let v = "a";
+v = "b";
+let c = `got ${v}` /*:: text const */;
+return c;
+$$;
+ERROR:  plxjs: constant "c" cannot use local variable "v": a constant's value is computed when the function starts
+DETAIL:  at plxjs source line 4

@@ -4,6 +4,23 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `1.0`).
 
+## [Unreleased]
+
+### Fixed
+
+- **An interpolated string as a local's first value read stale values.** The
+  first top-level assignment of a string literal is folded into the `DECLARE`
+  section as the variable's initializer, which runs when the function starts.
+  An interpolating string (Ruby `"#{v}"`, PHP `"$v"`, JS `` `${v}` ``, Python
+  `f"{v}"`) was folded too, so it read its variables before the statements
+  above it had run: `v = "v0"; v = "v2"; s = "got #{v}"` returned `got v0`. Such
+  an assignment now runs in place. A plain literal is still folded.
+- **A constant computed from a local variable read the variable's initial
+  value.** A constant becomes a plpgsql `CONSTANT`, computed when the function
+  starts, so `v = 1; v = 2; c = v + 1 #:: int const` gave `c = 2`. A constant
+  may now use only literals, parameters and earlier constants; reading another
+  local is rejected at `CREATE FUNCTION`.
+
 ## [2.0.1] - 2026-08-25
 
 Packaging only. **The extension is unchanged at 2.0.0**, so there is no

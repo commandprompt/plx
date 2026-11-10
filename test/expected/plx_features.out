@@ -233,3 +233,64 @@ SELECT f_strict() AS strict_no_row;
             -1
 (1 row)
 
+-- a first assignment from an interpolated string is not folded into DECLARE:
+-- the initializer would run when the function starts and read the old value
+CREATE FUNCTION f_fold_js() RETURNS text LANGUAGE plxjs AS $$
+let v = "v0";
+v = "v2";
+let s = `got ${v}`;
+return s;
+$$;
+CREATE FUNCTION f_fold_py() RETURNS text LANGUAGE plxpython3 AS $$
+v = "v0"
+v = "v2"
+s = f"got {v}"
+return s
+$$;
+CREATE FUNCTION f_fold_rb() RETURNS text LANGUAGE plxruby AS $$
+v = "v0"
+v = "v2"
+s = "got #{v}"
+return s
+$$;
+CREATE FUNCTION f_fold_php() RETURNS text LANGUAGE plxphp AS $$
+$v = "v0";
+$v = "v2";
+$s = "got $v";
+return $s;
+$$;
+SELECT f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php();
+ f_fold_js | f_fold_py | f_fold_rb | f_fold_php 
+-----------+-----------+-----------+------------
+ got v2    | got v2    | got v2    | got v2
+(1 row)
+
+-- a plain literal is still folded; a constant may use parameters and earlier
+-- constants
+CREATE FUNCTION f_fold_const(n int) RETURNS text LANGUAGE plxruby AS $$
+k = 10 #:: int const
+c = "n=#{n} k=#{k}" #:: text const
+s = "plain"
+return "#{c} #{s}"
+$$;
+SELECT f_fold_const(5);
+  f_fold_const  
+----------------
+ n=5 k=10 plain
+(1 row)
+
+SELECT regexp_replace(prosrc, '/\*plx-orig.*', '') FROM pg_proc WHERE proname = 'f_fold_const';
+                        regexp_replace                         
+---------------------------------------------------------------
+ /*plx:v1:plxruby:784cd38a*/                                  +
+ DECLARE                                                      +
+   k CONSTANT int := 10;                                      +
+   c CONSTANT text := 'n=' || (n)::text || ' k=' || (k)::text;+
+   s text := 'plain';                                         +
+ BEGIN                                                        +
+   RETURN (c)::text || ' ' || (s)::text;                      +
+ END;                                                         +
+ 
+(1 row)
+
+DROP FUNCTION f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php(), f_fold_const(int);
