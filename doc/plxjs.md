@@ -102,6 +102,20 @@ for (let i = 1; i <= n; i++) {
 while (n > 0) { n = n - 1; }
 ```
 
+A counting `for` becomes a plpgsql integer `FOR`. That loop works out its
+bounds once and keeps its own copy of the loop variable. So plx accepts a `for`
+only when the result is the same:
+
+- The condition compares the loop variable with a single value (`i < n` or
+  `i <= n`).
+- The step changes the loop variable (`i++` or `i += K`).
+- The body does not assign the loop variable, or any variable in the bound or
+  the step.
+- In a loop without `let`, the code after the loop does not read the loop
+  variable before it assigns it again.
+
+`CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
+
 `continue` and `break` map to `CONTINUE` and `EXIT`.
 
 ### Loop labels
@@ -319,6 +333,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 
 - Function definitions, classes, `import`.
 - `for...in`.
+- A `for` that is not a counting loop (see [Loops](#loops)).
 - `switch` fall-through (end each case with `break` or `return`).
 
 Not translated:

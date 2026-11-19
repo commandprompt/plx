@@ -123,7 +123,8 @@ fail when the function runs.
 
 - Function, class, and namespace definitions; `use`, includes, closures.
 - Array and object literals as general values.
-- Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and `+= K` steps.
+- A `for` that is not a counting loop. Only `for ($v = LO; $v < HI; $v++)` and
+  `+= K` steps, under the rules in the [chapter](plxphp.md#loops).
 - `foreach` over a key/value pair: the key is ignored (value iteration only).
 - `switch` fall-through (end each case with `break` or `return`).
 
@@ -133,6 +134,7 @@ fail when the function runs.
 - Object and array literals as general values.
 - `for...in`. `for...of` treats anything other than `query(...)` as an array,
   so a non-array fails when the function runs.
+- A `for` that is not a counting loop ([chapter](plxjs.md#loops)).
 - Block scoping: `let`/`const` in an inner block assign the function-scoped
   variable of the same name.
 - `switch` fall-through.

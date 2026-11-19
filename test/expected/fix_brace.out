@@ -403,3 +403,81 @@ return 0;
 $$;
 ERROR:  plxjs: break takes a loop label, not a number
 \set VERBOSITY default
+-- A17: a for that is not a plain counting loop is rejected, not lowered to a wrong FOR
+\set VERBOSITY terse
+CREATE FUNCTION fb_f1(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; c < n; i++) { c = c + 2; }
+return c;
+$$;
+ERROR:  plxjs: for-loop condition must test the loop variable "i"; use a while loop for other conditions
+CREATE FUNCTION fb_f2(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0; let lim = n;
+for (let i = 0; i < lim; i++) { lim = 2; c = c + 1; }
+return c;
+$$;
+ERROR:  plxjs: the for-loop body assigns "lim", which the loop bound or step uses; a counting for evaluates them once, so use a while loop
+CREATE FUNCTION fb_f3() RETURNS int LANGUAGE plxjs AS $$
+let i = 0; let c = 0;
+for (i = 0; i < 10; i++) { i = i + 1; c = c + 1; }
+return c;
+$$;
+ERROR:  plxjs: the for-loop body assigns the loop variable "i"; use a while loop
+CREATE FUNCTION fb_f4(n int) RETURNS int LANGUAGE plxjs AS $$
+let i = 0;
+for (i = 0; i < n; i++) { }
+return i;
+$$;
+ERROR:  plxjs: the loop variable "i" is read after the for loop, but a counting for does not keep its final value; use a while loop
+CREATE FUNCTION fb_f5(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n && c < 2; i++) { c = c + 1; }
+return c;
+$$;
+ERROR:  plxjs: for-loop bound must be a single value, not a condition; use a while loop
+CREATE FUNCTION fb_f6(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0; let j = 0;
+for (let i = 0; i < n; i++, j++) { c = c + 1; }
+return c;
+$$;
+ERROR:  plxjs: for-loop step must be 'v++' or 'v += K'
+CREATE FUNCTION fb_f7(n int) RETURNS int LANGUAGE plxphp AS $$
+for ($i = 0; $i < $n; $i++) { }
+return $i;
+$$;
+ERROR:  plxphp: the loop variable "i" is read after the for loop, but a counting for does not keep its final value; use a while loop
+CREATE FUNCTION fb_f8(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n; j++) { c = c + 1; }
+return c;
+$$;
+ERROR:  plxjs: for-loop step must change the loop variable "i"
+\set VERBOSITY default
+-- a counting loop, reused after the loop only by another for, still compiles
+CREATE FUNCTION fb_f9(n int) RETURNS int LANGUAGE plxphp AS $$
+$t = 0;
+for ($i = 0; $i < $n; $i++) { $t = $t + $i; }
+for ($i = 0; $i < $n; $i += 2) { $t = $t + 1; }
+return $t;
+$$;
+SELECT fb_f9(4);
+ fb_f9 
+-------
+     8
+(1 row)
+
+-- a loop variable assigned again after the loop is not read after it
+CREATE FUNCTION fb_f10(n int) RETURNS int LANGUAGE plxphp AS $$
+$t = 0;
+for ($i = 1; $i <= $n; $i++) {
+  for ($j = 1; $j <= $i; $j++) { $t = $t + 1; }
+}
+$i = 100;
+return $t + $i;
+$$;
+SELECT fb_f10(3);
+ fb_f10 
+--------
+    106
+(1 row)
+

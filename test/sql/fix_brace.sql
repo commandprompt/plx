@@ -298,3 +298,63 @@ for (let i = 0; i < n; i++) {
 return 0;
 $$;
 \set VERBOSITY default
+-- A17: a for that is not a plain counting loop is rejected, not lowered to a wrong FOR
+\set VERBOSITY terse
+CREATE FUNCTION fb_f1(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; c < n; i++) { c = c + 2; }
+return c;
+$$;
+CREATE FUNCTION fb_f2(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0; let lim = n;
+for (let i = 0; i < lim; i++) { lim = 2; c = c + 1; }
+return c;
+$$;
+CREATE FUNCTION fb_f3() RETURNS int LANGUAGE plxjs AS $$
+let i = 0; let c = 0;
+for (i = 0; i < 10; i++) { i = i + 1; c = c + 1; }
+return c;
+$$;
+CREATE FUNCTION fb_f4(n int) RETURNS int LANGUAGE plxjs AS $$
+let i = 0;
+for (i = 0; i < n; i++) { }
+return i;
+$$;
+CREATE FUNCTION fb_f5(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n && c < 2; i++) { c = c + 1; }
+return c;
+$$;
+CREATE FUNCTION fb_f6(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0; let j = 0;
+for (let i = 0; i < n; i++, j++) { c = c + 1; }
+return c;
+$$;
+CREATE FUNCTION fb_f7(n int) RETURNS int LANGUAGE plxphp AS $$
+for ($i = 0; $i < $n; $i++) { }
+return $i;
+$$;
+CREATE FUNCTION fb_f8(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n; j++) { c = c + 1; }
+return c;
+$$;
+\set VERBOSITY default
+-- a counting loop, reused after the loop only by another for, still compiles
+CREATE FUNCTION fb_f9(n int) RETURNS int LANGUAGE plxphp AS $$
+$t = 0;
+for ($i = 0; $i < $n; $i++) { $t = $t + $i; }
+for ($i = 0; $i < $n; $i += 2) { $t = $t + 1; }
+return $t;
+$$;
+SELECT fb_f9(4);
+-- a loop variable assigned again after the loop is not read after it
+CREATE FUNCTION fb_f10(n int) RETURNS int LANGUAGE plxphp AS $$
+$t = 0;
+for ($i = 1; $i <= $n; $i++) {
+  for ($j = 1; $j <= $i; $j++) { $t = $t + 1; }
+}
+$i = 100;
+return $t + $i;
+$$;
+SELECT fb_f10(3);

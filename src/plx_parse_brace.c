@@ -376,6 +376,153 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 	brace_loop_body(cx, ind, start);
 }
 
+/* ---- counting-for checks (see parse_for_brace) ---- */
+
+static bool
+same_ident(Tok *a, Tok *b)
+{
+	return a->kind == T_IDENT && b->kind == T_IDENT && a->len == b->len &&
+		strncmp(a->s, b->s, a->len) == 0;
+}
+
+/* an operator that compares, as opposed to one that assigns */
+static bool
+op_is_comparison(Tok *t)
+{
+	static const char *const cmp[] = {"==", "===", "!=", "!==", "<=", ">=", "<=>", NULL};
+	int			i;
+
+	for (i = 0; cmp[i]; i++)
+		if (plx_tok_is(t, cmp[i]))
+			return true;
+	return false;
+}
+
+/* = += .= =- ... (any operator holding '=' that is not a comparison) */
+static bool
+op_assigns(Tok *t)
+{
+	return t->kind == T_OP && memchr(t->s, '=', t->len) && !op_is_comparison(t);
+}
+
+static bool
+op_incdec(Tok *t)
+{
+	return t->kind == T_OP && t->len >= 2 &&
+		(strncmp(t->s, "++", 2) == 0 || strncmp(t->s, "--", 2) == 0);
+}
+
+static bool
+op_ends_incdec(Tok *t)
+{
+	return t->kind == T_OP && t->len >= 2 &&
+		(strncmp(t->s + t->len - 2, "++", 2) == 0 ||
+		 strncmp(t->s + t->len - 2, "--", 2) == 0);
+}
+
+/*
+ * Does [a, b) hold, outside parentheses and brackets, anything that makes it
+ * more than one value: a comparison, a logical operator, an assignment, an
+ * increment, a ternary or a comma?
+ */
+static bool
+range_not_single_value(Ctx *cx, int a, int b)
+{
+	int			i, depth = 0;
+
+	for (i = a; i < b; i++)
+	{
+		Tok		   *t = &cx->t[i];
+
+		if (t->kind == T_LPAREN || t->kind == T_LBRACKET)
+			depth++;
+		else if (t->kind == T_RPAREN || t->kind == T_RBRACKET)
+			depth--;
+		else if (depth > 0)
+			continue;
+		else if (t->kind == T_COMMA || t->kind == T_PIPE)
+			return true;
+		else if (t->kind == T_KW &&
+				 (t->kw == KW_AND || t->kw == KW_OR || t->kw == KW_NOT))
+			return true;
+		else if (t->kind == T_OP &&
+				 (op_is_comparison(t) || op_assigns(t) || op_incdec(t) ||
+				  plx_tok_is(t, "<") || plx_tok_is(t, ">") ||
+				  plx_tok_is(t, "&&") || plx_tok_is(t, "||") ||
+				  plx_tok_is(t, "?") || plx_tok_is(t, ":") || plx_tok_is(t, "??") ||
+				  plx_tok_is(t, "!")))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Does [a, b) assign the variable named by tok i? Counted: name = ..,
+ * name op= .., name++, ++name, and PHP's append name[] = ... An element
+ * assignment name[k] = .. does not change the variable's length or bound.
+ */
+static bool
+range_assigns(Ctx *cx, int a, int b, Tok *name)
+{
+	int			i;
+
+	for (i = a; i < b; i++)
+	{
+		Tok		   *n;
+
+		if (!same_ident(&cx->t[i], name))
+			continue;
+		if (i > a && op_ends_incdec(&cx->t[i - 1]))
+			return true;
+		n = &cx->t[i + 1];
+		if (op_assigns(n) || op_incdec(n))
+			return true;
+		if (n->kind == T_LBRACKET && cx->t[i + 2].kind == T_RBRACKET &&
+			op_assigns(&cx->t[i + 3]))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Is the variable read after the loop that ends before token from? A read
+ * counts unless an assignment at the loop's own block level (a plain
+ * "v = ..", a later "for (v = ..", or "as v") comes first. Conservative: a
+ * read anywhere after the loop counts.
+ */
+static bool
+read_after_loop(Ctx *cx, int from, Tok *v)
+{
+	int			i, depth = 0;
+
+	for (i = from; cx->t[i].kind != T_EOF; i++)
+	{
+		Tok		   *t = &cx->t[i];
+
+		if (t->kind == T_LBRACE)
+			depth++;
+		else if (t->kind == T_RBRACE)
+			depth = depth > 0 ? depth - 1 : 0;
+		if (!same_ident(t, v))
+			continue;
+		if (depth == 0 && i > 0)
+		{
+			Tok		   *pv = &cx->t[i - 1];
+
+			if (pv->kind == T_KW && pv->kw == KW_AS)
+				return false;
+			if (plx_tok_is(&cx->t[i + 1], "=") &&
+				(pv->kind == T_SEMI || pv->kind == T_NEWLINE ||
+				 pv->kind == T_LBRACE || pv->kind == T_RBRACE ||
+				 (pv->kind == T_LPAREN && i > 1 && cx->t[i - 2].kind == T_KW &&
+				  cx->t[i - 2].kw == KW_FOR)))
+				return false;
+		}
+		return true;
+	}
+	return false;
+}
+
 /* C-style counting for, or JS `for (v of query(...))` */
 static void
 parse_for_brace(Ctx *cx, int ind)
@@ -385,12 +532,16 @@ parse_for_brace(Ctx *cx, int ind)
 	int			s1 = -1, s2 = -1, of_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
 	int			start;
+	bool		has_let = false;
 
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
 	/* strip a leading let/const/var declaration keyword */
 	if (cx->t[ca].kind == T_KW && cx->t[ca].kw == KW_LET)
+	{
 		ca++;
+		has_let = true;
+	}
 	/* scan for top-level ';' (C-for) and KW_OF (for-of) */
 	for (i = ca; i < cb; i++)
 	{
@@ -441,6 +592,47 @@ parse_for_brace(Ctx *cx, int ind)
 			step = plx_rw_range(cx, xa + 2, xb, false);
 		else
 			plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
+
+		/*
+		 * plpgsql's integer FOR evaluates LO, HI and K once, keeps its own
+		 * copy of the variable, and drops it when the loop ends. Lower only
+		 * a loop where that gives the source language's result.
+		 */
+		{
+			Tok		   *v = &cx->t[ia];
+			int			ba, be, bdepth = 0;
+
+			if (!same_ident(&cx->t[cca], v))
+				plx_err(cx, line, "for-loop condition must test the loop variable \"%s\"; use a while loop for other conditions", var);
+			if (!same_ident(&cx->t[xa], v))
+				plx_err(cx, line, "for-loop step must change the loop variable \"%s\"", var);
+			if (step ? range_not_single_value(cx, xa + 2, xb) : xb != xa + 2)
+				plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
+			if (range_not_single_value(cx, cca + 2, ccb))
+				plx_err(cx, line, "for-loop bound must be a single value, not a condition; use a while loop");
+			if (range_not_single_value(cx, ia + 2, ib))
+				plx_err(cx, line, "for-loop init must be 'v = LO'");
+			/* the body: from '{' to its matching '}' */
+			ba = cx->pos;
+			if (cx->t[ba].kind != T_LBRACE)
+				plx_err(cx, line, "expected '{'");
+			for (be = ba; cx->t[be].kind != T_EOF; be++)
+			{
+				if (cx->t[be].kind == T_LBRACE)
+					bdepth++;
+				else if (cx->t[be].kind == T_RBRACE && --bdepth == 0)
+					break;
+			}
+			if (range_assigns(cx, ba, be, v))
+				plx_err(cx, line, "the for-loop body assigns the loop variable \"%s\"; use a while loop", var);
+			for (i = cca + 2; i < xb; i++)
+				if (cx->t[i].kind == T_IDENT && (i < ccb || i >= xa + 2) &&
+					range_assigns(cx, ba, be, &cx->t[i]))
+					plx_err(cx, line, "the for-loop body assigns \"%.*s\", which the loop bound or step uses; a counting for evaluates them once, so use a while loop",
+							cx->t[i].len, cx->t[i].s);
+			if (!has_let && cx->t[be].kind == T_RBRACE && read_after_loop(cx, be + 1, v))
+				plx_err(cx, line, "the loop variable \"%s\" is read after the for loop, but a counting for does not keep its final value; use a while loop", var);
+		}
 		start = o->len;
 		plx_indent(o, ind);
 		if (lt)
