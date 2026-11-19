@@ -260,3 +260,42 @@ CREATE FUNCTION fx45_prec() RETURNS int LANGUAGE plxtsql AS $$
   RETURN (1 ^ 2) + 3;
 $$;
 SELECT fx45_prec();
+-- tsql-plus-eq-string: += and + on a string-typed local concatenate, as in T-SQL; numeric locals still add
+-- CHAR and NCHAR follow PostgreSQL: || drops the padding first, so @c ends as cy (SQL Server keeps it and truncates to c)
+CREATE FUNCTION fxps_pluseq() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @v varchar(20) = 'a', @nv NVARCHAR(MAX) = 'b', @c char(3) = 'c', @nc nchar(2) = 'd', @t text = 'e', @nt ntext = 'f', @i int = 1, @m decimal(5,2) = 1.5;
+  SET @v += 'x';
+  SET @nv += @v + '!';
+  SET @c += 'y';
+  SET @nc += 'z';
+  SET @t += 'w';
+  SET @nt += 'v';
+  SET @i += 2;
+  SET @m += 1;
+  RETURN @v + '|' + @nv + '|' + @c + '|' + @nc + '|' + @t + '|' + @nt + '|' + CONVERT(varchar(10), @i) + '|' + CONVERT(varchar(10), @m);
+$$;
+SELECT fxps_pluseq();
+CREATE FUNCTION fxps_plus() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(20) = 'ab', @u varchar(20) = 'cd', @n int = 3;
+  SET @s = @s + 'x';
+  SET @s = @s + @u;
+  SET @n = @n + 4;
+  SET @s = @s + CAST(@n AS varchar(10));
+  RETURN @s;
+$$;
+SELECT fxps_plus();
+-- NULL propagates through += and + on a string local, as with CONCAT_NULL_YIELDS_NULL ON
+CREATE FUNCTION fxps_null() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(20) = 'a', @z varchar(20);
+  SET @s += @z;
+  RETURN ISNULL(@s, 'null') + '/' + ISNULL(@z + 'q', 'null');
+$$;
+SELECT fxps_null();
+-- a string parameter concatenates too; a number next to + keeps it an addition
+CREATE FUNCTION fxps_mixed(p varchar) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @d varchar(5) = '40', @n int = 1;
+  SET @p += '!';
+  SET @n = @n + LEN(@p) + CAST(@d AS int) * 2;
+  RETURN @p + '-' + UPPER(@p) + '-' + CONVERT(varchar(10), '1' + 2) + '-' + CONVERT(varchar(10), @n);
+$$;
+SELECT fxps_mixed('hi');

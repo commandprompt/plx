@@ -60,7 +60,7 @@ SELECT sum_to(100);
 
 ## Building a text result in a loop
 
-T-SQL overloads `+` for both numeric addition and string concatenation, so plx leaves `+` untranslated. Use `||` or `CONCAT(...)` to join strings. `VARCHAR(MAX)` maps to `text`.
+T-SQL overloads `+` for both numeric addition and string concatenation. plx writes `+` as `||` only when an operand is a known string, such as a `VARCHAR` variable or a `CONVERT` to `varchar` (see [plxtsql.md](../plxtsql.md#string-concatenation-with)). Use `||` or `CONCAT(...)` to join other strings, such as two columns. `VARCHAR(MAX)` maps to `text`.
 
 ```sql
 CREATE FUNCTION repeat_word(word text, times int) RETURNS text LANGUAGE plxtsql AS $$

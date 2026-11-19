@@ -95,9 +95,11 @@ These follow from running as plpgsql and are not specific to any one dialect.
   message replaces your message with plpgsql's generic `assertion failed`. Wrap
   such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
-  `+` is SQL numeric addition. Use the dialect's string form: interpolation
-  (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL, T-SQL), or
+  except plxtsql, `+` is SQL numeric addition. Use the dialect's string form:
+  interpolation (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL), or
   `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is rejected.
+  plxtsql writes `+` as `||` when an operand is a known string, such as a
+  `VARCHAR` variable; see [plxtsql.md](plxtsql.md#string-concatenation-with).
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type

@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
@@ -31,6 +32,7 @@ PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
 /*   - @local variables (and inline DECLARE anywhere) -> hoisted DECLARE    */
 /*     block; @x references drop the sigil.                                 */
 /*   - SET @x = e / SET @x += e            -> x := e; / x := x + (e);        */
+/*     (x := x || (e) when @x has a string type; + between strings -> ||) */
 /*   - SELECT @x = e [, ...] [FROM ...]    -> x := e;  or  SELECT ... INTO   */
 /*   - IF cond stmt|BEGIN..END [ELSE ...]  -> IF cond THEN ... END IF;       */
 /*   - WHILE cond stmt|BEGIN..END          -> WHILE cond LOOP ... END LOOP;  */
@@ -67,6 +69,8 @@ typedef struct
 	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
 	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
 	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
+	bool	   *cat;			/* cat[i]: the '+' at i concatenates; emit || */
+	int			emitdepth;		/* tq_emit_range nesting; 0 = a top-level range */
 } Tq;
 
 static void tq_stmt(Tq *tq, int ind);
@@ -581,6 +585,7 @@ tq_pair_parens(Tq *tq)
 	tq->match = palloc(sizeof(int) * (tq->nt + 1));
 	tq->comma1 = palloc(sizeof(int) * (tq->nt + 1));
 	tq->comma2 = palloc(sizeof(int) * (tq->nt + 1));
+	tq->cat = palloc0(sizeof(bool) * (tq->nt + 1));
 	for (i = 0; i < tq->nt; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
@@ -611,6 +616,311 @@ tq_match_lp(Tq *tq, int lp, int limit)
 	int			close = tq->match[lp];
 
 	return (close >= 0 && close < limit) ? close : -1;
+}
+
+/*
+ * T-SQL + concatenates when its operands are strings and adds when they are
+ * numbers; PostgreSQL has no + for strings and spells concatenation ||. plx
+ * has no expression types, so it classifies each operand of a chain
+ * a + b + c from what it can see:
+ *   TC_STR  a local or parameter declared with a string type, CAST or CONVERT
+ *           to a string type, a string function, or ISNULL/COALESCE whose
+ *           first argument is a string local or literal;
+ *   TC_LIT  a string literal;
+ *   TC_NUM  a number, a numeric local or parameter, CAST or CONVERT to a
+ *           numeric type, or a product (a * b binds tighter than +);
+ *   TC_UNK  anything else (a column, another call, a parenthesized expression).
+ * A chain concatenates when it has a TC_STR operand, or when every operand is
+ * a string literal. In such a chain each + becomes || unless an operand next
+ * to it is TC_NUM: T-SQL then converts the string to a number and adds.
+ */
+typedef enum
+{
+	TC_UNK, TC_NUM, TC_LIT, TC_STR
+} TqCls;
+
+/* class of a plpgsql type text from DECLARE (varchar(10), text, integer, ...) */
+static TqCls
+tq_type_class(const char *typ)
+{
+	static const char *str[] = {"varchar", "char", "text", NULL};
+	static const char *num[] = {"integer", "bigint", "smallint", "numeric",
+	"real", "double precision", NULL};
+	int			len,
+				i;
+
+	if (typ == NULL)
+		return TC_UNK;
+	len = strcspn(typ, "(");
+	for (i = 0; str[i]; i++)
+		if ((int) strlen(str[i]) == len && strncmp(typ, str[i], len) == 0)
+			return TC_STR;
+	for (i = 0; num[i]; i++)
+		if ((int) strlen(num[i]) == len && strncmp(typ, num[i], len) == 0)
+			return TC_NUM;
+	return TC_UNK;
+}
+
+/* class of an @variable: a DECLAREd local, else a parameter, else unknown */
+static TqCls
+tq_var_class(Tq *tq, TqTok *tk)
+{
+	char	   *name = tq_ident(tk->s, tk->len);
+	PlxLocal2  *l = plx_local_find(tq->cx, name, tk->len);
+	const PlxFuncMeta *m = tq->cx->meta;
+	int			i;
+
+	if (l)
+		return l->is_record ? TC_UNK : tq_type_class(l->typ);
+	if (m == NULL || m->argnames == NULL || m->argtypes == NULL)
+		return TC_UNK;
+	for (i = 0; i < m->nargs; i++)
+	{
+		const char *an = m->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len &&
+			pg_strncasecmp(an, tk->s, tk->len) == 0)
+		{
+			switch (m->argtypes[i])
+			{
+				case VARCHAROID:
+				case BPCHAROID:
+				case TEXTOID:
+					return TC_STR;
+				case INT2OID:
+				case INT4OID:
+				case INT8OID:
+				case NUMERICOID:
+				case FLOAT4OID:
+				case FLOAT8OID:
+					return TC_NUM;
+				default:
+					return TC_UNK;
+			}
+		}
+	}
+	return TC_UNK;
+}
+
+/* class of a T-SQL type name token (CAST/CONVERT target) */
+static TqCls
+tq_typetok_class(TqTok *tk)
+{
+	const char *base;
+
+	if (tk->kind != TQ_WORD)
+		return TC_UNK;
+	base = tq_base_type(tk->s, tk->len);
+	return base ? tq_type_class(base) : TC_UNK;
+}
+
+/* class of the call whose name is at i and whose ')' is at close */
+static TqCls
+tq_call_class(Tq *tq, int i, int close)
+{
+	static const char *strfn[] = {
+		"UPPER", "LOWER", "LTRIM", "RTRIM", "TRIM", "SUBSTRING", "LEFT",
+		"RIGHT", "REPLACE", "REPLICATE", "CONCAT", "STUFF", NULL
+	};
+	TqTok	   *tk = &tq->t[i];
+	TqTok	   *a1 = &tq->t[i + 2];
+	int			k;
+
+	if (tq_ci(tk, "CONVERT"))
+		return tq_typetok_class(a1);
+	if (tq_ci(tk, "CAST"))
+	{
+		/* CAST(e AS type) or CAST(e AS type(n)): the type sits before ')' */
+		if (close - 2 > i + 1 && tq_ci(&tq->t[close - 2], "AS"))
+			return tq_typetok_class(&tq->t[close - 1]);
+		if (close - 5 > i + 1 && tq->t[close - 1].kind == TQ_RP &&
+			tq->t[close - 3].kind == TQ_LP && tq_ci(&tq->t[close - 5], "AS"))
+			return tq_typetok_class(&tq->t[close - 4]);
+		return TC_UNK;
+	}
+	if (tq_ci(tk, "ISNULL") || tq_ci(tk, "COALESCE"))
+	{
+		if (a1->kind == TQ_STR ||
+			(a1->kind == TQ_VAR && tq_var_class(tq, a1) == TC_STR))
+			return TC_STR;
+		return TC_UNK;
+	}
+	for (k = 0; strfn[k]; k++)
+		if (tq_ci(tk, strfn[k]))
+			return TC_STR;
+	return TC_UNK;
+}
+
+/* a word that cannot be (or start) an operand of + */
+static bool
+tq_operand_kw(TqTok *tk)
+{
+	static const char *k[] = {
+		"AND", "OR", "NOT", "IS", "IN", "LIKE", "BETWEEN", "CASE", "WHEN",
+		"THEN", "ELSE", "END", "AS", "FROM", "WHERE", "ESCAPE", "COLLATE",
+		"EXISTS", "ON", "BY", "HAVING", "TOP", "DISTINCT", "ALL", "ANY",
+		"SOME", "UNION", "INTO", "VALUES", "BEGIN", NULL
+	};
+	int			i;
+
+	for (i = 0; k[i]; i++)
+		if (tq_ci(tk, k[i]))
+			return true;
+	return tq_is_stmt_kw(tk);
+}
+
+/* one operand without a product: end index past it, or -1; sets *cls */
+static int
+tq_operand1(Tq *tq, int i, int b, TqCls *cls)
+{
+	TqTok	   *tk;
+	int			e,
+				close;
+
+	if (i >= b)
+		return -1;
+	tk = &tq->t[i];
+	*cls = TC_UNK;
+	switch (tk->kind)
+	{
+		case TQ_VAR:
+			*cls = tq_var_class(tq, tk);
+			return i + 1;
+		case TQ_GVAR:
+			return i + 1;
+		case TQ_NUM:
+			*cls = TC_NUM;
+			return i + 1;
+		case TQ_STR:
+			*cls = TC_LIT;
+			return i + 1;
+		case TQ_LP:
+			close = tq_match_lp(tq, i, b);
+			return close < 0 ? -1 : close + 1;
+		case TQ_WORD:
+		case TQ_QIDENT:
+			if (tk->kind == TQ_WORD && tq_operand_kw(tk))
+				return -1;
+			e = i + 1;
+			while (e + 1 < b && tq->t[e].kind == TQ_DOT &&
+				   (tq->t[e + 1].kind == TQ_WORD || tq->t[e + 1].kind == TQ_QIDENT))
+				e += 2;
+			if (e < b && tq->t[e].kind == TQ_LP)
+			{
+				close = tq_match_lp(tq, e, b);
+				if (close < 0)
+					return -1;
+				if (e == i + 1 && tk->kind == TQ_WORD)
+					*cls = tq_call_class(tq, i, close);
+				e = close + 1;
+			}
+			return e;
+		default:
+			return -1;
+	}
+}
+
+/* one operand of +, a product counting as one numeric operand */
+static int
+tq_operand(Tq *tq, int i, int b, TqCls *cls)
+{
+	int			e = tq_operand1(tq, i, b, cls);
+
+	while (e >= 0 && e < b && tq->t[e].kind == TQ_OP && tq->t[e].len == 1 &&
+		   strchr("*/%", tq->t[e].s[0]))
+	{
+		TqCls		c;
+		int			n = tq_operand1(tq, e + 1, b, &c);
+
+		if (n < 0)
+			break;
+		e = n;
+		*cls = TC_NUM;
+	}
+	return e;
+}
+
+static bool
+tq_is_plus(TqTok *tk)
+{
+	return tk->kind == TQ_OP && tk->len == 1 && tk->s[0] == '+';
+}
+
+/* can an operand chain start at i, judged by the token before it? */
+static bool
+tq_chain_start(Tq *tq, int i)
+{
+	TqTok	   *p;
+
+	if (i == 0)
+		return true;
+	p = &tq->t[i - 1];
+	switch (p->kind)
+	{
+		case TQ_LP:
+		case TQ_COMMA:
+		case TQ_SEMI:
+			return true;
+		case TQ_WORD:
+			/* not the argument list of a call such as CONVERT(...) */
+			return tq->t[i].kind != TQ_LP || tq_operand_kw(p);
+		case TQ_OP:
+			return !(p->len == 1 && strchr("+-*/%~&|^", p->s[0]));
+		default:
+			return false;
+	}
+}
+
+/* decide each + of the operand chain starting at i (see TqCls) */
+static void
+tq_chain(Tq *tq, int i, int b)
+{
+	bool		any_str = false,
+				all_lit = true;
+	int			n = 0,
+				e = i;
+	TqCls		c,
+				prev;
+
+	for (;;)
+	{
+		e = tq_operand(tq, e, b, &c);
+		if (e < 0)
+			break;
+		n++;
+		any_str |= (c == TC_STR);
+		all_lit &= (c == TC_LIT);
+		if (e >= b || !tq_is_plus(&tq->t[e]))
+			break;
+		e++;
+	}
+	if (n < 2)
+		return;
+	e = tq_operand(tq, i, b, &prev);
+	while (e >= 0 && e < b && tq_is_plus(&tq->t[e]))
+	{
+		int			op = e;
+
+		e = tq_operand(tq, op + 1, b, &c);
+		if (e < 0)
+			break;
+		tq->cat[op] = (any_str || all_lit) && prev != TC_NUM && c != TC_NUM;
+		prev = c;
+	}
+}
+
+/* decide every + in the top-level expression [a,b) */
+static void
+tq_mark_concat(Tq *tq, int a, int b)
+{
+	int			i;
+
+	for (i = a; i < b; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (tq_chain_start(tq, i))
+			tq_chain(tq, i, b);
+	}
 }
 
 /* emit a function-call rename for a WORD at index i (followed by '('), or
@@ -840,6 +1150,8 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 				appendStringInfoString(out, "<>");
 			else if (tk->len == 1 && tk->s[0] == '^')
 				appendStringInfoChar(out, '#');	/* T-SQL XOR; PG ^ is power */
+			else if (tq->cat[i])
+				appendStringInfoString(out, "||");	/* string + (see TqCls) */
 			else
 				appendBinaryStringInfo(out, tk->s, tk->len);
 			i++;
@@ -860,7 +1172,10 @@ tq_emit_range(Tq *tq, int a, int b, StringInfo out)
 	check_stack_depth();
 	if (++tq->cx->depth > PLX_MAX_DEPTH)
 		tq_err(tq, "expression nested too deeply");
+	if (tq->emitdepth++ == 0)
+		tq_mark_concat(tq, a, b);
 	tq_emit_range_inner(tq, a, b, out);
+	tq->emitdepth--;
 	tq->cx->depth--;
 }
 
@@ -1099,7 +1414,14 @@ tq_set(Tq *tq, int ind)
 	if (e1 <= e0)
 		tq_err(tq, "SET is missing a value expression");
 	plx_indent(&tq->cx->out, ind);
-	if (arith)
+	if (arith == '+' && tq_var_class(tq, v) == TC_STR)
+	{
+		/* += on a string variable concatenates in T-SQL */
+		appendStringInfo(&tq->cx->out, "%s := %s || (", name, name);
+		tq_emit_range(tq, e0, e1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ");\n");
+	}
+	else if (arith)
 	{
 		appendStringInfo(&tq->cx->out, "%s := %s %c (", name, name, arith);
 		tq_emit_range(tq, e0, e1, &tq->cx->out);

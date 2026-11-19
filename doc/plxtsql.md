@@ -80,6 +80,7 @@ reserved word.
 | `DECLARE @a int, @b int` | both hoisted |
 | `SET @x = e` | `x := e;` |
 | `SET @x += e` | `x := x + (e);` (also `-=`, `*=`, `/=`, `%=`) |
+| `SET @s += e`, `@s` a string variable | `s := s \|\| (e);` |
 | `SELECT @x = e` (no `FROM`) | `x := e;` |
 | `SELECT @x = a, @y = b` | `x := a; y := b;` |
 | `SELECT @x = col FROM t ...` | `FOR r IN SELECT col AS c1 FROM t ... LOOP x := r.c1; END LOOP;` |
@@ -182,6 +183,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | --- | --- |
 | `a ^ b` (bitwise exclusive OR) | `a # b` |
 | `a != b` | `a <> b` |
+| `@s + 'x'` (string operands) | `s \|\| 'x'` |
 
 In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
 `^` to `#`. Use `POWER(a, b)` for exponentiation.
@@ -192,6 +194,51 @@ same precedence as `+` and `-` and evaluates left to right. PostgreSQL binds
 So `1 ^ 2 + 3` gives 6 in SQL Server, but 4 in plx, which computes
 `1 # (2 + 3)`. Put parentheses around a bitwise operation that is followed by
 `+` or `-`: write `(1 ^ 2) + 3`.
+
+### String concatenation with `+`
+
+T-SQL uses `+` both to add numbers and to join strings. PostgreSQL has no `+`
+for strings: it joins them with `||`. plx has no type information for most
+expressions, so it decides from what it can see in the body.
+
+A chain of operands joined by `+`, such as `@a + ' ' + @b`, is a string chain
+when one of its operands is a known string, or when every operand is a string
+literal. A known string is one of:
+
+- a variable or parameter declared with a string type: `VARCHAR`, `NVARCHAR`,
+  `CHAR`, `NCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
+- `CAST` or `CONVERT` to one of those types;
+- `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
+  `REPLACE`, `REPLICATE`, `CONCAT` or `STUFF`;
+- `ISNULL` or `COALESCE` whose first argument is a string variable or a string
+  literal.
+
+In a string chain plx writes each `+` as `||`, except a `+` next to a number:
+a numeric literal, a numeric variable or parameter, `CAST` or `CONVERT` to a
+numeric type, or a product such as `@n * 2`. SQL Server converts the string to
+a number there and adds, so plx keeps `+`. `SET @s += e` on a string variable
+becomes `s := s || (e)`.
+
+```sql
+CREATE FUNCTION label(id int) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(40) = 'item';
+  SET @s += ' ';
+  RETURN @s + CONVERT(varchar(10), @id) + '/' + UPPER(@s);
+$$;
+```
+
+Both `+` and `||` return NULL when either side is NULL, as in SQL Server with
+the default `CONCAT_NULL_YIELDS_NULL ON`.
+
+Write `||` or `CONCAT(...)` yourself when no operand of the chain is a known
+string, for example to join two columns or a column and a literal. plx leaves
+such a `+` as `+`, and PostgreSQL then reports that the operator does not
+exist. A `CASE` expression is not an operand plx can classify, so a `+` next to
+one is also left as `+`.
+
+`CHAR(n)` and `NCHAR(n)` variables keep PostgreSQL behavior. `||` drops their
+trailing spaces before it joins, and assigning a value longer than `n` is an
+error. SQL Server keeps the padding and cuts the result to `n`.
 
 ## Dynamic SQL
 
@@ -265,10 +312,8 @@ session option.
   expression once per row with the updated value, so it rejects the function
   rather than return a different result. Use an aggregate such as `SUM(v)` or
   `string_agg(name, ',')`.
-- String concatenation with `+`. T-SQL overloads `+` for both numeric addition
-  and string concatenation; plx cannot tell which is meant without type
-  information, so it leaves `+` as `+`. Use `||` or `CONCAT(...)` for string
-  concatenation.
+- String concatenation with `+` when no operand is a known string. See
+  [String concatenation with `+`](#string-concatenation-with).
 
 See [PARITY.md](PARITY.md) for the full per-dialect feature matrix and
 [USERGUIDE.md](USERGUIDE.md) for cross-dialect examples.
