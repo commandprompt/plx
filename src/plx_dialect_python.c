@@ -340,6 +340,55 @@ parse_py_for(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/*
+ * The plpgsql condition for the class list of an except clause, tokens [a, b).
+ * Exception maps to OTHERS. A tuple (A, B) maps to "a OR b". Any class plx
+ * does not know is an error: falling back to OTHERS would make a handler
+ * written for one condition catch every error.
+ */
+static const char *
+py_except_condition(Ctx *cx, int a, int b)
+{
+	StringInfoData r;
+	int			i, seg, depth = 0;
+	bool		tuple = (cx->t[a].kind == T_LPAREN && cx->t[b - 1].kind == T_RPAREN &&
+						 b - a > 2);
+
+	if (tuple)
+	{
+		a++;
+		b--;
+	}
+	initStringInfo(&r);
+	seg = a;
+	for (i = a; i <= b; i++)
+	{
+		if (i < b && (cx->t[i].kind == T_LPAREN || cx->t[i].kind == T_LBRACKET))
+			depth++;
+		else if (i < b && (cx->t[i].kind == T_RPAREN || cx->t[i].kind == T_RBRACKET))
+			depth--;
+		if (i == b && i == seg && r.len > 0)
+			break;				/* trailing comma: (A, B,) */
+		if (i == b || (tuple && depth == 0 && cx->t[i].kind == T_COMMA))
+		{
+			char	   *cls = (i > seg) ? plx_span_text(cx, seg, i) : pstrdup("");
+			const char *c;
+
+			if (strcmp(cls, "Exception") == 0)
+				return "OTHERS";
+			c = plx_exc_class_to_condition(cls, (int) strlen(cls));
+			if (!c)
+				plx_err(cx, cx->t[seg < b ? seg : a].line,
+						"unsupported exception class \"%s\"", cls);
+			if (r.len > 0)
+				appendStringInfoString(&r, " OR ");
+			appendStringInfoString(&r, c);
+			seg = i + 1;
+		}
+	}
+	return r.data;
+}
+
 /* try: <body> except [Class as e]: <handler> ... [finally: <body>] */
 static void
 parse_py_try(Ctx *cx, int ind)
@@ -395,13 +444,7 @@ parse_py_try(Ctx *cx, int ind)
 			int			cls_b = (as_at >= 0) ? as_at : colon;
 
 			if (cls_b > es + 1)
-			{
-				char	   *cls = plx_span_text(cx, es + 1, cls_b);
-				const char *c = plx_exc_class_to_condition(cls, (int) strlen(cls));
-
-				if (c)
-					cond = c;
-			}
+				cond = py_except_condition(cx, es + 1, cls_b);
 		}
 		cx->pos = colon + 1;
 		if (ev_a >= 0)

@@ -106,3 +106,77 @@ SELECT prosrc ~ 'FOR j IN 0' AS plain_for FROM pg_proc WHERE proname = 'fr_a20_p
  t
 (1 row)
 
+-- A21: plxpython3 except with an unknown class is rejected, not turned into WHEN OTHERS
+\set VERBOSITY terse
+CREATE FUNCTION fr_a21_unknown() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except KeyError:
+    return "caught by KeyError handler"
+$$;
+ERROR:  plxpython3: unsupported exception class "KeyError"
+CREATE FUNCTION fr_a21_typo() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except PG::UniqueVoilation as e:
+    return "typo caught"
+$$;
+ERROR:  plxpython3: unsupported exception class "PG::UniqueVoilation"
+CREATE FUNCTION fr_a21_tuple_miss() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, PG::CheckViolation) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_miss();
+ERROR:  division by zero
+CREATE FUNCTION fr_a21_tuple_hit() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, ZeroDivisionError) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_hit();
+     fr_a21_tuple_hit     
+--------------------------
+ caught: division by zero
+(1 row)
+
+CREATE FUNCTION fr_a21_tuple_bad() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    return "ok"
+except (PG::UniqueViolation, KeyError):
+    return "caught"
+$$;
+ERROR:  plxpython3: unsupported exception class "KeyError"
+CREATE FUNCTION fr_a21_exception() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except Exception as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_exception();
+     fr_a21_exception     
+--------------------------
+ caught: division by zero
+(1 row)
+
+CREATE FUNCTION fr_a21_bare() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except:
+    return "caught"
+$$;
+SELECT fr_a21_bare();
+ fr_a21_bare 
+-------------
+ caught
+(1 row)
+
+\set VERBOSITY default

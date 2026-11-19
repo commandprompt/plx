@@ -61,3 +61,58 @@ return t
 $$;
 SELECT fr_a20_py_local() AS py_expect_6;
 SELECT prosrc ~ 'FOR j IN 0' AS plain_for FROM pg_proc WHERE proname = 'fr_a20_py_local';
+-- A21: plxpython3 except with an unknown class is rejected, not turned into WHEN OTHERS
+\set VERBOSITY terse
+CREATE FUNCTION fr_a21_unknown() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except KeyError:
+    return "caught by KeyError handler"
+$$;
+CREATE FUNCTION fr_a21_typo() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except PG::UniqueVoilation as e:
+    return "typo caught"
+$$;
+CREATE FUNCTION fr_a21_tuple_miss() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, PG::CheckViolation) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_miss();
+CREATE FUNCTION fr_a21_tuple_hit() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, ZeroDivisionError) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_hit();
+CREATE FUNCTION fr_a21_tuple_bad() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    return "ok"
+except (PG::UniqueViolation, KeyError):
+    return "caught"
+$$;
+CREATE FUNCTION fr_a21_exception() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except Exception as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_exception();
+CREATE FUNCTION fr_a21_bare() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except:
+    return "caught"
+$$;
+SELECT fr_a21_bare();
+\set VERBOSITY default
