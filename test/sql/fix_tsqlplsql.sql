@@ -206,3 +206,33 @@ CREATE FUNCTION fx47_iif(a int) RETURNS int LANGUAGE plxtsql AS $$
   RETURN 0;
 $$;
 SELECT fx47_iif(5) AS pos, fx47_iif(-5) AS neg;
+-- A42: STRICT goes only on a SELECT INTO, never on INSERT INTO, RETURNING INTO or an INTO that has STRICT
+CREATE TABLE fx42_t2(v int);
+CREATE FUNCTION fx42_wins() RETURNS int LANGUAGE plxplsql AS $$
+  n NUMBER;
+BEGIN
+  WITH s AS (SELECT 5 AS v) INSERT INTO fx42_t2 SELECT v FROM s;
+  SELECT count(*) INTO n FROM fx42_t2;
+  RETURN n;
+END;
+$$;
+SELECT fx42_wins();
+CREATE FUNCTION fx42_ret() RETURNS text LANGUAGE plxplsql AS $$
+  x NUMBER := 7;
+  y NUMBER := 7;
+BEGIN
+  WITH s AS (SELECT 1 AS v) UPDATE fx42_amt SET v = v WHERE v > 100 RETURNING v INTO x;
+  UPDATE fx42_amt SET v = v WHERE v > 100 RETURNING v INTO y;
+  RETURN NVL(x, -1) || '/' || NVL(y, -1);
+END;
+$$;
+SELECT fx42_ret();
+CREATE FUNCTION fx42_has() RETURNS int LANGUAGE plxplsql AS $$
+  x NUMBER;
+BEGIN
+  SELECT v INTO STRICT x FROM fx42_amt WHERE v = 1;
+  EXECUTE IMMEDIATE 'SELECT 2' INTO STRICT x;
+  RETURN x;
+END;
+$$;
+SELECT fx42_has();

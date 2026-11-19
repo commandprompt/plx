@@ -114,8 +114,9 @@ EXCEPTION
 The condition names `NO_DATA_FOUND` and `TOO_MANY_ROWS` are recognized by
 plpgsql as well. As in Oracle, a `SELECT ... INTO` or `EXECUTE IMMEDIATE ...
 INTO` that finds no row raises `NO_DATA_FOUND`, and one that finds more than one
-row raises `TOO_MANY_ROWS`: plx adds `STRICT` to the `INTO`. `FETCH ... INTO`
-and `RETURNING ... INTO` keep a plain `INTO`. Other Oracle names are not translated: use the PostgreSQL
+row raises `TOO_MANY_ROWS`: plx adds `STRICT` to the `INTO`. `FETCH ... INTO`,
+`RETURNING ... INTO` and `INSERT INTO` keep a plain `INTO`, also after a `WITH`
+clause. An `INTO STRICT` that you write stays as written. Other Oracle names are not translated: use the PostgreSQL
 condition name (`division_by_zero` for `ZERO_DIVIDE`, `unique_violation` for
 `DUP_VAL_ON_INDEX`). An unrecognized name fails when the function is first
 called with `unrecognized exception condition`.

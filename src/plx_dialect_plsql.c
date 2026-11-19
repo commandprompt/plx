@@ -288,7 +288,10 @@ pl_emit_raw(Pl *pl, int a, int b, StringInfo out)
  * STRICT. One forward pass tracks the first word of each statement, the paren
  * depth and the CASE ... END depth, so only an INTO at the top level of a
  * SELECT (or WITH) or EXECUTE statement is marked. FETCH ... INTO and DML
- * RETURNING ... INTO keep their plain INTO, as in Oracle.
+ * RETURNING ... INTO keep their plain INTO, as in Oracle. A top-level INSERT,
+ * UPDATE, DELETE or MERGE ends the marking, so WITH ... INSERT INTO t and
+ * WITH ... UPDATE ... RETURNING ... INTO stay as written. An INTO already
+ * followed by STRICT is left alone.
  */
 static bool *
 pl_mark_strict_into(Pl *pl)
@@ -340,7 +343,11 @@ pl_mark_strict_into(Pl *pl)
 		else if (pl_ci(t, "BEGIN") || pl_ci(t, "THEN") || pl_ci(t, "ELSE") ||
 				 pl_ci(t, "LOOP") || pl_ci(t, "DECLARE") || pl_ci(t, "EXCEPTION"))
 			at_start = true;
-		else if (wants && pl_ci(t, "INTO"))
+		else if (pl_ci(t, "INSERT") || pl_ci(t, "UPDATE") ||
+				 pl_ci(t, "DELETE") || pl_ci(t, "MERGE"))
+			wants = false;		/* WITH ... INSERT INTO / RETURNING ... INTO */
+		else if (wants && pl_ci(t, "INTO") &&
+				 !(i + 1 < pl->nt && pl_ci(&pl->t[i + 1], "STRICT")))
 			mark[i] = true;
 	}
 	return mark;
