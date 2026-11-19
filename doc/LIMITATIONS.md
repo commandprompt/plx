@@ -57,8 +57,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `coalesce(x, '')` to treat a NULL as empty. A PHP variable whose first use is
   `.=` starts as an empty string. A message built with appends is not covered
   by the RAISE exception: if a part was NULL, the raised message is `<NULL>`.
-  The one exception is plxcobol's `STRING-APPEND`, which treats a NULL as
-  nothing to append, because COBOL has no NULL.
+  plxcobol's `STRING-APPEND` does not follow the append rule: it treats a NULL
+  as nothing to append, because COBOL has no NULL.
 - **The message fallback covers the message text only.** An interpolated NULL
   in a `RAISE` option such as `detail:` or `hint:` makes the `RAISE` itself fail
   with `RAISE statement option cannot be null`, which hides the error you meant
@@ -80,7 +80,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
 - **The string builder must be on the search path.** Functions that use the
   append operators reference the extension's `plx_strbuild` type and
-  `plx_sb_append` or `plx_sb_append_strict` function unqualified, so the extension's schema must be on the
+  `plx_sb_append` or `plx_sb_append_strict` function unqualified, so the
+  extension's schema must be on the
   function's `search_path` at run time, including any `SET search_path` clause
   on the function. Otherwise the function is created but fails when called with
   `type "plx_strbuild" does not exist`. Because the lookup goes through the
