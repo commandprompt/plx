@@ -57,6 +57,8 @@ typedef struct
 	bool		sq;				/* single-quoted string */
 	bool		fstr;			/* Python f-string (interpolating) */
 	char		quote;			/* opening quote char: ' " or ` */
+	bool		triple;			/* Python triple-quoted string (three quote
+								 * chars at each end) */
 	const char *ann;			/* TYPEANN: type text start */
 	int			annlen;
 } Tok;
@@ -140,9 +142,14 @@ typedef struct PlxCtx
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		diag_msg;		/* rewriting a RAISE message: interpolate NULL as '' */
+	bool		interp_plain;	/* a string's interpolation was unbalanced, so
+								 * strings are scanned by their quotes alone
+								 * from then on (see lex_string) */
 	int			ninterp;		/* string interpolations rendered so far; an
 								 * interpolating initializer is not folded */
 	bool		retset;
+	char	  **pspell;			/* per parameter: the first spelling the body
+								 * used for it (see plx_is_param) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 
@@ -189,6 +196,7 @@ void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 				  char *arms, char *ensure_body, PlxFin *f);	/* frees its strings */
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+void plx_check_loop_var(Ctx *cx, const char *name, int len);
 void plx_locals_reset(Ctx *cx);
 char *plx_ext_object(const char *name);
 bool plx_is_param(Ctx *cx, const char *name, int len);

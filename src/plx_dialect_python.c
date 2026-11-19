@@ -192,6 +192,7 @@ parse_py_for(Ctx *cx, int ind)
 		}
 		else
 			plx_err(cx, hd, "range requires 1 to 3 arguments");
+		plx_check_loop_var(cx, cx->t[var].s, cx->t[var].len);
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
 						 cx->t[var].len, cx->t[var].s, lo, hi,

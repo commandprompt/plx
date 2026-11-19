@@ -135,7 +135,9 @@ end
 ```
 
 The row variable is a record. Field access is `row.col`, `row[:col]`, or
-`row['col']`. Interpolated values in the SQL string are spliced as name
+`row['col']`. The bracket form reads a field only on a record. On a jsonb or
+hstore value it is SQL subscripting (`j['a']` needs PostgreSQL 14 or later), and
+`ARRAY['x']` is an array. Interpolated values in the SQL string are spliced as name
 references. For bind parameters or non-literal SQL, pass extra arguments:
 `query(sql, a, b).each`. `each_with_index do |row, i|` provides a zero-based
 index.
@@ -219,7 +221,9 @@ raise exception: "negative: #{v}", errcode: "22023"
 ```
 
 Levels are `notice`, `warning`, `info`, `log`, `debug`, `exception`. Options are
-`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. The call form
+`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. `message:` takes
+the place of the message, as in `raise message: "bad #{v}", errcode: "22023"`;
+`CREATE FUNCTION` rejects a `raise` that has both. The call form
 `raise("notice", "message")` is also accepted.
 
 ### Handling
@@ -259,15 +263,23 @@ assert(n > 0, "must be positive")
 ## Expressions
 
 - Interpolation: `"total is #{amount}"` becomes `'total is ' || (amount)::text`.
-  Single-quoted strings do not interpolate.
+  Single-quoted strings do not interpolate. Adjacent literals, `"a" 'b'`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x == nil` becomes `x IS NULL`.
 - Boolean: `&&`, `!`, `and`, `or`, and `not` map to `AND`, `NOT`, `AND`, `OR`,
   and `NOT`. `||` maps to `OR` only in a condition (`if`, `unless`, `while`,
   `until`, or a ternary test); elsewhere it passes through as SQL `||`
   (string concatenation), so write `or` there.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that Ruby groups
+  differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
-- Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
-  `::double precision`. `nil` becomes `NULL`.
+- Casts: `x.to_s` and `x.to_f` become `::text` and `::double precision`.
+  `x.to_i` becomes `trunc((x)::numeric)::integer`, so it truncates toward zero
+  as Ruby does: `2.7.to_i` is 2 and `-2.7.to_i` is -2. A string such as
+  `"4.7"` gives 4. `nil` becomes `NULL`.
 
 ## Building strings in a loop
 
@@ -291,6 +303,16 @@ On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature). Alternatively, assemble text in SQL with `string_agg` when the pieces
 come from a query.
+
+The builder is used only for a local declared `text` or `varchar` without a
+length. A local declared with a length, such as `s = "" #:: varchar(20)`, keeps
+its type, and `<<` becomes `s := s || x`, which raises `value too long` when the
+text outgrows it. On an array local, `<<` appends an element:
+
+```sql
+tags = a #:: text[]
+tags << "new"          # tags := array_append(tags, ('new'))
+```
 
 ## Trigger functions
 
@@ -320,11 +342,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Interpolating a NULL propagates it, so `"x=#{v}"` is NULL when `v` is NULL,
   rather than the `'x='` that Ruby's `nil.to_s` would give. In a message being
   built for `raise` the value falls back to an empty string instead, so one
-  NULL cannot swallow the message. The fallback covers the message text only:
-  a NULL interpolated into a `detail:` or `hint:` option makes the `raise`
-  fail with `RAISE statement option cannot be null`, and a NULL in an `assert`
-  message replaces it with `assertion failed`. Wrap such values in
-  `coalesce(x, '')`.
+  NULL cannot swallow the message. The same fallback applies to the `detail:`,
+  `hint:`, `column:` and `constraint:` options of `raise`. A NULL `errcode:`
+  still makes the `raise` fail with `RAISE statement option cannot be null`. A
+  NULL in an `assert` message replaces it with `assertion failed`. Wrap such
+  values in `coalesce(x, '')`.
 - Comparisons use SQL type resolution, not Ruby's. `1 == "1"` compares an integer
   to a string literal, which SQL coerces and treats as equal; in Ruby it is
   false. Compare like-typed values.

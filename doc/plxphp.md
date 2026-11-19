@@ -121,7 +121,9 @@ foreach (query("SELECT id, amount FROM orders WHERE grp = {$g}") as $row) {
 }
 ```
 
-The row variable is a record. Field access is `$row->col` or `$row['col']`. For
+The row variable is a record. Field access is `$row->col` or `$row['col']`. The
+bracket form reads a field only on a record. On a jsonb or hstore value it is
+SQL subscripting (`$j['a']` needs PostgreSQL 14 or later). For
 bind parameters or non-literal SQL, pass extra arguments:
 `query($sql, $a) as $row`.
 
@@ -235,7 +237,10 @@ assert($n > 0, "must be positive");
 ## Expressions
 
 - Interpolation: `"total is $amount"` and `"count {$n}"` splice the value.
-  Single-quoted strings do not interpolate.
+  As in PHP, the simple form also takes one property or element after the
+  name: `"$row->name"`, `"$a[1]"`, `"$a[$i]"`, and `"$row[name]"` (the same as
+  `{$row['name']}`). For anything longer, such as `$row->a->b`, use the braced
+  form. Single-quoted strings do not interpolate.
 - Concatenation: `$a . $b` maps to `$a || $b`.
 - Comparison: `==`, `===`, `!=`, `!==` map to `=` and `<>`. `$x == null` becomes
   `$x IS NULL`.
@@ -243,6 +248,11 @@ assert($n > 0, "must be positive");
   `if`/`while` condition or a ternary test. Elsewhere (assignments, `return`)
   it passes through as SQL `||` (string concatenation), so write `OR` there:
   `$ok = $a OR $b /*:: boolean */;`.
+- Power and XOR: `$a ** $b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `$a ^ $b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that PHP groups
+  differently, such as `$a ^ $b & $c`. Write `$a ^ ($b & $c)`.
 - Ternary: `$c ? $a : $b` becomes `CASE WHEN $c THEN $a ELSE $b END`.
 - `null` becomes `NULL`.
 

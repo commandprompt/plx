@@ -134,6 +134,179 @@ suppress_newline(Tok *t, int n)
 	}
 }
 
+/*
+ * Scan a quoted string whose opening quote is at p; return the position after
+ * its closing quote (or end). A Python triple-quoted string ("""...""" or
+ * '''...''') runs to the next three quotes, may span lines, and counts them
+ * in *line so later line numbers stay right.
+ *
+ * In a string that interpolates (fstr, or the dialect's interpolating quote),
+ * an interpolation runs to its matching '}' and may itself hold strings, so a
+ * quote inside "#{s == "a"}" does not end the outer string.
+ */
+static const char *lex_string_body(const PlxSurface *surf, const char *p, const char *end,
+								   char q, bool triple, bool fstr, int *line,
+								   bool *closed);
+
+/*
+ * p is just past an interpolation opener ("#{", "${", "{$" or an f-string
+ * "{"). Return the position of the matching '}', or end. Braces are counted
+ * only outside nested string literals, which are skipped whole (with their
+ * own interpolations), so "}" in a nested string does not close it.
+ */
+static const char *
+interp_body_end(const PlxSurface *surf, const char *p, const char *end, int *line)
+{
+	int			depth = 1;
+
+	/* nested strings recurse through lex_string_body */
+	check_stack_depth();
+	while (p < end)
+	{
+		char		c = *p;
+
+		if (c == '\'' || c == '"' || c == '`')
+		{
+			bool		closed;
+
+			p = lex_string_body(surf, p, end, c, false, false, line, &closed);
+			if (!closed)
+				return end;
+			continue;
+		}
+		if (c == '\n')
+			(*line)++;
+		else if (c == '{')
+			depth++;
+		else if (c == '}' && --depth == 0)
+			return p;
+		p++;
+	}
+	return end;
+}
+
+/* length of an interpolation opener at p in a string quoted with q, or 0 */
+static int
+interp_opener(const PlxSurface *surf, const char *p, const char *end, char q, bool fstr)
+{
+	if (!surf)
+		return 0;
+	if (fstr)
+		return (p[0] == '{' && !(p + 1 < end && p[1] == '{')) ? 1 : 0;
+	if (!surf->interp_quote || q != surf->interp_quote || p + 1 >= end)
+		return 0;
+	if (surf->interp_hashbrace && p[0] == '#' && p[1] == '{')
+		return 2;
+	if ((surf->interp_dollarbrace || surf->interp_dollar) && p[0] == '$' && p[1] == '{')
+		return 2;
+	if (surf->interp_dollar && p[0] == '{' && p[1] == '$')
+		return 1;
+	return 0;
+}
+
+static const char *
+lex_string_body(const PlxSurface *surf, const char *p, const char *end, char q,
+				bool triple, bool fstr, int *line, bool *closed)
+{
+	if (closed)
+		*closed = false;
+	p += triple ? 3 : 1;
+	while (p < end)
+	{
+		int			ol;
+
+		if (*p == '\\' && p + 1 < end)
+		{
+			if (triple && p[1] == '\n')
+				(*line)++;
+			p += 2;
+			continue;
+		}
+		if (fstr && p + 1 < end && ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')))
+		{
+			p += 2;
+			continue;
+		}
+		if ((ol = interp_opener(surf, p, end, q, fstr)) > 0)
+		{
+			int			dummy = 0;
+
+			/* only a triple-quoted string counts its newlines */
+			p = interp_body_end(surf, p + ol, end, triple ? line : &dummy);
+			if (p >= end)
+				return end;		/* unbalanced: not closed */
+			p++;
+			continue;
+		}
+		if (triple)
+		{
+			if (p + 2 < end && p[0] == q && p[1] == q && p[2] == q)
+			{
+				if (closed)
+					*closed = true;
+				return p + 3;
+			}
+			if (*p == '\n')
+				(*line)++;
+		}
+		else if (*p == q)
+		{
+			if (closed)
+				*closed = true;
+			return p + 1;
+		}
+		p++;
+	}
+	return end;
+}
+
+/*
+ * Scan a string token. The interpolation-aware scan is tried first. If it
+ * finds no end (an interpolation or a string inside one is never closed), the
+ * string is scanned again by its quotes alone, as plx did before nested
+ * strings were understood, and *plain is set so every later string is scanned
+ * that way too. One failed scan per body keeps the lexer linear.
+ */
+static const char *
+lex_string(const PlxSurface *surf, const char *p, const char *end, char q,
+		   bool triple, bool fstr, int *line, bool *plain)
+{
+	if (!*plain)
+	{
+		int			l2 = *line;
+		bool		closed;
+		const char *r = lex_string_body(surf, p, end, q, triple, fstr, &l2, &closed);
+
+		if (closed)
+		{
+			*line = l2;
+			return r;
+		}
+		*plain = true;
+	}
+	return lex_string_body(NULL, p, end, q, triple, fstr, line, NULL);
+}
+
+/* interp_body_end, falling back to counting braces alone when unbalanced */
+static const char *
+interp_close(const PlxSurface *surf, const char *p, const char *e)
+{
+	int			dummy = 0;
+	const char *r = interp_body_end(surf, p, e, &dummy);
+	int			depth = 1;
+
+	if (r < e)
+		return r;
+	for (; p < e; p++)
+	{
+		if (*p == '{')
+			depth++;
+		else if (*p == '}' && --depth == 0)
+			return p;
+	}
+	return e;
+}
+
 void
 plx_lex(Ctx *cx)
 {
@@ -367,20 +540,14 @@ plx_lex(Ctx *cx)
 			(p[1] == '"' || p[1] == '\''))
 		{
 			char		q = p[1];
+			bool		triple = (p + 3 < end && p[2] == q && p[3] == q);
 
-			p += 2;
-			while (p < end && *p != q)
-			{
-				if (*p == '\\' && p + 1 < end)
-					p++;
-				p++;
-			}
-			if (p < end)
-				p++;
+			p = lex_string(surf, p + 1, end, q, triple, true, &line, &cx->interp_plain);
 			PUSH(T_STRING);		/* token spans f"..."; consumers skip the 'f' */
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
 			t[n - 1].fstr = true;
+			t[n - 1].triple = triple;
 			continue;
 		}
 		if (plx_is_ident_start(*p))
@@ -457,19 +624,14 @@ plx_lex(Ctx *cx)
 		if (*p == '\'' || *p == '"' || *p == '`')
 		{
 			char		q = *p;
+			bool		triple = (surf->fstrings && p + 2 < end &&
+								  p[1] == q && p[2] == q);
 
-			p++;
-			while (p < end && *p != q)
-			{
-				if (*p == '\\' && p + 1 < end)
-					p++;
-				p++;
-			}
-			if (p < end)
-				p++;			/* closing quote */
+			p = lex_string(surf, p, end, q, triple, false, &line, &cx->interp_plain);
 			PUSH(T_STRING);
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
+			t[n - 1].triple = triple;
 			continue;
 		}
 		switch (*p)
@@ -559,15 +721,416 @@ plx_name_eq(Tok *tk, const char *w)
 	return tk->len == l && strncmp(tk->s, w, l) == 0;
 }
 
+/*
+ * Copy a declared type name in lower case, with runs of blanks folded to one
+ * space and leading and trailing blanks removed, into buf.  Returns false if
+ * the name does not fit.
+ */
+static bool
+type_norm(const char *typ, char *buf, int bufsz)
+{
+	int			n = 0;
+	bool		sp = false;
+
+	for (; *typ; typ++)
+	{
+		if (*typ == ' ' || *typ == '\t' || *typ == '\n' || *typ == '\r')
+		{
+			sp = (n > 0);
+			continue;
+		}
+		if (n + 2 >= bufsz)
+			return false;
+		if (sp)
+			buf[n++] = ' ';
+		sp = false;
+		buf[n++] = (char) pg_tolower((unsigned char) *typ);
+	}
+	buf[n] = '\0';
+	return true;
+}
+
+/*
+ * Is the declared type one the string builder can stand in for?  Only plain
+ * text and varchar without a length qualify (and the builder type itself).
+ * The builder has no typmod and compares as text, so retyping a varchar(n),
+ * char(n), citext or array local to it would drop the declared behaviour.
+ */
+static bool
+is_builder_type(const char *typ)
+{
+	char		buf[64];
+	const char *b = buf;
+
+	if (!typ || !type_norm(typ, buf, sizeof(buf)))
+		return false;
+	if (strncmp(b, "pg_catalog.", 11) == 0)
+		b += 11;
+	if (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
+		strcmp(b, "character varying") == 0)
+		return true;
+	/* plx_strbuild, bare or schema-qualified */
+	{
+		size_t		l = strlen(b);
+
+		return l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
+			(l == 12 || b[l - 13] == '.');
+	}
+}
+
+/* is a declared type an array (int[], text [ ], varchar(3)[2])? */
+static bool
+is_array_type(const char *typ)
+{
+	size_t		l;
+
+	if (!typ)
+		return false;
+	l = strlen(typ);
+	while (l > 0 && (typ[l - 1] == ' ' || typ[l - 1] == '\t' ||
+					 typ[l - 1] == '\n' || typ[l - 1] == '\r'))
+		l--;
+	return l > 0 && typ[l - 1] == ']';
+}
+
+/*
+ * May w[...] with a quoted key be read as record field access (r['col'] ->
+ * r.col)?  It may for a record local, a row loop variable, NEW/OLD and any
+ * name whose type is not known.  It may not for the SQL array constructor
+ * ARRAY['x'], for a parameter whose type is known not to be a row type, or for
+ * a local declared jsonb, json, hstore or an array: there the subscript is
+ * SQL subscripting and passes through unchanged. A word written with the
+ * variable sigil ($array), or the name of a parameter or local, is a
+ * variable and never the ARRAY constructor.
+ */
+static bool
+field_subscript_ok(Ctx *cx, const char *w, int wl, bool sigil)
+{
+	PlxLocal2  *l;
+
+	if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+	{
+		int			i;
+
+		for (i = 0; i < cx->meta->nargs; i++)
+		{
+			const char *an = cx->meta->argnames[i];
+			Oid			t = cx->meta->argtypes[i];
+
+			if (an && (int) strlen(an) == wl && pg_strncasecmp(an, w, wl) == 0)
+				return t == RECORDOID || IsPolymorphicType(t) || type_is_rowtype(t);
+		}
+	}
+	l = plx_local_find(cx, w, wl);
+	if (!l && !sigil && wl == 5 && pg_strncasecmp(w, "array", 5) == 0)
+		return false;
+	if (l && !l->is_record && l->typ)
+	{
+		char		buf[64];
+		const char *b = buf;
+		const char *dot;
+
+		if (is_array_type(l->typ))
+			return false;
+		if (type_norm(l->typ, buf, sizeof(buf)))
+		{
+			if ((dot = strrchr(b, '.')) != NULL)
+				b = dot + 1;
+			if (strcmp(b, "jsonb") == 0 || strcmp(b, "json") == 0 ||
+				strcmp(b, "hstore") == 0)
+				return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Is the SQL text s[0..len) visibly a boolean: true/false, a boolean
+ * parameter or local, or an expression with a comparison or logical operator
+ * outside parentheses and quotes?  Python int() of such a value must use
+ * ::integer, because boolean has no cast to numeric.
+ */
+static bool
+sql_is_boolish(Ctx *cx, const char *s, int len)
+{
+	int			i = 0,
+				depth = 0;
+	PlxLocal2  *l;
+
+	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n'))
+		s++, len--;
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\n'))
+		len--;
+	if ((len == 4 && pg_strncasecmp(s, "true", 4) == 0) ||
+		(len == 5 && pg_strncasecmp(s, "false", 5) == 0))
+		return true;
+	if (len > 0 && plx_is_ident_start(s[0]))
+	{
+		int			k = 0;
+
+		while (k < len && plx_is_ident(s[k]))
+			k++;
+		if (k == len)
+		{
+			if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+			{
+				int			a;
+
+				for (a = 0; a < cx->meta->nargs; a++)
+				{
+					const char *an = cx->meta->argnames[a];
+
+					if (an && (int) strlen(an) == len && pg_strncasecmp(an, s, len) == 0)
+						return cx->meta->argtypes[a] == BOOLOID;
+				}
+			}
+			l = plx_local_find(cx, s, len);
+			if (l && l->typ)
+			{
+				char		buf[16];
+
+				if (type_norm(l->typ, buf, sizeof(buf)) &&
+					(strcmp(buf, "boolean") == 0 || strcmp(buf, "bool") == 0))
+					return true;
+			}
+			return false;
+		}
+	}
+	while (i < len)
+	{
+		char		c = s[i];
+
+		if (c == '\'' || c == '"')
+		{
+			i++;
+			while (i < len && s[i] != c)
+				i++;
+			i++;
+			continue;
+		}
+		if (c == '(' || c == '[')
+			depth++;
+		else if (c == ')' || c == ']')
+			depth--;
+		else if (depth == 0 && strchr("=<>!", c))
+		{
+			int			j = i;
+
+			while (j < len && strchr("=<>!", s[j]))
+				j++;
+			/* << and >> are shifts, not comparisons */
+			if (!((j - i) == 2 && s[i] == s[i + 1] && (c == '<' || c == '>')))
+				return true;
+			i = j;
+			continue;
+		}
+		else if (depth == 0 && plx_is_ident_start(c) && (i == 0 || !plx_is_ident(s[i - 1])))
+		{
+			static const char *const kw[] = {"and", "or", "not", "is", "in", "like",
+			"ilike", "between"};
+			int			j = i,
+						k;
+
+			while (j < len && plx_is_ident(s[j]))
+				j++;
+			for (k = 0; k < (int) lengthof(kw); k++)
+				if ((int) strlen(kw[k]) == j - i && pg_strncasecmp(s + i, kw[k], j - i) == 0)
+					return true;
+			i = j;
+			continue;
+		}
+		i++;
+	}
+	return false;
+}
+
+/*
+ * Is the SQL text s[0..len) visibly a string: one string literal, or a text,
+ * varchar or char parameter or local?  Python int() of a string must use
+ * ::integer, which rejects "4.7" as int() does; trunc(numeric) would accept
+ * it and give 4.
+ */
+static bool
+sql_is_textish(Ctx *cx, const char *s, int len)
+{
+	int			k;
+
+	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n'))
+		s++, len--;
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\n'))
+		len--;
+	if (len == 0)
+		return false;
+	if (s[0] == '\'' || ((s[0] == 'E' || s[0] == 'e') && len > 1 && s[1] == '\''))
+	{
+		/* one literal: its closing quote is the last character */
+		bool		esc = (s[0] != '\'');
+
+		for (k = esc ? 2 : 1; k < len; k++)
+		{
+			if (esc && s[k] == '\\')
+				k++;
+			else if (s[k] == '\'')
+			{
+				if (k + 1 < len && s[k + 1] == '\'')
+					k++;
+				else
+					return k == len - 1;
+			}
+		}
+		return false;
+	}
+	if (!plx_is_ident_start(s[0]))
+		return false;
+	for (k = 0; k < len; k++)
+		if (!plx_is_ident(s[k]))
+			return false;
+	if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+	{
+		int			a;
+
+		for (a = 0; a < cx->meta->nargs; a++)
+		{
+			const char *an = cx->meta->argnames[a];
+			Oid			at = cx->meta->argtypes[a];
+
+			if (an && (int) strlen(an) == len && pg_strncasecmp(an, s, len) == 0)
+				return at == TEXTOID || at == VARCHAROID || at == BPCHAROID;
+		}
+	}
+	{
+		PlxLocal2  *l = plx_local_find(cx, s, len);
+		char		buf[64];
+
+		if (l && !l->is_record && l->typ && type_norm(l->typ, buf, sizeof(buf)))
+		{
+			char	   *paren = strchr(buf, '(');
+
+			if (paren)
+				*paren = '\0';
+			k = (int) strlen(buf);
+			while (k > 0 && buf[k - 1] == ' ')
+				buf[--k] = '\0';
+			return strcmp(buf, "text") == 0 || strcmp(buf, "varchar") == 0 ||
+				strcmp(buf, "character varying") == 0 ||
+				strcmp(buf, "char") == 0 || strcmp(buf, "character") == 0 ||
+				strcmp(buf, "bpchar") == 0;
+		}
+	}
+	return false;
+}
+
+/*
+ * Find where the operand ending at o[n] starts, for a postfix such as Ruby's
+ * .to_i that is reached after its receiver was already written: a name or
+ * number, a quoted string, a parenthesized or bracketed group with an
+ * optional function name or base before it, each with any ::type casts.
+ * Returns -1 if there is no such operand.
+ */
+static int
+last_operand_start(const char *o, int n)
+{
+	int			p = n;
+
+	while (p > 0 && (o[p - 1] == ' ' || o[p - 1] == '\t' || o[p - 1] == '\n'))
+		p--;
+	for (;;)
+	{
+		char		c;
+		int			q;
+
+		if (p <= 0)
+			return -1;
+		c = o[p - 1];
+		if (c == ')' || c == ']')
+		{
+			int			depth = 0;
+
+			q = p - 1;
+			while (q >= 0)
+			{
+				char		d = o[q];
+
+				if (d == '\'' || d == '"')
+				{
+					/* a doubled quote reads as two adjacent strings: same result */
+					q--;
+					while (q >= 0 && o[q] != d)
+						q--;
+					if (q < 0)
+						return -1;
+					q--;
+					continue;
+				}
+				if (d == ')' || d == ']')
+					depth++;
+				else if (d == '(' || d == '[')
+				{
+					depth--;
+					if (depth == 0)
+						break;
+				}
+				q--;
+			}
+			if (q < 0)
+				return -1;
+			p = q;
+			while (p > 0 && (plx_is_ident(o[p - 1]) || o[p - 1] == '.'))
+				p--;
+		}
+		else if (c == '\'' || c == '"')
+		{
+			q = p - 2;
+			for (;;)
+			{
+				while (q >= 0 && o[q] != c)
+					q--;
+				if (q < 0)
+					return -1;
+				if (q > 0 && o[q - 1] == c)
+				{
+					q -= 2;
+					continue;
+				}
+				break;
+			}
+			p = q;
+			if (c == '\'' && p > 0 && (o[p - 1] == 'E' || o[p - 1] == 'e') &&
+				(p < 2 || !plx_is_ident(o[p - 2])))
+				p--;
+		}
+		else if (plx_is_ident(c) || c == '.')
+		{
+			int			wend = p;
+
+			while (p > 0 && (plx_is_ident(o[p - 1]) || o[p - 1] == '.'))
+				p--;
+			if (wend - p == 9 && strncmp(o + p, "precision", 9) == 0 &&
+				p >= 7 && strncmp(o + p - 7, "double ", 7) == 0)
+				p -= 7;
+		}
+		else
+			return -1;
+		if (p >= 2 && o[p - 1] == ':' && o[p - 2] == ':')
+		{
+			p -= 2;
+			continue;
+		}
+		return p;
+	}
+}
+
 /* is a declared type text-like (so string append applies)? */
 static bool
 is_stringy(const char *typ)
 {
 	if (!typ)
 		return false;
-	return (strcasestr(typ, "text") != NULL ||
-			strcasestr(typ, "char") != NULL ||
-			strcasestr(typ, "plx_strbuild") != NULL);
+	if (is_array_type(typ))
+		return false;
+	return (is_builder_type(typ) ||
+			strcasestr(typ, "text") != NULL ||
+			strcasestr(typ, "char") != NULL);
 }
 
 void
@@ -575,6 +1138,62 @@ plx_skip_seps(Ctx *cx)
 {
 	while (cx->t[cx->pos].kind == T_NEWLINE || cx->t[cx->pos].kind == T_SEMI)
 		cx->pos++;
+}
+
+/*
+ * plpgsql ignores case in unquoted names, and plx emits names unquoted. In
+ * most dialects case matters: Ruby, JS, TS, PHP, Python and Go treat a and A
+ * as two variables. Merging them into one plpgsql variable silently changes
+ * what the program computes, so a body that spells one name two ways is
+ * rejected instead. COBOL, T-SQL and PL/SQL ignore case themselves, so for
+ * them two spellings are one name, as in plpgsql.
+ */
+static bool
+names_fold_case(Ctx *cx)
+{
+	switch (cx->surf->block_style)
+	{
+		case PLX_BLK_COBOL:
+		case PLX_BLK_TSQL:
+		case PLX_BLK_PLSQL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool
+same_spelling(const char *a, const char *b, int blen)
+{
+	return (int) strlen(a) == blen && strncmp(a, b, blen) == 0;
+}
+
+pg_noreturn static void
+name_clash(Ctx *cx, const char *first, const char *name, int len)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s: identifiers \"%s\" and \"%.*s\" are the same name to plpgsql, which ignores case",
+					cx->surf->lanname, first, len, name),
+			 errhint("Rename one of them.")));
+}
+
+/*
+ * Record the spelling the body uses for parameter i, and reject a second,
+ * different spelling. SQL folds an unquoted parameter name to lower case, so
+ * a body may spell parameter "userid" as userId; it may not spell it two ways.
+ */
+static void
+note_param_spelling(Ctx *cx, int i, const char *name, int len)
+{
+	if (names_fold_case(cx))
+		return;
+	if (!cx->pspell)
+		cx->pspell = palloc0(sizeof(char *) * cx->meta->nargs);
+	if (!cx->pspell[i])
+		cx->pspell[i] = pnstrdup(name, len);
+	else if (!same_spelling(cx->pspell[i], name, len))
+		name_clash(cx, cx->pspell[i], name, len);
 }
 
 /* case-insensitive name compare against a param list */
@@ -590,7 +1209,10 @@ plx_is_param(Ctx *cx, const char *name, int len)
 		const char *an = cx->meta->argnames ? cx->meta->argnames[i] : NULL;
 
 		if (an && (int) strlen(an) == len && pg_strncasecmp(an, name, len) == 0)
+		{
+			note_param_spelling(cx, i, name, len);
 			return true;
+		}
 	}
 	return false;
 }
@@ -648,8 +1270,9 @@ plx_ext_object(const char *name)
 	return psprintf("%s.%s", quote_identifier(nsp), quote_identifier(name));
 }
 
-PlxLocal2 *
-plx_local_find(Ctx *cx, const char *name, int len)
+/* the local plpgsql would read for this name, whatever its spelling */
+static PlxLocal2 *
+local_lookup(Ctx *cx, const char *name, int len)
 {
 	char		key[NAMEDATALEN];
 	PlxLocalEnt *e;
@@ -660,6 +1283,39 @@ plx_local_find(Ctx *cx, const char *name, int len)
 	plx_local_key(name, len, key);
 	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
 	return e ? e->l : NULL;
+}
+
+/*
+ * Find a local by name. A local the body spelled differently (a vs A, or two
+ * long names that differ only past NAMEDATALEN - 1 bytes) is an error in a
+ * case-sensitive dialect: see names_fold_case.
+ */
+PlxLocal2 *
+plx_local_find(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l = local_lookup(cx, name, len);
+
+	if (l && !names_fold_case(cx) && !same_spelling(l->name, name, len))
+		name_clash(cx, l->name, name, len);
+	return l;
+}
+
+/*
+ * A counting loop's variable is declared by plpgsql's FOR itself, not by
+ * plx, so it never reaches plx_local_add. It still hides any local or
+ * parameter with the same name to plpgsql: reject a second spelling of one.
+ */
+void
+plx_check_loop_var(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l;
+
+	if (names_fold_case(cx))
+		return;
+	l = local_lookup(cx, name, len);
+	if (l && !same_spelling(l->name, name, len))
+		name_clash(cx, l->name, name, len);
+	(void) plx_is_param(cx, name, len);
 }
 
 PlxLocal2 *
@@ -696,10 +1352,30 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	e = hash_search(cx->lhash, key, HASH_ENTER, &found);
 	if (!found)
 		e->l = l;				/* keep the first declaration */
+	else if (!names_fold_case(cx) && !same_spelling(e->l->name, name, len))
+		name_clash(cx, e->l->name, name, len);
 	return l;
 }
 
 /* ---------------------------------------------------------------- string decode */
+
+/* length of a string token's opening delimiter ([f] plus one or three quotes)
+ * and of its closing one; the token may be cut short by the end of input */
+static int
+str_open_len(const Tok *tk)
+{
+	int			n = (tk->fstr ? 1 : 0) + (tk->triple ? 3 : 1);
+
+	return Min(n, tk->len);
+}
+
+static int
+str_close_len(const Tok *tk)
+{
+	int			n = tk->triple ? 3 : 1;
+
+	return Min(n, tk->len - str_open_len(tk));
+}
 
 /*
  * If an interpolation starts at s within a double-quoted string body [s,e), set
@@ -713,21 +1389,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 {
 	if (fstr && s < e && s[0] == '{' && !(s + 1 < e && s[1] == '{'))	/* f-string {expr} */
 	{
-		int			depth = 1;
-		const char *x = s + 1, *q = x;
+		const char *x = s + 1,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -735,21 +1400,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	}
 	if (surf->interp_hashbrace && s + 1 < e && s[0] == '#' && s[1] == '{')
 	{
-		int			depth = 1;
-		const char *x = s + 2, *q = x;
+		const char *x = s + 2,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -757,21 +1411,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	}
 	if (surf->interp_dollarbrace && s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${expr} (JS) */
 	{
-		int			depth = 1;
-		const char *x = s + 2, *q = x;
+		const char *x = s + 2,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -781,21 +1424,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	{
 		if (s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${name} (PHP curly) */
 		{
-			int			depth = 1;
-			const char *x = s + 2, *q = x;
+			const char *x = s + 2,
+						   *q;
 
-			while (q < e && depth > 0)
-			{
-				if (*q == '{')
-					depth++;
-				else if (*q == '}')
-				{
-					depth--;
-					if (!depth)
-						break;
-				}
-				q++;
-			}
+			q = interp_close(surf, x, e);
 			*exs = x;
 			*exl = (int) (q - x);
 			*next = (q < e) ? q + 1 : q;
@@ -808,21 +1440,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 			  (e - s > 9 && strncmp(s + 1, "literal(", 8) == 0) ||
 			  (e - s > 5 && strncmp(s + 1, "raw(", 4) == 0))))
 		{
-			int			depth = 1;
-			const char *x = s + 1, *q = x;
+			const char *x = s + 1,
+						   *q;
 
-			while (q < e && depth > 0)
-			{
-				if (*q == '{')
-					depth++;
-				else if (*q == '}')
-				{
-					depth--;
-					if (!depth)
-						break;
-				}
-				q++;
-			}
+			q = interp_close(surf, x, e);
 			*exs = x;
 			*exl = (int) (q - x);
 			*next = (q < e) ? q + 1 : q;
@@ -837,18 +1458,355 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 			*exs = s;
 			*exl = (int) (q - s);
 			*next = q;
+
+			/*
+			 * PHP's simple syntax also takes one ->prop or one [key] after
+			 * the name: "$r->name", "$a[1]", "$a[$i]", "$r[name]". An
+			 * unquoted key is a string, as in {$r['name']}. Anything else
+			 * after the name stays literal text.
+			 */
+			if (e - q >= 3 && q[0] == '-' && q[1] == '>' && plx_is_ident_start(q[2]))
+			{
+				q += 3;
+				while (q < e && plx_is_ident(*q))
+					q++;
+				*exl = (int) (q - s);
+				*next = q;
+			}
+			else if (q < e && q[0] == '[')
+			{
+				const char *k = q + 1,
+						   *ks = k;
+				bool		bare = false;
+
+				if (k < e && *k == '$' && k + 1 < e && plx_is_ident_start(k[1]))
+				{
+					k += 2;
+					while (k < e && plx_is_ident(*k))
+						k++;
+				}
+				else if (k < e && (isdigit((unsigned char) *k) ||
+								   (*k == '-' && k + 1 < e && isdigit((unsigned char) k[1]))))
+				{
+					k++;
+					while (k < e && isdigit((unsigned char) *k))
+						k++;
+				}
+				else if (k < e && plx_is_ident_start(*k))
+				{
+					bare = true;
+					while (k < e && plx_is_ident(*k))
+						k++;
+				}
+				if (k > ks && k < e && *k == ']')
+				{
+					if (bare)
+					{
+						char	   *x = psprintf("%.*s['%.*s']", (int) (q - s), s,
+												 (int) (k - ks), ks);
+
+						*exs = x;
+						*exl = (int) strlen(x);
+					}
+					else
+						*exl = (int) (k + 1 - s);
+					*next = k + 1;
+				}
+			}
 			return true;
 		}
 	}
 	return false;
 }
 
+/*
+ * Escape sequences in an interpolating (non-raw) string. Each dialect has its
+ * own alphabet, and dropping the backslash of one plx does not know turns
+ * "\x41" into "x41". decode_escape() reads one sequence at s (a backslash)
+ * and appends its value to lit in E'' literal form, setting *need_e when the
+ * value needs the E prefix. It returns the position after the sequence.
+ *
+ *            \a \b  \e  \s  \xHH       \nnn octal   \u          unknown \q
+ *   Ruby     yes yes yes yes byte(1-2) byte         XXXX {X..}  q
+ *   PHP      -   -   yes -   byte(1-2) byte         {X..}       \q
+ *   JS/TS    -   yes -   -   char(2)   (rejected)   XXXX {X..}  q
+ *   Python   yes yes -   -   char(2)   char         XXXX UXXXXXXXX  \q
+ *
+ * \n \t \r \v \f \\ and the quotes are common to all. A NUL (\0) is rejected:
+ * a PostgreSQL text value cannot hold one.
+ */
+typedef enum
+{
+	ESC_OTHER, ESC_RUBY, ESC_PHP, ESC_JS, ESC_PY
+} PlxEscStyle;
+
+static PlxEscStyle
+esc_style(const PlxSurface *surf)
+{
+	if (surf->fstrings)
+		return ESC_PY;
+	if (surf->interp_hashbrace)
+		return ESC_RUBY;
+	if (surf->interp_dollar)
+		return ESC_PHP;
+	if (surf->interp_dollarbrace)
+		return ESC_JS;
+	return ESC_OTHER;
+}
+
+static int
+esc_line(Ctx *cx)
+{
+	return cx->t ? cx->t[cx->pos].line : 0;
+}
+
+static int
+hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* append code point cp to an E'' literal body */
+static void
+esc_put_char(Ctx *cx, StringInfo lit, bool *need_e, uint32 cp)
+{
+	if (cp == 0)
+		plx_err(cx, esc_line(cx), "a string cannot contain a NUL character (\\0)");
+	if (cp > 0x10FFFF)
+		plx_err(cx, esc_line(cx), "invalid Unicode escape: code point %X is out of range", cp);
+	if (cp == '\'')
+		appendStringInfoString(lit, "''");
+	else if (cp == '\\')
+	{
+		appendStringInfoString(lit, "\\\\");
+		*need_e = true;
+	}
+	else if (cp >= 0x20 && cp < 0x7F)
+		appendStringInfoChar(lit, (char) cp);
+	else if (cp < 0x80)
+	{
+		appendStringInfo(lit, "\\x%02X", cp);
+		*need_e = true;
+	}
+	else
+	{
+		/* PostgreSQL converts it to the server encoding, or rejects it */
+		appendStringInfo(lit, cp <= 0xFFFF ? "\\u%04X" : "\\U%08X", cp);
+		*need_e = true;
+	}
+}
+
+/* append one byte (Ruby and PHP \xHH and octal escapes are bytes) */
+static void
+esc_put_byte(Ctx *cx, StringInfo lit, bool *need_e, uint32 b)
+{
+	if (b < 0x80)
+		esc_put_char(cx, lit, need_e, b);
+	else
+	{
+		appendStringInfo(lit, "\\x%02X", b);
+		*need_e = true;
+	}
+}
+
+static const char *
+decode_escape(Ctx *cx, const char *s, const char *e, StringInfo lit, bool *need_e)
+{
+	PlxEscStyle st = esc_style(cx->surf);
+	char		c = s[1];
+	const char *p = s + 2;
+
+	switch (c)
+	{
+		case 'n': appendStringInfoString(lit, "\\n"); *need_e = true; return p;
+		case 't': appendStringInfoString(lit, "\\t"); *need_e = true; return p;
+		case 'r': appendStringInfoString(lit, "\\r"); *need_e = true; return p;
+		case '\\': appendStringInfoString(lit, "\\\\"); *need_e = true; return p;
+		case '"': appendStringInfoChar(lit, '"'); return p;
+		case '\'':
+			if (st == ESC_PHP)
+				break;			/* PHP keeps \' in a double-quoted string */
+			appendStringInfoString(lit, "''");
+			return p;
+		default:
+			break;
+	}
+	if (st == ESC_OTHER)
+	{
+		appendStringInfoChar(lit, c);	/* as before: drop the backslash */
+		return p;
+	}
+	switch (c)
+	{
+		case 'v': esc_put_char(cx, lit, need_e, 0x0B); return p;
+		case 'f': esc_put_char(cx, lit, need_e, 0x0C); return p;
+		case 'a':
+			if (st == ESC_RUBY || st == ESC_PY)
+			{
+				esc_put_char(cx, lit, need_e, 0x07);
+				return p;
+			}
+			break;
+		case 'b':
+			if (st != ESC_PHP)
+			{
+				esc_put_char(cx, lit, need_e, 0x08);
+				return p;
+			}
+			break;
+		case 'e':
+			if (st == ESC_RUBY || st == ESC_PHP)
+			{
+				esc_put_char(cx, lit, need_e, 0x1B);
+				return p;
+			}
+			break;
+		case 's':
+			if (st == ESC_RUBY)
+			{
+				esc_put_char(cx, lit, need_e, ' ');
+				return p;
+			}
+			break;
+		case '\n':
+			if (st != ESC_PHP)
+				return p;		/* line continuation */
+			break;
+		case '\r':
+			if (st != ESC_PHP)
+				return (p < e && *p == '\n') ? p + 1 : p;
+			break;
+		case 'x':
+			{
+				int			maxd = 2;
+				int			mind = (st == ESC_RUBY || st == ESC_PHP) ? 1 : 2;
+				uint32		v = 0;
+				int			nd = 0;
+
+				while (nd < maxd && p < e && hexval(*p) >= 0)
+				{
+					v = v * 16 + hexval(*p++);
+					nd++;
+				}
+				if (nd < mind)
+				{
+					if (st == ESC_PHP)
+						break;	/* PHP keeps a \x with no digits */
+					plx_err(cx, esc_line(cx), "invalid \\x escape in a string");
+				}
+				if (st == ESC_RUBY || st == ESC_PHP)
+					esc_put_byte(cx, lit, need_e, v);
+				else
+					esc_put_char(cx, lit, need_e, v);
+				return p;
+			}
+		case 'u':
+		case 'U':
+			{
+				uint32		v = 0;
+				int			nd = 0;
+
+				if (c == 'U' && st != ESC_PY)
+					break;
+				if (c == 'u' && p < e && *p == '{' && st != ESC_PY)
+				{
+					/* \u{X...}; Ruby allows several, separated by spaces */
+					p++;
+					for (;;)
+					{
+						while (p < e && *p == ' ' && st == ESC_RUBY)
+							p++;
+						if (p < e && *p == '}')
+							break;
+						v = 0;
+						nd = 0;
+						while (p < e && hexval(*p) >= 0 && nd < 8)
+						{
+							v = v * 16 + hexval(*p++);
+							nd++;
+						}
+						if (nd == 0 || nd > 6)
+							plx_err(cx, esc_line(cx), "invalid \\u{...} escape in a string");
+						esc_put_char(cx, lit, need_e, v);
+						if (st != ESC_RUBY)
+							break;
+					}
+					if (p >= e || *p != '}')
+						plx_err(cx, esc_line(cx), "invalid \\u{...} escape in a string");
+					return p + 1;
+				}
+				if (st == ESC_PHP)
+					break;		/* PHP has only \u{...} */
+				while (nd < (c == 'U' ? 8 : 4) && p < e && hexval(*p) >= 0)
+				{
+					v = v * 16 + hexval(*p++);
+					nd++;
+				}
+				if (nd < (c == 'U' ? 8 : 4))
+					plx_err(cx, esc_line(cx), "invalid \\%c escape in a string", c);
+				esc_put_char(cx, lit, need_e, v);
+				return p;
+			}
+		case '$':
+			if (st == ESC_PHP)
+			{
+				appendStringInfoChar(lit, '$');	/* "\$x" is not an interpolation */
+				return p;
+			}
+			break;
+		case 'N':
+			if (st == ESC_PY)
+				plx_err(cx, esc_line(cx), "the \\N{name} escape is not supported; use \\u or \\U");
+			break;
+		default:
+			if (c >= '0' && c <= '7')
+			{
+				uint32		v = 0;
+				int			nd = 0;
+
+				if (st == ESC_JS)
+				{
+					if (c == '0' && !(p < e && *p >= '0' && *p <= '9'))
+						esc_put_char(cx, lit, need_e, 0);	/* rejects NUL */
+					plx_err(cx, esc_line(cx), "octal escape sequences are not allowed in a string; use \\x or \\u");
+				}
+				p = s + 1;
+				while (nd < 3 && p < e && *p >= '0' && *p <= '7')
+				{
+					v = v * 8 + (*p++ - '0');
+					nd++;
+				}
+				if (st == ESC_PY)
+					esc_put_char(cx, lit, need_e, v);
+				else
+					esc_put_byte(cx, lit, need_e, v & 0xFF);
+				return p;
+			}
+			break;
+	}
+	/* not an escape in this dialect */
+	if (st == ESC_PHP || st == ESC_PY)
+	{
+		appendStringInfoString(lit, "\\\\");	/* the backslash stays */
+		*need_e = true;
+		return s + 1;			/* the next character is read normally */
+	}
+	appendStringInfoChar(lit, c);
+	return p;
+}
+
 /* Emit a dialect string token (with quotes) as a plpgsql value expression. */
 static void
 emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 {
-	const char *s = tk->s + (tk->fstr ? 2 : 1);	/* skip [f]"opening quote */
-	const char *e = tk->s + tk->len - 1;	/* before closing quote */
+	const char *s = tk->s + str_open_len(tk);	/* skip [f]"opening quote */
+	const char *e = tk->s + tk->len - str_close_len(tk);	/* before closing quote */
 	StringInfoData lit;
 	bool		need_e = false;
 	int			nparts = 0;
@@ -906,7 +1864,10 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			 * data, it is something a human has to read, and propagating NULL
 			 * would replace the whole message with nothing at the moment it is
 			 * most needed. In that position each value keeps the COALESCE so
-			 * the literal text of the message survives one NULL operand.
+			 * the literal text of the message survives one NULL operand. The
+			 * same holds for the text options of a raise (detail:, hint:,
+			 * column:, constraint:) and for message: given in place of the
+			 * message, but not for errcode:.
 			 */
 			if (cx->diag_msg)
 				appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
@@ -938,19 +1899,7 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 		}
 		if (!raw && s[0] == '\\' && s + 1 < e)
 		{
-			char		c = s[1];
-
-			s += 2;
-			switch (c)
-			{
-				case 'n': appendStringInfoString(&lit, "\\n"); need_e = true; break;
-				case 't': appendStringInfoString(&lit, "\\t"); need_e = true; break;
-				case 'r': appendStringInfoString(&lit, "\\r"); need_e = true; break;
-				case '\\': appendStringInfoString(&lit, "\\\\"); need_e = true; break;
-				case '\'': appendStringInfoString(&lit, "''"); break;
-				case '"': appendStringInfoChar(&lit, '"'); break;
-				default: appendStringInfoChar(&lit, c); break;
-			}
+			s = decode_escape(cx, s, e, &lit, &need_e);
 			continue;
 		}
 		if (s[0] == '\'')
@@ -992,27 +1941,47 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 
 /* ---------------------------------------------------------------- expr rewrite */
 
-/* find a top-level ternary '?' (depth 0, not in string). Returns index or -1. */
+static int	scan_string(const PlxSurface *surf, const char *s, int len, int i,
+						Tok *st, bool *plain);
+
+/*
+ * If a string starts at s[i] (a quote, or a Python f-string's f), return the
+ * index just after it; else -1. The scan understands interpolation, so a
+ * string nested in "#{...}", "${...}" or "{...}" does not end the outer one
+ * early and leave its contents to be read as code.
+ */
 static int
-find_ternary_q(const char *s, int len)
+skip_string(Ctx *cx, const char *s, int len, int i)
+{
+	Tok			st;
+	char		c = s[i];
+
+	if (c == '\'' || c == '"' || c == '`' ||
+		((c == 'f' || c == 'F') && cx->surf->fstrings && i + 1 < len &&
+		 (s[i + 1] == '\'' || s[i + 1] == '"') &&
+		 (i == 0 || !plx_is_ident(s[i - 1]))))
+		return scan_string(cx->surf, s, len, i, &st, &cx->interp_plain);
+	return -1;
+}
+
+/*
+ * find a top-level ternary '?' (depth 0, not in a string). A backtick string
+ * (a JS/TS template literal) is a string too: its ? and : are text. Returns
+ * index or -1.
+ */
+static int
+find_ternary_q(Ctx *cx, const char *s, int len)
 {
 	int			i, depth = 0;
 
 	for (i = 0; i < len; i++)
 	{
 		char		c = s[i];
+		int			e = skip_string(cx, s, len, i);
 
-		if (c == '\'' || c == '"')
+		if (e >= 0)
 		{
-			char		q = c;
-
-			i++;
-			while (i < len && s[i] != q)
-			{
-				if (s[i] == '\\')
-					i++;
-				i++;
-			}
+			i = e - 1;
 			continue;
 		}
 		if (c == '(' || c == '[')
@@ -1027,25 +1996,18 @@ find_ternary_q(const char *s, int len)
 
 /* find matching ':' for a ternary at depth 0 after position q */
 static int
-find_ternary_colon(const char *s, int len, int q)
+find_ternary_colon(Ctx *cx, const char *s, int len, int q)
 {
 	int			i, depth = 0, tern = 0;
 
 	for (i = q + 1; i < len; i++)
 	{
 		char		c = s[i];
+		int			e = skip_string(cx, s, len, i);
 
-		if (c == '\'' || c == '"')
+		if (e >= 0)
 		{
-			char		qq = c;
-
-			i++;
-			while (i < len && s[i] != qq)
-			{
-				if (s[i] == '\\')
-					i++;
-				i++;
-			}
+			i = e - 1;
 			continue;
 		}
 		if (c == '(' || c == '[')
@@ -1068,6 +2030,439 @@ find_ternary_colon(const char *s, int len, int q)
 	return -1;
 }
 
+static int
+skip_space(const char *s, int len, int i)
+{
+	while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+		i++;
+	return i;
+}
+
+/*
+ * If a string literal starts at s[i] (a quote, or a Python f-string's f),
+ * fill *st with a token for it and return the index after it; else -1.
+ * Python triple-quoted strings are one literal.
+ */
+static int
+scan_string(const PlxSurface *surf, const char *s, int len, int i, Tok *st,
+			bool *plain)
+{
+	int			k = i;
+	bool		fstr = false;
+	bool		triple;
+	char		q;
+	int			line = 0;
+
+	if (i >= len)
+		return -1;
+	if (surf->fstrings && (s[k] == 'f' || s[k] == 'F') && k + 1 < len &&
+		(s[k + 1] == '"' || s[k + 1] == '\''))
+	{
+		fstr = true;
+		k++;
+	}
+	else if (s[k] != '\'' && s[k] != '"' && s[k] != '`')
+		return -1;
+	q = s[k];
+	triple = (surf->fstrings && k + 2 < len && s[k + 1] == q && s[k + 2] == q);
+	memset(st, 0, sizeof(*st));
+	st->kind = T_STRING;
+	st->s = s + i;
+	st->len = (int) (lex_string(surf, s + k, s + len, q, triple, fstr, &line, plain) - (s + i));
+	st->sq = (q == '\'');
+	st->quote = q;
+	st->fstr = fstr;
+	st->triple = triple;
+	return i + st->len;
+}
+
+/*
+ * Is the number at s[i] (a '0') an integer literal with a leading zero, such
+ * as 0755 or 0_17? Not when it is 0 alone, a fraction or has an exponent.
+ */
+static bool
+leading_zero_int(const char *s, int len, int i)
+{
+	int			k = i + 1;
+
+	if (i > 0 && plx_is_ident(s[i - 1]))
+		return false;			/* part of a name */
+	if (i > 0 && s[i - 1] == '.' && !(i > 1 && s[i - 2] == '.'))
+		return false;			/* a fraction, .0755; a range end (..0755) is not */
+	while (k < len && s[k] == '_')
+		k++;
+	if (k >= len || s[k] < '0' || s[k] > '9')
+		return false;
+	while (k < len && ((s[k] >= '0' && s[k] <= '9') || s[k] == '_'))
+		k++;
+	if (k < len && (s[k] == 'e' || s[k] == 'E'))
+		return false;
+	if (k + 1 < len && s[k] == '.' && s[k + 1] >= '0' && s[k + 1] <= '9')
+		return false;
+	return true;
+}
+
+/*
+ * A variable reference [i, j) in expression text s: reject it when it spells a
+ * local or a parameter differently from an earlier use (see names_fold_case).
+ * Field names (after '.' or '->'), symbols and type names (after ':' or a
+ * TypeScript "as"), hash keys (before ':') and function names (before '(')
+ * are not variables and are skipped.
+ */
+static void
+note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
+{
+	int			k = i - 1;
+	PlxLocal2  *l;
+
+	if (names_fold_case(cx))
+		return;
+	while (k >= 0 && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+		k--;
+	if (k >= 0 && (s[k] == '.' || s[k] == ':' ||
+				   (s[k] == '>' && k > 0 && s[k - 1] == '-')))
+		return;
+	/* a TypeScript type assertion, x as T: T is a type, not a variable */
+	if (cx->surf->ts_types && k >= 1 && s[k] == 's' && s[k - 1] == 'a' &&
+		(k == 1 || !plx_is_ident(s[k - 2])))
+		return;
+	if (j < len && (s[j] == '(' || (s[j] == ':' && !(j + 1 < len && s[j + 1] == ':'))))
+		return;
+	l = local_lookup(cx, s + i, j - i);
+	if (l && !same_spelling(l->name, s + i, j - i))
+		name_clash(cx, l->name, s + i, j - i);
+	(void) plx_is_param(cx, s + i, j - i);
+}
+
+/*
+ * Power operator support. Ruby, PHP, JS, TS and Python make ** right-
+ * associative and bind it tighter than unary minus: 2 ** 3 ** 2 is 512 and
+ * -2 ** 2 is -4. SQL ^ is left-associative and binds looser than unary minus,
+ * so ** cannot be replaced by ^ in place. Instead the operands are found and
+ * the power is emitted as ((a) ^ (b)).
+ */
+
+
+/*
+ * First ** operator outside strings, or -1 (not **= and not ***). With
+ * top_only, a ** inside brackets is skipped: the group it is in is rewritten
+ * on its own (see rewrite_expr_inner), so that a call such as int(x ** 2)
+ * or a receiver such as (x ** 2).to_i is never split in two.
+ */
+static int
+find_pow(Ctx *cx, const char *s, int len, bool top_only)
+{
+	int			i, depth = 0;
+
+	for (i = 0; i + 1 < len; i++)
+	{
+		int			e = skip_string(cx, s, len, i);
+
+		if (e >= 0)
+		{
+			i = e - 1;
+			continue;
+		}
+		if (s[i] == '(' || s[i] == '[')
+			depth++;
+		else if ((s[i] == ')' || s[i] == ']') && depth > 0)
+			depth--;
+		if (top_only && depth > 0)
+			continue;
+		if (s[i] == '*' && s[i + 1] == '*' && (i == 0 || s[i - 1] != '*') &&
+			!(i + 2 < len && (s[i + 2] == '*' || s[i + 2] == '=')))
+			return i;
+	}
+	return -1;
+}
+
+static bool
+pow_word_char(char c)
+{
+	return plx_is_ident(c) || c == '$' || c == '@';
+}
+
+/* index of the bracket that closes the one at s[i], or -1 */
+static int
+group_close(Ctx *cx, const char *s, int len, int i)
+{
+	int			depth = 0;
+
+	for (; i < len; i++)
+	{
+		int			e = skip_string(cx, s, len, i);
+
+		if (e >= 0)
+		{
+			i = e - 1;
+			continue;
+		}
+		if (s[i] == '(' || s[i] == '[' || s[i] == '{')
+			depth++;
+		else if ((s[i] == ')' || s[i] == ']' || s[i] == '}') && --depth == 0)
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Start of the operand that ends just before the ** at p: a name, number,
+ * string or bracketed group, with any calls, subscripts and .field parts.
+ * A '.' is not crossed when it is the dialect's string-concatenation operator.
+ */
+static int
+pow_left(const char *s, int p, bool dot_is_concat)
+{
+	int			i = p;
+
+	while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' ||
+					 s[i - 1] == '\n' || s[i - 1] == '\r'))
+		i--;
+	for (;;)
+	{
+		if (i > 0 && (s[i - 1] == ')' || s[i - 1] == ']'))
+		{
+			int			depth = 0;
+
+			do
+			{
+				i--;
+				if (s[i] == ')' || s[i] == ']')
+					depth++;
+				else if (s[i] == '(' || s[i] == '[')
+					depth--;
+			} while (i > 0 && depth > 0);
+			continue;
+		}
+		if (i > 0 && (s[i - 1] == '\'' || s[i - 1] == '"'))
+		{
+			char		q = s[i - 1];
+
+			i--;
+			while (i > 0 && s[i - 1] != q)
+				i--;
+			if (i > 0)
+				i--;
+			continue;
+		}
+		if (i > 0 && pow_word_char(s[i - 1]))
+		{
+			while (i > 0 && pow_word_char(s[i - 1]))
+				i--;
+			/* the sign of a number's exponent: 1e-3 */
+			if (i > 1 && (s[i - 1] == '-' || s[i - 1] == '+') &&
+				(s[i - 2] == 'e' || s[i - 2] == 'E') &&
+				i > 2 && s[i - 3] >= '0' && s[i - 3] <= '9')
+			{
+				i--;
+				continue;
+			}
+			if (i > 0 && s[i - 1] == '.' && !(i > 1 && s[i - 2] == '.') &&
+				(!dot_is_concat || (s[i] >= '0' && s[i] <= '9')))
+			{
+				i--;
+				continue;
+			}
+			break;
+		}
+		break;
+	}
+	return i;
+}
+
+/*
+ * End of the operand that starts at s[i], just after a **: unary operators,
+ * a primary with its calls, subscripts and .field parts, and, since ** is
+ * right-associative, any further ** and its operand.
+ */
+static int
+pow_right(Ctx *cx, const char *s, int len, int i)
+{
+	for (;;)
+	{
+		int			start;
+
+		while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+						   s[i] == '\r' || s[i] == '-' || s[i] == '+' ||
+						   s[i] == '~' || s[i] == '!'))
+			i++;
+		start = i;
+		if (i < len && skip_string(cx, s, len, i) >= 0)
+			i = skip_string(cx, s, len, i);
+		else
+			while (i < len && (pow_word_char(s[i]) ||
+							   (s[i] == '.' && i + 1 < len && s[i + 1] >= '0' &&
+								s[i + 1] <= '9' && i > start && s[i - 1] >= '0' &&
+								s[i - 1] <= '9') ||
+							   ((s[i] == '-' || s[i] == '+') && i > start + 1 &&
+								(s[i - 1] == 'e' || s[i - 1] == 'E') &&
+								s[start] >= '0' && s[start] <= '9')))
+				i++;
+		for (;;)
+		{
+			if (i < len && (s[i] == '(' || s[i] == '['))
+			{
+				int			depth = 0;
+
+				do
+				{
+					int			e = skip_string(cx, s, len, i);
+
+					if (e >= 0)
+					{
+						i = e;
+						continue;
+					}
+					if (s[i] == '(' || s[i] == '[')
+						depth++;
+					else if (s[i] == ')' || s[i] == ']')
+						depth--;
+					i++;
+				} while (i < len && depth > 0);
+				continue;
+			}
+			if (i + 1 < len && s[i] == '.' && s[i + 1] != '.' && i > start)
+			{
+				i++;
+				while (i < len && pow_word_char(s[i]))
+					i++;
+				continue;
+			}
+			break;
+		}
+		if (i == start)
+			return -1;			/* no operand */
+		{
+			int			k = i;
+
+			while (k < len && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+				k++;
+			if (k + 1 < len && s[k] == '*' && s[k + 1] == '*' &&
+				!(k + 2 < len && (s[k + 2] == '*' || s[k + 2] == '=')))
+			{
+				i = k + 2;
+				continue;
+			}
+		}
+		return i;
+	}
+}
+
+/*
+ * Rewrite an expression that contains a ** operator. Each power becomes
+ * ((a) ^ (b)), and the text between powers is rewritten as usual. Returns
+ * NULL when s has no ** this can handle.
+ */
+static char *
+rewrite_pow(Ctx *cx, const char *s, int len, bool boolctx)
+{
+	StringInfoData out;
+	bool		any = false;
+
+	if (names_fold_case(cx))
+		return NULL;			/* COBOL keeps its own ** handling */
+	initStringInfo(&out);
+	for (;;)
+	{
+		int			p = find_pow(cx, s, len, true);
+		int			l, r;
+		char	   *pre, *a, *b;
+
+		if (p < 0)
+			break;
+		l = pow_left(s, p, cx->surf->concat_op == '.');
+		r = pow_right(cx, s, len, p + 2);
+		if (l == p || r < 0)
+			break;				/* f(**kw) and the like: leave as before */
+		pre = plx_rewrite_expr(cx, s, l, boolctx);
+		a = plx_rewrite_expr(cx, s + l, p - l, false);
+		b = plx_rewrite_expr(cx, s + p + 2, r - p - 2, false);
+		appendStringInfo(&out, "%s%s((%s) ^ (%s))", pre, *pre ? " " : "", a, b);
+		pfree(pre);
+		pfree(a);
+		pfree(b);
+		any = true;
+		s += r;
+		len -= r;
+	}
+	if (!any)
+	{
+		pfree(out.data);
+		return NULL;
+	}
+	if (len > 0)
+	{
+		char	   *post = plx_rewrite_expr(cx, s, len, boolctx);
+
+		if (*post)
+			appendStringInfo(&out, " %s", post);
+		pfree(post);
+	}
+	return out.data;
+}
+
+/*
+ * Bitwise operators. Ruby, PHP, JS, TS and Python bind the shifts tightest,
+ * then &, then ^, then | (Ruby gives ^ and | one level). SQL gives &, |, #
+ * (XOR), << and >> one level and reads them from left to right. A run of
+ * them computes the same value in SQL only when no operator binds tighter
+ * than the one before it, as in a & b | c. Anything else, such as a ^ b & c,
+ * is rejected: the body must say with parentheses which part goes first.
+ *
+ * bitwise_prec returns the operator's level (higher binds tighter), 0 for an
+ * operator that binds tighter than all of them (arithmetic, unary), or -1 for
+ * one that binds looser and so ends the run (comparison, logic, assignment,
+ * ternary).
+ */
+#define PLX_BW_MAXDEPTH 64
+
+static int
+bitwise_prec(const PlxSurface *surf, const char *op, int ol)
+{
+	int			k;
+
+	if (ol >= 2 && ((op[0] == '&' && op[1] == '&') || (op[0] == '|' && op[1] == '|')))
+		return -1;
+	for (k = 0; k < ol; k++)
+		if (op[k] == '=' || op[k] == '?' || op[k] == ':')
+			return -1;
+	if (ol >= 2 && ((op[0] == '<' && op[1] == '<') || (op[0] == '>' && op[1] == '>')))
+		return 4;
+	switch (op[0])
+	{
+		case '<':
+		case '>':
+			return -1;
+		case '&':
+			return 3;
+		case '^':
+			return surf->interp_hashbrace ? 1 : 2;	/* Ruby: ^ and | tie */
+		case '|':
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+static void
+bitwise_check(Ctx *cx, signed char *prev, int depth, int p)
+{
+	if (depth >= PLX_BW_MAXDEPTH)
+		return;
+	if (p < 0)
+		prev[depth] = 0;
+	else if (p > 0)
+	{
+		if (prev[depth] > 0 && p > prev[depth])
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s: mixed bitwise operators need parentheses: SQL reads &, |, ^, << and >> from left to right",
+							cx->surf->lanname),
+					 errhint("Group the operator that should go first, for example a ^ (b & c).")));
+		prev[depth] = (signed char) p;
+	}
+}
+
 /*
  * rewrite_expr: single left-to-right pass over source; honors strings; never
  * re-scans its own output. boolctx selects OR vs || and negation handling.
@@ -1078,6 +2473,13 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	const PlxSurface *surf = cx->surf;
 	StringInfoData out;
 	int			i;
+	int			str_out = -1,	/* where the last string's SQL starts in out */
+				str_end = -1;	/* and where it ended in s */
+	signed char bw_prev[PLX_BW_MAXDEPTH];	/* see bitwise_prec */
+	int			bw_depth = 0;
+	bool		bw_on = !names_fold_case(cx);
+
+	memset(bw_prev, 0, sizeof(bw_prev));
 
 	/* trim */
 	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r'))
@@ -1091,11 +2493,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 	/* ternary first */
 	{
-		int			q = find_ternary_q(s, len);
+		int			q = find_ternary_q(cx, s, len);
 
 		if (q >= 0)
 		{
-			int			c = find_ternary_colon(s, len, q);
+			int			c = find_ternary_colon(cx, s, len, q);
 
 			if (c > q)
 			{
@@ -1130,6 +2532,14 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				return r;
 			}
 		}
+	}
+
+	/* ** next: it needs its operands, so it cannot be rewritten in place */
+	{
+		char	   *r = rewrite_pow(cx, s, len, boolctx);
+
+		if (r)
+			return r;
 	}
 
 	initStringInfo(&out);
@@ -1191,56 +2601,46 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			i = j;
 			continue;
 		}
-		if (c == '\'' || c == '"' || c == '`')
-		{
-			/* build a synthetic token to reuse emit_string_value */
-			Tok			st;
-			int			j = i + 1;
-
-			while (j < len && s[j] != c)
-			{
-				if (s[j] == '\\' && j + 1 < len)
-					j++;
-				j++;
-			}
-			if (j < len)
-				j++;
-			memset(&st, 0, sizeof(st));
-			st.kind = T_STRING;
-			st.s = s + i;
-			st.len = j - i;
-			st.sq = (c == '\'');
-			st.quote = c;
-			emit_string_value(cx, &st, &out);
-			i = j;
-			continue;
-		}
-		/* Python f-string in expression position: f"...{expr}..." */
-		if (surf->fstrings && (c == 'f' || c == 'F') && i + 1 < len &&
-			(s[i + 1] == '"' || s[i + 1] == '\''))
+		/*
+		 * A string literal, or a Python f-string. Adjacent literals ("a" "b",
+		 * Ruby and Python) are one value: each is emitted as its own SQL
+		 * literal, joined with || and parenthesized. Written side by side,
+		 * 'a''b' would be one SQL literal holding a quote, and an E'' literal
+		 * next to one ending in a backslash would swallow the code after it.
+		 */
 		{
 			Tok			st;
-			char		q = s[i + 1];
-			int			j = i + 2;
+			int			j = scan_string(surf, s, len, i, &st, &cx->interp_plain);
 
-			while (j < len && s[j] != q)
+			if (j >= 0)
 			{
-				if (s[j] == '\\' && j + 1 < len)
-					j++;
-				j++;
+				int			k = skip_space(s, len, j);
+				Tok			nx;
+				int			nj = scan_string(surf, s, len, k, &nx, &cx->interp_plain);
+
+				str_out = out.len;
+				if (nj < 0)
+				{
+					emit_string_value(cx, &st, &out);
+					i = str_end = j;
+					continue;
+				}
+				appendStringInfoChar(&out, '(');
+				for (;;)
+				{
+					emit_string_value(cx, &st, &out);
+					i = j;
+					k = skip_space(s, len, j);
+					if ((nj = scan_string(surf, s, len, k, &nx, &cx->interp_plain)) < 0)
+						break;
+					appendStringInfoString(&out, " || ");
+					st = nx;
+					j = nj;
+				}
+				appendStringInfoChar(&out, ')');
+				str_end = i;
+				continue;
 			}
-			if (j < len)
-				j++;
-			memset(&st, 0, sizeof(st));
-			st.kind = T_STRING;
-			st.s = s + i;
-			st.len = j - i;
-			st.sq = (q == '\'');
-			st.quote = q;
-			st.fstr = true;
-			emit_string_value(cx, &st, &out);
-			i = j;
-			continue;
 		}
 		if (plx_is_ident_start(c))
 		{
@@ -1277,7 +2677,19 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					k++;
 				}
 				inner = plx_rewrite_expr(cx, s + argstart, k - argstart, false);
-				appendStringInfo(&out, "(%s)::%s", inner, cast);
+				/*
+				 * Python int() truncates toward zero; a cast to integer rounds.
+				 * Go through trunc(numeric), which also parses text the way
+				 * int() does. A boolean has no numeric cast, so a value that is
+				 * visibly boolean keeps the plain cast (int(True) is 1). So does
+				 * a value that is visibly a string: int("4.7") is an error in
+				 * Python, and so is "4.7"::integer.
+				 */
+				if (s[i] == 'i' && !sql_is_boolish(cx, inner, (int) strlen(inner)) &&
+					!sql_is_textish(cx, inner, (int) strlen(inner)))
+					appendStringInfo(&out, "trunc((%s)::numeric)::integer", inner);
+				else
+					appendStringInfo(&out, "(%s)::%s", inner, cast);
 				i = (k < len) ? k + 1 : k;
 				continue;
 			}
@@ -1360,6 +2772,16 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				i = j + (s[j] == '?' ? 1 : 2);
 				continue;
 			}
+			/* a word operator binds looser than the bitwise ones */
+			if (bw_on && bw_depth < PLX_BW_MAXDEPTH &&
+				((wl == 2 && (strncmp(s + i, "or", 2) == 0 ||
+							  strncmp(s + i, "if", 2) == 0 ||
+							  strncmp(s + i, "in", 2) == 0 ||
+							  strncmp(s + i, "is", 2) == 0)) ||
+				 (wl == 3 && (strncmp(s + i, "and", 3) == 0 ||
+							  strncmp(s + i, "not", 3) == 0)) ||
+				 (wl == 4 && strncmp(s + i, "else", 4) == 0)))
+				bw_prev[bw_depth] = 0;
 			if ((wl == 3 && strncmp(s + i, "nil", 3) == 0) ||
 				(wl == 4 && strncmp(s + i, "null", 4) == 0) ||
 				(wl == 4 && strncmp(s + i, "None", 4) == 0) ||
@@ -1378,11 +2800,16 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
 			else
+			{
+				note_name_ref(cx, s, len, i, j);
 				appendBinaryStringInfo(&out, s + i, wl);
+			}
 			i = j;
 
 			/* record subscript: r[:id] / r['id'] / r["id"] -> r.id */
-			if (i < len && s[i] == '[')
+			if (i < len && s[i] == '[' && field_subscript_ok(cx, s + i - wl, wl,
+														   surf->var_sigil && i - wl > 0 &&
+														   s[i - wl - 1] == surf->var_sigil))
 			{
 				int			k = i + 1;
 
@@ -1409,8 +2836,27 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					}
 					if (k < len && s[k] == ']' && fe > fs)
 					{
+						int			m;
+						bool		plain = true;
+
+						for (m = fs; m < fe; m++)
+							if (!plx_is_ident(s[m]))
+								plain = false;
 						appendStringInfoChar(&out, '.');
-						appendBinaryStringInfo(&out, s + fs, fe - fs);
+						if (plain)
+							appendBinaryStringInfo(&out, s + fs, fe - fs);
+						else
+						{
+							/* "a b" is a column name, not code: quote it */
+							appendStringInfoChar(&out, '"');
+							for (m = fs; m < fe; m++)
+							{
+								if (s[m] == '"')
+									appendStringInfoChar(&out, '"');
+								appendStringInfoChar(&out, s[m]);
+							}
+							appendStringInfoChar(&out, '"');
+						}
 						i = k + 1;
 					}
 				}
@@ -1477,6 +2923,56 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					appendStringInfo(&out, UINT64_FORMAT, val);
 				continue;
 			}
+			/*
+			 * A leading zero (0755): octal in Ruby, PHP and JS, a syntax error
+			 * in Python 3 and TypeScript, and decimal in COBOL, T-SQL and
+			 * PL/SQL. (plxgo has its own emitter: see go_emit_num.) SQL reads 0755 as decimal, so convert it, reject it, or
+			 * leave it. A fraction or exponent (00.5, 01e3) keeps it decimal.
+			 */
+			if (s[i] == '0' && !names_fold_case(cx) && leading_zero_int(s, len, i))
+			{
+				int			start = i;
+				int			k;
+				uint64		val = 0;
+				bool		ovf = false;
+				int			line = cx->t ? cx->t[cx->pos].line : 0;
+
+				while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
+					i++;
+				if (surf->block_style == PLX_BLK_INDENT || surf->ts_types)
+				{
+					k = start;
+					while (k < i && (s[k] == '0' || s[k] == '_'))
+						k++;
+					if (k == i)
+					{
+						appendStringInfoChar(&out, '0');	/* 00 and 0_0 are zero */
+						continue;
+					}
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("%s: leading zeros in an integer literal are not allowed: %.*s",
+									surf->lanname, i - start, s + start),
+							 errdetail_internal("at %s source line %d", surf->lanname, line),
+							 errhint("Write 0o%.*s for an octal number.", i - k, s + k)));
+				}
+				for (k = start; k < i; k++)
+				{
+					if (s[k] == '_')
+						continue;
+					if (s[k] > '7')
+						plx_err(cx, line, "invalid digit in octal literal: %.*s",
+								i - start, s + start);
+					if (val > (UINT64_MAX >> 3))
+						ovf = true;
+					val = val * 8 + (s[k] - '0');
+				}
+				if (ovf)
+					plx_err(cx, line, "integer literal out of range: %.*s",
+							i - start, s + start);
+				appendStringInfo(&out, UINT64_FORMAT, val);
+				continue;
+			}
 			/* decimal integer part */
 			while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
 			{
@@ -1526,13 +3022,65 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 							  s[i + 5] == '$' || IS_HIGHBIT_SET(s[i + 5]))))
 		{
 			char		k = s[i + 4];
+			/*
+			 * A string just before: its SQL may be a chain such as
+			 * (a)::text || '5' (an interpolation), so take all of it as
+			 * the receiver, not only its last piece.
+			 */
+			bool		after_str = (str_end == i && str_out >= 0);
 
-			appendStringInfoString(&out, k == 'i' ? "::integer" :
-								   k == 's' ? "::text" : "::double precision");
+			if (k == 'i')
+			{
+				/*
+				 * Ruby to_i truncates toward zero; a cast to integer rounds.
+				 * Wrap the receiver, already written, in trunc(numeric).
+				 */
+				int			st = after_str ? str_out : last_operand_start(out.data, out.len);
+				char	   *recv;
+
+				if (st < 0)
+					plx_err(cx, 0, "cannot tell which value .to_i applies to: put the value in parentheses");
+				recv = pstrdup(out.data + st);
+				out.len = st;
+				out.data[st] = '\0';
+				appendStringInfo(&out, "trunc((%s)::numeric)::integer", recv);
+			}
+			else if (after_str)
+			{
+				char	   *recv = pstrdup(out.data + str_out);
+
+				out.len = str_out;
+				out.data[str_out] = '\0';
+				appendStringInfo(&out, "(%s)%s", recv,
+								 k == 's' ? "::text" : "::double precision");
+			}
+			else
+				appendStringInfoString(&out, k == 's' ? "::text" : "::double precision");
 			i += 5;
 			if (i + 1 < len && s[i] == '(' && s[i + 1] == ')')
 				i += 2;
 			continue;
+		}
+		/*
+		 * A bracketed group that holds a **: rewrite it on its own, since
+		 * rewrite_pow only splits an expression at a top-level power.
+		 */
+		if ((c == '(' || c == '[') && !names_fold_case(cx))
+		{
+			int			e = group_close(cx, s, len, i);
+
+			if (e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0)
+			{
+				char	   *inner = plx_rewrite_expr(cx, s + i + 1, e - i - 1,
+													 c == '(' ? boolctx : false);
+
+				appendStringInfoChar(&out, c);
+				appendStringInfoString(&out, inner);
+				appendStringInfoChar(&out, s[e]);
+				pfree(inner);
+				i = e + 1;
+				continue;
+			}
 		}
 		/* operator runs */
 		if (strchr("=!<>+-*/%&|?:~^", c))
@@ -1544,6 +3092,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			{
 				int			ol = j - i;
 				const char *op = s + i;
+
+				if (bw_on)
+					bitwise_check(cx, bw_prev, bw_depth, bitwise_prec(surf, op, ol));
 
 				/* -> record/object access (PHP) */
 				if (ol == 2 && strncmp(op, "->", 2) == 0)
@@ -1594,6 +3145,14 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					i = j;
 					continue;
 				}
+				/* ^ is bitwise XOR in the C-family and scripting dialects;
+				 * in SQL it is the exponent, and # is XOR */
+				if (ol == 1 && op[0] == '^' && !names_fold_case(cx))
+				{
+					appendStringInfoString(&out, " # ");
+					i = j;
+					continue;
+				}
 				if (ol == 1 && op[0] == '!')
 				{
 					appendStringInfoString(&out, "NOT ");
@@ -1604,6 +3163,19 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				i = j;
 				continue;
 			}
+		}
+		if (bw_on)
+		{
+			if (c == '(' || c == '[' || c == '{')
+			{
+				bw_depth++;
+				if (bw_depth < PLX_BW_MAXDEPTH)
+					bw_prev[bw_depth] = 0;
+			}
+			else if ((c == ')' || c == ']' || c == '}') && bw_depth > 0)
+				bw_depth--;
+			else if ((c == ',' || c == ';') && bw_depth < PLX_BW_MAXDEPTH)
+				bw_prev[bw_depth] = 0;
 		}
 		appendStringInfoChar(&out, c);
 		i++;
@@ -1632,7 +3204,80 @@ plx_span_text(Ctx *cx, int a, int b)
 	en = cx->t[b - 1].s + cx->t[b - 1].len;
 	if (en < st)
 		return pstrdup("");
-	return pnstrdup(st, (int) (en - st));
+
+	/*
+	 * The text between two tokens is whatever the lexer skipped: blanks, a
+	 * variable sigil, and comments. A comment must not reach the generated
+	 * SQL, where PHP's "#" is XOR, "--" inside a "//" comment hides the rest
+	 * of the line and a quote opens a string. Rebuild the span from its
+	 * tokens and replace each comment in a gap with one space. Should the
+	 * tokens ever be out of source order, keep the raw slice.
+	 */
+	{
+		StringInfoData o;
+		const char *prev = st;
+		int			k;
+
+		for (k = a; k < b; k++)
+		{
+			const Tok  *tk = &cx->t[k];
+
+			if (tk->s == NULL)
+				continue;
+			if (tk->s < prev || tk->s + tk->len > en)
+				return pnstrdup(st, (int) (en - st));
+			prev = tk->s;
+		}
+		prev = st;
+		initStringInfo(&o);
+		for (k = a; k < b; k++)
+		{
+			const Tok  *tk = &cx->t[k];
+			const char *g;
+
+			if (tk->s == NULL)
+				continue;
+			/* copy the gap [prev, tk->s), dropping comments */
+			g = prev;
+			while (g < tk->s)
+			{
+				const char *ce = NULL;
+
+				if (cx->surf->cmt_hash && *g == '#')
+					ce = g;
+				else if (cx->surf->cmt_slash && g + 1 < tk->s && g[0] == '/' && g[1] == '/')
+					ce = g;
+				if (ce)
+				{
+					while (ce < tk->s && *ce != '\n')
+						ce++;
+					appendStringInfoChar(&o, ' ');
+					g = ce;
+					continue;
+				}
+				if (cx->surf->cmt_block && g + 1 < tk->s && g[0] == '/' && g[1] == '*')
+				{
+					ce = g + 2;
+					while (ce + 1 < tk->s && !(ce[0] == '*' && ce[1] == '/'))
+						ce++;
+					ce = (ce + 1 < tk->s) ? ce + 2 : tk->s;
+					appendStringInfoChar(&o, ' ');
+					g = ce;
+					continue;
+				}
+				appendStringInfoChar(&o, *g);
+				g++;
+			}
+			if (tk->s + tk->len > prev)
+			{
+				const char *from = Max(tk->s, prev);
+
+				appendBinaryStringInfo(&o, from, (int) (tk->s + tk->len - from));
+				prev = tk->s + tk->len;
+			}
+		}
+		return o.data;
+	}
 }
 
 /* ---------------------------------------------------------------- type infer */
@@ -1722,7 +3367,7 @@ first_local_ref(Ctx *cx, const char *s, PlxLocal2 *self)
 				   IS_HIGHBIT_SET(*s))
 				s++;
 			if (prev != '.' && !after_cast &&
-				(l = plx_local_find(cx, w, (int) (s - w))) != NULL &&
+				(l = local_lookup(cx, w, (int) (s - w))) != NULL &&
 				l != self && !l->is_const)
 				return l->name;
 			prev = 'a';
@@ -2324,8 +3969,8 @@ typedef enum
 static int
 tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 {
-	const char *s = tk->s + (tk->fstr ? 2 : 1);
-	const char *e = tk->s + tk->len - 1;
+	const char *s = tk->s + str_open_len(tk);
+	const char *e = tk->s + tk->len - str_close_len(tk);
 	bool		can_interp = tk->fstr ||
 		(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
 	bool		raw = tk->sq && cx->surf->sq_is_raw;
@@ -2806,8 +4451,8 @@ plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
 static bool
 sql_is_row_returning(Tok *tk)
 {
-	const char *s = tk->s + 1;
-	const char *e = tk->s + tk->len - 1;
+	const char *s = tk->s + str_open_len(tk);
+	const char *e = tk->s + tk->len - str_close_len(tk);
 	static const char *verbs[] = {"select", "with", "values", "table", NULL};
 	int			i;
 
@@ -3118,6 +4763,11 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 				break;
 			}
 	}
+	/* message: "m" in place of a positional message is the message */
+	if ((cx->t[p].kind == T_IDENT || cx->t[p].kind == T_KW) &&
+		p + 1 < b && plx_tok_is(&cx->t[p + 1], ":") &&
+		plx_name_eq(&cx->t[p], "message"))
+		p += 2;
 	mstart = p;
 	mend = b;
 	{
@@ -3164,6 +4814,10 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 			if (!opt)
 				plx_err(cx, cx->t[ka].line, "unknown raise option \"%.*s\"",
 						cx->t[ka].len, cx->t[ka].s);
+			/* plpgsql would fail at run time: RAISE option already specified */
+			if (strcmp(opt, "MESSAGE") == 0)
+				plx_err(cx, cx->t[ka].line,
+						"raise has a message and a message: option; give only one");
 			va = ka + 2;
 			ve = b;
 			for (i = va; i < b; i++)
@@ -3179,10 +4833,29 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 				}
 			}
 			vt = plx_span_text(cx, va, ve);
-			vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
 			if (using.len)
 				appendStringInfoString(&using, ", ");
-			appendStringInfo(&using, "%s = %s", opt, vv);
+
+			/*
+			 * plpgsql rejects a NULL option with "RAISE statement option
+			 * cannot be null", which would replace the error being raised.
+			 * Every text option therefore gets the message's fallback: each
+			 * interpolated value, and the whole value, become '' when NULL.
+			 * ERRCODE is left alone: plx does not make up a SQLSTATE, so a
+			 * NULL errcode still fails.
+			 */
+			if (strcmp(opt, "ERRCODE") == 0)
+			{
+				vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
+				appendStringInfo(&using, "%s = %s", opt, vv);
+			}
+			else
+			{
+				cx->diag_msg = true;
+				vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
+				cx->diag_msg = false;
+				appendStringInfo(&using, "%s = COALESCE((%s)::text, '')", opt, vv);
+			}
 			p2 = ve;
 		}
 	}
@@ -3191,6 +4864,36 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 		appendStringInfo(o, "RAISE %s '%%', %s USING %s;\n", level, msg, using.data);
 	else
 		appendStringInfo(o, "RAISE %s '%%', %s;\n", level, msg);
+}
+
+/*
+ * Reject an assignment inside the right-hand side [ra, rb), as in a = b = v,
+ * a += b = v or a = b <<= 2. Any operator that ends in '=' assigns, except
+ * the comparisons ==, !=, ===, !==, <= and >=. In every dialect that reaches
+ * here, a = b = v sets both a and b. SQL reads the inner = as a comparison,
+ * so b would be left unchanged and a would get a boolean.
+ */
+static void
+reject_chained_assignment(Ctx *cx, int ra, int rb, int line)
+{
+	int			i, depth = 0;
+
+	for (i = ra; i < rb; i++)
+	{
+		Tok		   *tk = &cx->t[i];
+
+		if (tk->kind == T_LPAREN || tk->kind == T_LBRACKET || tk->kind == T_LBRACE)
+			depth++;
+		else if (tk->kind == T_RPAREN || tk->kind == T_RBRACKET || tk->kind == T_RBRACE)
+			depth--;
+		else if (depth == 0 && tk->kind == T_OP && tk->len >= 1 &&
+				 tk->s[tk->len - 1] == '=' &&
+				 !plx_tok_is(tk, "==") && !plx_tok_is(tk, "!=") &&
+				 !plx_tok_is(tk, "===") && !plx_tok_is(tk, "!==") &&
+				 !plx_tok_is(tk, "<=") && !plx_tok_is(tk, ">="))
+			plx_err(cx, line,
+					"chained assignment is not supported; assign each variable in its own statement");
+	}
 }
 
 /* emit the core (non-block) statement given range [a,b); returns nothing */
@@ -3258,7 +4961,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				Tok		   *pn = &cx->t[as[0]];
 
 				/* an f-string's prefix would be unquoted as part of the name */
-				if (pn->fstr)
+				if (pn->fstr || pn->triple)
 					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
 				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}
@@ -3397,6 +5100,26 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		int			app_rhs = -1;
 		PlxLocal2  *l = plx_local_find(cx, t0->s, t0->len);
 
+		/* Ruby shovel on an array local is a push: array_append keeps the type */
+		if (a + 2 < b && plx_tok_is(&cx->t[a + 1], "<<") && l && is_array_type(l->typ))
+		{
+			int			rb = b;
+			char	   *rhs,
+					   *r;
+
+			if (rb > a + 2 && cx->t[rb - 1].kind == T_TYPEANN)
+				rb--;
+			if (a + 2 >= rb)
+				plx_err(cx, t0->line, "append requires a value on the right-hand side");
+			if (l->is_const)
+				plx_err(cx, t0->line, "cannot append to a constant");
+			rhs = plx_span_text(cx, a + 2, rb);
+			r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+			plx_indent(o, ind);
+			appendStringInfo(o, "%.*s := array_append(%.*s, (%s));\n",
+							 t0->len, t0->s, t0->len, t0->s, r);
+			return;
+		}
 		if (a + 1 < b && plx_tok_is(&cx->t[a + 1], "<<") && l && is_stringy(l->typ))
 			app_rhs = a + 2;	/* Ruby shovel on a string */
 		else if (a + 2 < b && cx->t[a + 1].kind == T_DOT && plx_tok_is(&cx->t[a + 2], "="))
@@ -3422,9 +5145,25 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			}
 			if (l->is_const)
 				plx_err(cx, t0->line, "cannot append to a constant");
-			l->typ = plx_ext_object("plx_strbuild");
 			rhs = plx_span_text(cx, app_rhs, rb);
 			r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+			/*
+			 * A local declared with a string type the builder cannot stand in
+			 * for (varchar(n), char(n), citext, ...) keeps that type, so plpgsql
+			 * still checks its length or compares it its own way. Its append is
+			 * a plain ||.
+			 */
+			if (is_array_type(l->typ))
+				plx_err(cx, t0->line, "cannot append a string to array \"%.*s\"",
+						t0->len, t0->s);
+			if (is_stringy(l->typ) && !is_builder_type(l->typ))
+			{
+				plx_indent(o, ind);
+				appendStringInfo(o, "%.*s := %.*s || (%s)::text;\n",
+								 t0->len, t0->s, t0->len, t0->s, r);
+				return;
+			}
+			l->typ = plx_ext_object("plx_strbuild");
 			plx_indent(o, ind);
 			/* cast the appended value to text (int, numeric, etc. render) */
 			appendStringInfo(o, "%.*s := %s(%.*s, (%s)::text);\n",
@@ -3527,6 +5266,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		}
 		if (rhs_a >= rhs_b)
 			plx_err(cx, t0->line, "assignment requires a value on the right-hand side");
+		reject_chained_assignment(cx, rhs_a, rhs_b, t0->line);
 		if (plx_is_param(cx, t0->s, t0->len))
 		{
 			/* assigning to an OUT/param: plain := (never hoist) */
@@ -3646,8 +5386,12 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			 (cx->t[a + 1].kind == T_OP && cx->t[a + 1].len == 2 &&
 			  cx->t[a + 1].s[0] == '-' && cx->t[a + 1].s[1] == '>')))
 		{
-			char	   *lhs = plx_rw_range(cx, a, eq, false);
-			char	   *rhs = plx_rw_range(cx, eq + 1, b, false);
+			char	   *lhs;
+			char	   *rhs;
+
+			reject_chained_assignment(cx, eq + 1, b, t0->line);
+			lhs = plx_rw_range(cx, a, eq, false);
+			rhs = plx_rw_range(cx, eq + 1, b, false);
 
 			plx_indent(o, ind);
 			appendStringInfo(o, "%s := %s;\n", lhs, rhs);

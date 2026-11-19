@@ -37,6 +37,33 @@ These follow from running as plpgsql and are not specific to any one dialect.
   plpgsql `DECLARE` block, so locals are visible for the whole function. There is
   no per-block (per-`{}`, per-`if`) scope, and a name cannot be redeclared with a
   new type partway through.
+- **Names that differ only by case are one name.** plpgsql ignores case in
+  names, so `total` and `Total` would be the same variable. In plxruby, plxphp,
+  plxjs, plxts, plxpython3 and plxgo, where case matters, `CREATE FUNCTION`
+  rejects a body that spells one name two ways, for example a local `A` beside
+  a local or parameter `a`, or a loop variable `I` beside a local `i`. Rename
+  one of them. SQL folds an unquoted parameter
+  name to lower case, so a parameter declared as `userId` may be written
+  `userId` in the body, as long as the body always spells it the same way.
+- **No SQL reserved word as a variable name.** plx writes variable names into
+  the generated SQL without quotes. A variable named after a reserved word,
+  such as `array`, makes `CREATE FUNCTION` fail with a syntax error. When
+  `check_function_bodies` is off, the function is created and fails with the
+  syntax error when it runs. Rename the variable.
+- **No NUL character in a string.** A PostgreSQL text value cannot hold the
+  byte 0, so `CREATE FUNCTION` rejects a string escape that produces it, such as
+  `\0` or `\x00`. Other escapes keep the meaning they have in the dialect:
+  `"\x41"` is `A` and `"\v"` is a vertical tab.
+- **Parentheses in a mix of bitwise operators.** SQL gives `&`, `|`, `#` (XOR),
+  `<<` and `>>` one precedence and reads them from left to right. In plxruby,
+  plxphp, plxjs, plxts and plxpython3, `CREATE FUNCTION` rejects a mix that the
+  dialect would group differently, such as `a ^ b & c` or `a | b & c`. Write
+  `a ^ (b & c)`. A mix that SQL groups the same way, such as `a & b | c`, is
+  accepted.
+- **One assignment per statement.** In plxruby, plxphp, plxjs, plxts and
+  plxpython3, `CREATE FUNCTION` rejects a chained assignment such as
+  `a = b = 0`, `a += b = 1` or `a = b <<= 2`. Assign each variable in its own
+  statement.
 - **SQL semantics, not the source language's.** Decimal literals are exact
   `numeric`, not IEEE 754 floating point. Comparisons use SQL three-valued logic,
   so a comparison involving NULL is unknown rather than false, and `==`/`===`
@@ -59,11 +86,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   by the RAISE exception: if a part was NULL, the raised message is `<NULL>`.
   plxcobol's `STRING-APPEND` does not follow the append rule: it treats a NULL
   as nothing to append, because COBOL has no NULL.
-- **The message fallback covers the message text only.** An interpolated NULL
-  in a `RAISE` option such as `detail:` or `hint:` makes the `RAISE` itself fail
-  with `RAISE statement option cannot be null`, which hides the error you meant
-  to raise. A NULL in an `assert` message replaces your message with plpgsql's
-  generic `assertion failed`. Wrap such values in `coalesce(x, '')`.
+- **A NULL errcode makes RAISE fail.** In plxruby, a NULL value in the
+  `detail:`, `hint:`, `column:` or `constraint:` option of `raise` becomes an
+  empty string, the same as in the message, so your error is still raised with
+  its own SQLSTATE. A NULL `errcode:` is not replaced, because plx will not make
+  up a SQLSTATE. The `raise` then fails with `RAISE statement option cannot be
+  null` (SQLSTATE 22004) instead of raising your error. A NULL in an `assert`
+  message replaces your message with plpgsql's generic `assertion failed`. Wrap
+  such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
   (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL, T-SQL), or
@@ -78,6 +108,15 @@ These follow from running as plpgsql and are not specific to any one dialect.
   amortized-O(1) building. The in-place path relies on a PostgreSQL 18 planner
   hook; on 13 through 17 the result is correct but the append is O(n^2), the same
   as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
+- **Only `text` and `varchar` locals use the string builder.** The append
+  operators turn a local into a `plx_strbuild` only when it has no declared type
+  or is declared `text` or `varchar` without a length. A local declared with
+  another string type, such as `varchar(20)`, `char(4)` or `citext`, keeps that
+  type. Its append becomes `s := s || x`, so plpgsql still checks the length
+  (`value too long for type character varying(20)`) and a NULL value makes the
+  result NULL. That append is not accelerated. In plxruby, `<<` on an array
+  local appends an element (`array_append`). In plxphp, `.=` on an array local
+  is rejected at `CREATE FUNCTION` time.
 - **The string builder must be on the search path.** Functions that use the
   append operators reference the extension's `plx_strbuild` type and
   `plx_sb_append` or `plx_sb_append_strict` function unqualified, so the
@@ -160,6 +199,7 @@ fail when the function runs.
 - Tuples, lists, dicts, and sets as general values.
 - `match`/`case`, and the conditional expression `a if c else b`.
 - Floor division `//`; `/` on integers truncates toward zero.
+- The `\N{name}` string escape; write `\u` or `\U` with the code point.
 
 ### plxgo ([chapter](plxgo.md))
 

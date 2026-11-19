@@ -219,10 +219,29 @@ assert n > 0, "must be positive"
 
 - Interpolation: f-strings, `f"total is {amount}"`. Plain strings do not
   interpolate. `{{` and `}}` are literal braces.
+- Strings: a triple-quoted string (`"""..."""`, `'''...'''`, or `f"""..."""`)
+  is one literal and may span lines. Adjacent literals, `"a" "b"`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x is None` becomes `x IS NULL`
   and `x is not None` becomes `x IS NOT NULL`.
 - Boolean: `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that Python groups
+  differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
+- Conversions: `str(x)` and `float(x)` become `(x)::text` and
+  `(x)::double precision`. `int(x)` becomes `trunc((x)::numeric)::integer`, so
+  it truncates toward zero as Python does: `int(2.7)` is 2 and `int(-2.7)` is
+  -2. When the argument is visibly boolean (`True`, `False`, a boolean variable,
+  or a comparison such as `int(a > b)`), `int(x)` becomes `(x)::integer`
+  instead, because a boolean has no numeric cast. A boolean value plx cannot
+  see, such as a function that returns boolean, fails with `cannot cast type
+  boolean to numeric`; write `int(f(x) == True)` or a `CASE`. When the argument
+  is visibly a string (a string literal, or a `text`, `varchar` or `char`
+  variable), `int(x)` also becomes `(x)::integer`, so `int("4.7")` fails with
+  `invalid input syntax for type integer`, as Python raises `ValueError`.
 - `None` becomes `NULL`.
 
 ## Building strings in a loop
@@ -299,6 +318,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.
+- The `\N{name}` string escape. Write `\u` or `\U` with the code point.
 
 Not translated:
 

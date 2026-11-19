@@ -204,6 +204,7 @@ parse_for(Ctx *cx, int ind)
 	hi_b = e;
 	hi = plx_rewrite_expr(cx, plx_span_text(cx, hi_a, hi_b),
 					  (int) strlen(plx_span_text(cx, hi_a, hi_b)), false);
+	plx_check_loop_var(cx, cx->t[var_a].s, cx->t[var_a].len);
 	plx_indent(o, ind);
 	if (exclusive)
 		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
@@ -358,6 +359,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		hst = plx_span_text(cx, hi_a, hi_b);
 		lo = plx_rewrite_expr(cx, lst, (int) strlen(lst), false);
 		hi = plx_rewrite_expr(cx, hst, (int) strlen(hst), false);
+		plx_check_loop_var(cx, cx->t[var1_a].s, cx->t[var1_a].len);
 		plx_indent(o, ind);
 		if (excl)
 			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",

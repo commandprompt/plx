@@ -236,3 +236,9 @@ SELECT rngtypid::regtype, rngcollation FROM pg_range
 WHERE rngtypid IN ('a4_rng'::regtype, 'a4_drng'::regtype) ORDER BY rngtypid::regtype::text;
 SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
        a4_drng('a', 'c') @> 'b'::a4_rdom AS drng_has;
+-- The A4 test re-created the extension with search_path = fc, so it now
+-- lives in schema fc. Put it back in public, where the test files that run
+-- after this one expect it.
+DROP EXTENSION plx CASCADE;
+RESET search_path;
+CREATE EXTENSION plx SCHEMA public;

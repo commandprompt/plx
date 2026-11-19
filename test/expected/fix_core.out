@@ -351,3 +351,9 @@ SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
  t       | t
 (1 row)
 
+-- The A4 test re-created the extension with search_path = fc, so it now
+-- lives in schema fc. Put it back in public, where the test files that run
+-- after this one expect it.
+DROP EXTENSION plx CASCADE;
+RESET search_path;
+CREATE EXTENSION plx SCHEMA public;
