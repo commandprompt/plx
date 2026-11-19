@@ -155,6 +155,11 @@ end
 
 The loop variable must be annotated with its element type.
 
+`each_with_index do |v, i|` works on a query, an array and a range
+(`(1..n).each_with_index`). The index `i` starts at 0 and is an integer local.
+Without `each_with_index`, a block takes one variable: `each do |v, i|` is an
+error.
+
 ### Fetching one row
 
 ```sql

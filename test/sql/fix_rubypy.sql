@@ -116,3 +116,38 @@ except:
 $$;
 SELECT fr_a21_bare();
 \set VERBOSITY default
+-- A24: plxruby each_with_index over an array or a range sets the index
+CREATE FUNCTION fr_a24_array() RETURNS int LANGUAGE plxruby AS $$
+i = 42
+total = 0
+v #:: int
+[10, 20, 30].each_with_index do |v, i|
+  total = total + i
+end
+return total
+$$;
+SELECT fr_a24_array() AS rb_expect_3;
+CREATE FUNCTION fr_a24_range() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each_with_index do |v, i|
+  total = total + v * 10 + i
+end
+return total
+$$;
+SELECT fr_a24_range() AS rb_expect_183;
+\set VERBOSITY terse
+CREATE FUNCTION fr_a24_noidx() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each_with_index do |v|
+  total = total + v
+end
+return total
+$$;
+CREATE FUNCTION fr_a24_each2() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each do |v, i|
+  total = total + i
+end
+return total
+$$;
+\set VERBOSITY default

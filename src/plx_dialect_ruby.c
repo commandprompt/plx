@@ -319,6 +319,32 @@ capture_block(Ctx *cx, int ind)
 	return r;
 }
 
+/*
+ * each_with_index: declare the index as an integer local and set it to -1
+ * before the loop; rb_index_step adds 1 at the top of each pass.
+ */
+static void
+rb_index_init(Ctx *cx, int var2_a, int ind)
+{
+	PlxLocal2  *li = plx_local_find(cx, cx->t[var2_a].s, cx->t[var2_a].len);
+
+	if (!li)
+		li = plx_local_add(cx, cx->t[var2_a].s, cx->t[var2_a].len);
+	if (!li->typ)
+		li->typ = pstrdup("integer");
+	plx_indent(&cx->out, ind);
+	appendStringInfo(&cx->out, "%.*s := -1;\n", cx->t[var2_a].len, cx->t[var2_a].s);
+}
+
+static void
+rb_index_step(Ctx *cx, int var2_a, int ind)
+{
+	plx_indent(&cx->out, ind);
+	appendStringInfo(&cx->out, "%.*s := %.*s + 1;\n",
+					 cx->t[var2_a].len, cx->t[var2_a].s,
+					 cx->t[var2_a].len, cx->t[var2_a].s);
+}
+
 /* iterator block: query(...).each do |row| ... end  |  (LO..HI).each do |v| ... end */
 static void
 parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
@@ -356,6 +382,12 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 	}
 	if (cx->t[vp].kind != T_PIPE)
 		plx_err(cx, cx->t[a].line, "iterator block variable list not closed with |");
+	if (var2_a >= 0 && !with_index)
+		plx_err(cx, cx->t[a].line, "each takes one block variable; use each_with_index for an index");
+
+	if (with_index && var2_a < 0 &&
+		!(cx->t[a].kind == T_IDENT && plx_name_eq(&cx->t[a], "query")))
+		plx_err(cx, cx->t[a].line, "each_with_index requires |value, index|");
 
 	if (cx->t[a].kind == T_IDENT && plx_name_eq(&cx->t[a], "query") &&
 		cx->t[a + 1].kind == T_LPAREN)
@@ -375,17 +407,9 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		}
 		if (with_index)
 		{
-			PlxLocal2  *li;
-
 			if (var2_a < 0)
 				plx_err(cx, cx->t[a].line, "each_with_index requires |row, idx|");
-			li = plx_local_find(cx, cx->t[var2_a].s, cx->t[var2_a].len);
-			if (!li)
-				li = plx_local_add(cx, cx->t[var2_a].s, cx->t[var2_a].len);
-			if (!li->typ)
-				li->typ = pstrdup("integer");
-			plx_indent(o, ind);
-			appendStringInfo(o, "%.*s := -1;\n", cx->t[var2_a].len, cx->t[var2_a].s);
+			rb_index_init(cx, var2_a, ind);
 		}
 		plx_indent(o, ind);
 		{
@@ -404,12 +428,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		cx->pos = e;
 		cx->loopdepth++;
 		if (with_index)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfo(o, "%.*s := %.*s + 1;\n",
-							 cx->t[var2_a].len, cx->t[var2_a].s,
-							 cx->t[var2_a].len, cx->t[var2_a].s);
-		}
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
@@ -436,6 +455,8 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		hst = plx_span_text(cx, hi_a, hi_b);
 		lo = plx_rewrite_expr(cx, lst, (int) strlen(lst), false);
 		hi = plx_rewrite_expr(cx, hst, (int) strlen(hst), false);
+		if (with_index)
+			rb_index_init(cx, var2_a, ind);
 		plx_indent(o, ind);
 		if (excl)
 			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
@@ -445,6 +466,8 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 							 cx->t[var1_a].len, cx->t[var1_a].s, lo, hi);
 		cx->pos = e;
 		cx->loopdepth++;
+		if (with_index)
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
@@ -462,12 +485,16 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 			plx_err(cx, cx->t[a].line,
 					"foreach over an array requires the loop variable to be annotated with its element type before the loop, e.g. \"%.*s #:: int\"",
 					cx->t[var1_a].len, cx->t[var1_a].s);
+		if (with_index)
+			rb_index_init(cx, var2_a, ind);
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
 						 cx->t[var1_a].len, cx->t[var1_a].s,
 						 arrx[0] == '[' ? "ARRAY" : "", arrx);
 		cx->pos = e;
 		cx->loopdepth++;
+		if (with_index)
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
