@@ -120,7 +120,9 @@ the COBOL relational words (`IS EQUAL TO`, `IS GREATER THAN`,
 ### EVALUATE
 
 A subject makes a simple `CASE`; `EVALUATE TRUE` makes a searched `CASE`. Stacked
-`WHEN` values share the following statements, and `WHEN OTHER` is the default.
+`WHEN` phrases share the following statements in both forms, and `WHEN OTHER`
+is the default. A `WHEN` stacked directly before `WHEN OTHER` shares the
+`WHEN OTHER` statements.
 
 ```sql
 EVALUATE N

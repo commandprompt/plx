@@ -164,3 +164,65 @@ SELECT fc_a36_ok() AS expect_chars;
  != $1 @ || é
 (1 row)
 
+-- A37: stacked WHENs in EVALUATE TRUE share the following statements
+CREATE FUNCTION fc_a37_searched(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE TRUE
+        WHEN N = 1
+        WHEN N = 2
+            MOVE "small" TO WS-R
+        WHEN OTHER
+            MOVE "big" TO WS-R
+    END-EVALUATE
+    GOBACK RETURNING WS-R.
+$$;
+SELECT fc_a37_searched(1) AS expect_small, fc_a37_searched(2) AS small2,
+       fc_a37_searched(3) AS big;
+ expect_small | small2 | big 
+--------------+--------+-----
+ small        | small  | big
+(1 row)
+
+-- A37: a WHEN stacked before WHEN OTHER shares the OTHER statements
+CREATE FUNCTION fc_a37_other(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE N
+        WHEN 1
+            MOVE "one" TO WS-R
+        WHEN 2
+        WHEN OTHER
+            MOVE "other" TO WS-R
+    END-EVALUATE
+    GOBACK RETURNING WS-R.
+$$;
+SELECT fc_a37_other(1) AS one, fc_a37_other(2) AS expect_other,
+       fc_a37_other(7) AS other7;
+ one | expect_other | other7 
+-----+--------------+--------
+ one | other        | other
+(1 row)
+
+-- A37: the same in EVALUATE TRUE
+CREATE FUNCTION fc_a37_searched_other(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE TRUE
+        WHEN N = 1
+            MOVE "one" TO WS-R
+        WHEN N = 2
+        WHEN OTHER
+            MOVE "other" TO WS-R
+    END-EVALUATE
+    GOBACK RETURNING WS-R.
+$$;
+SELECT fc_a37_searched_other(2) AS expect_other;
+ expect_other 
+--------------
+ other
+(1 row)
+

@@ -1303,25 +1303,16 @@ cob_evaluate(Cb *cb, int ind)
 			has_other = true;
 			break;
 		}
-		if (searched)
-		{
-			StringInfoData c;
-
-			cb->pos++;
-			initStringInfo(&c);
-			if (!cob_value(cb, &c, NULL, 0))
-				cob_err(cb, "WHEN requires a condition");
-			plx_indent(&cb->cx->out, ind + 1);
-			appendStringInfo(&cb->cx->out, "WHEN %s THEN\n", c.data);
-			cob_block(cb, ind + 2);
-		}
-		else
 		{
 			StringInfoData vals;
-			bool		first = true;
+			int			n = 0;
 
+			/*
+			 * Stacked WHENs (no statements between them) share the statements
+			 * that follow: subject values become a list (WHEN 1, 2) and
+			 * searched conditions are joined with OR.
+			 */
 			initStringInfo(&vals);
-			/* stacked WHEN v1 WHEN v2 ... share the following statements */
 			while (cob_ci(cob_cur(cb), "WHEN") &&
 				   !cob_ci(&cb->t[cb->pos + 1], "OTHER"))
 			{
@@ -1330,12 +1321,30 @@ cob_evaluate(Cb *cb, int ind)
 				cb->pos++;
 				initStringInfo(&one);
 				if (!cob_value(cb, &one, NULL, 0))
-					cob_err(cb, "WHEN requires a value");
-				if (!first)
-					appendStringInfoString(&vals, ", ");
-				appendStringInfo(&vals, "%s", one.data);
-				first = false;
+					cob_err(cb, searched ? "WHEN requires a condition"
+							: "WHEN requires a value");
+				if (searched && n == 1)
+				{
+					/* a second condition: parenthesize both, joined by OR */
+					char	   *first = pstrdup(vals.data);
+
+					resetStringInfo(&vals);
+					appendStringInfo(&vals, "(%s ) OR (%s )", first, one.data);
+				}
+				else if (searched && n > 1)
+					appendStringInfo(&vals, " OR (%s )", one.data);
+				else if (searched)
+					appendStringInfoString(&vals, one.data);
+				else
+					appendStringInfo(&vals, "%s%s", n ? ", " : "", one.data);
+				n++;
 			}
+			/*
+			 * WHENs stacked directly before WHEN OTHER share its statements.
+			 * The ELSE arm already covers them, so they need no arm of their own.
+			 */
+			if (cob_ci(cob_cur(cb), "WHEN"))
+				continue;
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfo(&cb->cx->out, "WHEN %s THEN\n", vals.data);
 			cob_block(cb, ind + 2);
