@@ -200,3 +200,9 @@ CREATE FUNCTION fx43_names() RETURNS int LANGUAGE plxtsql AS $$
   SELECT @a = v, @b = @a * 2 FROM fx43_amt;
   RETURN @b;
 $$;
+-- A47: an IF condition holding IIF, which becomes CASE ... THEN, still works
+CREATE FUNCTION fx47_iif(a int) RETURNS int LANGUAGE plxtsql AS $$
+  IF IIF(@a > 0, 1, 0) = 1 RETURN 1;
+  RETURN 0;
+$$;
+SELECT fx47_iif(5) AS pos, fx47_iif(-5) AS neg;

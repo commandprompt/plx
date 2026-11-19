@@ -1335,9 +1335,12 @@ tq_if(Tq *tq, int ind)
 	c0 = tq->pos;
 	c1 = tq_cond_end(tq, c0);
 	/* plpgsql ends an IF condition at its first THEN, so a condition that
-	 * holds a CASE ... THEN goes in parentheses */
-	for (k = c0; k < c1 && !tq_ci(&tq->t[k], "CASE"); k++)
-		;
+	 * holds a CASE ... THEN goes in parentheses. IIF( becomes CASE ... THEN
+	 * when it is emitted, so it counts too. */
+	for (k = c0; k < c1; k++)
+		if (tq_ci(&tq->t[k], "CASE") ||
+			(tq_ci(&tq->t[k], "IIF") && k + 1 < c1 && tq->t[k + 1].kind == TQ_LP))
+			break;
 	plx_indent(&tq->cx->out, ind);
 	appendStringInfoString(&tq->cx->out, k < c1 ? "IF (" : "IF");
 	tq_emit_range(tq, c0, c1, &tq->cx->out);

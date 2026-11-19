@@ -304,3 +304,14 @@ CREATE FUNCTION fx43_names() RETURNS int LANGUAGE plxtsql AS $$
   RETURN @b;
 $$;
 ERROR:  plxtsql: SELECT @b = ... FROM reads @a in its own assignment list; use an aggregate such as SUM() or string_agg() instead
+-- A47: an IF condition holding IIF, which becomes CASE ... THEN, still works
+CREATE FUNCTION fx47_iif(a int) RETURNS int LANGUAGE plxtsql AS $$
+  IF IIF(@a > 0, 1, 0) = 1 RETURN 1;
+  RETURN 0;
+$$;
+SELECT fx47_iif(5) AS pos, fx47_iif(-5) AS neg;
+ pos | neg 
+-----+-----
+   1 |   0
+(1 row)
+
