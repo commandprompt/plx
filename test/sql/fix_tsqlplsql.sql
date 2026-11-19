@@ -418,3 +418,31 @@ CREATE FUNCTION fxch_pe() RETURNS text LANGUAGE plxtsql AS $$
   RETURN @c;
 $$;
 SELECT fxch_pe();  -- SQL Server: 'c  ' (the result cut to 3 characters)
+-- T-SQL binds unary ~ tighter than any other operator, so ~a + b is (~a) + b. PostgreSQL binds prefix ~
+-- looser than + and *, so ~ must apply to its operand only. SQL Server's answer is in each comment.
+CREATE FUNCTION fxtl_lit() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN ~1 + '2';
+$$;
+SELECT fxtl_lit() AS r;  -- SQL Server: 0
+CREATE FUNCTION fxtl_var() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @n int = 1;
+  RETURN ~@n + 1;
+$$;
+SELECT fxtl_var() AS r;  -- SQL Server: -1
+CREATE FUNCTION fxtl_call() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN ~ABS(-1) * 2;
+$$;
+SELECT fxtl_call() AS r;  -- SQL Server: -4
+CREATE FUNCTION fxtl_paren() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN ~(1 + 1) + 1;
+$$;
+SELECT fxtl_paren() AS r;  -- SQL Server: -2
+CREATE TABLE fxtl_t(qty int);
+INSERT INTO fxtl_t VALUES (2);
+CREATE FUNCTION fxtl_col() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @r int;
+  SELECT @r = ~qty + 1 FROM fxtl_t;
+  RETURN @r;
+$$;
+SELECT fxtl_col() AS r;  -- SQL Server: -2
+DROP TABLE fxtl_t;

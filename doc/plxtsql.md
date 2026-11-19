@@ -182,6 +182,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | T-SQL | PostgreSQL |
 | --- | --- |
 | `a ^ b` (bitwise exclusive OR) | `a # b` |
+| `~a` (bitwise NOT) | `(~a)` |
 | `a != b` | `a <> b` |
 | `@s + 'x'` (every operand a known string) | `s \|\| 'x'` |
 
@@ -194,6 +195,10 @@ same precedence as `+` and `-` and evaluates left to right. PostgreSQL binds
 So `1 ^ 2 + 3` gives 6 in SQL Server, but 4 in plx, which computes
 `1 # (2 + 3)`. Put parentheses around a bitwise operation that is followed by
 `+` or `-`: write `(1 ^ 2) + 3`.
+
+T-SQL binds the unary `~` more tightly than any other operator, and PostgreSQL
+binds it more loosely than `+` and `*`. plx puts parentheses around `~` and its
+operand, so `~1 + 2` gives 0, as in SQL Server.
 
 ### String concatenation with `+`
 

@@ -1208,6 +1208,30 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 			i++;
 			continue;
 		}
+		if (tk->kind == TQ_OP && tk->len == 1 && tk->s[0] == '~')
+		{
+			/*
+			 * T-SQL binds unary ~ tighter than any other operator; PostgreSQL
+			 * binds prefix ~ looser than + and *. Apply it to its operand only:
+			 * ~a + b becomes (~a) + b. A run of ~ nests through the recursion.
+			 */
+			TqCls		c;
+			int			e = i + 1;
+
+			while (e < b && tq->t[e].kind == TQ_OP && tq->t[e].len == 1 &&
+				   tq->t[e].s[0] == '~')
+				e++;
+			e = tq_operand1(tq, e, b, &c);
+			if (e > i + 1)
+			{
+				tq_sp(out);
+				appendStringInfoString(out, "(~");
+				tq_emit_range(tq, i + 1, e, out);
+				appendStringInfoChar(out, ')');
+				i = e;
+				continue;
+			}
+		}
 		if (tk->kind == TQ_OP)
 		{
 			tq_sp(out);
