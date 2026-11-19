@@ -42,6 +42,15 @@ CREATE FUNCTION fg26_loop() RETURNS int LANGUAGE plxgo AS $$
  return last
 $$;
 SELECT fg26_loop() AS go_1;
+-- a fixed-size array [N]T starts as N zero values; a slice stays nil
+CREATE FUNCTION fg26_array() RETURNS text LANGUAGE plxgo AS $$
+ var e [3]int
+ var t [2]string
+ var b [2]bool
+ var s []int
+ return fmt.Sprintf("%d|%d|%d|%s|%v|%d|%d", e[2], len(e), len(t), t[1], b[0], len(b), len(s))
+$$;
+SELECT fg26_array() AS go_0_3_2_empty_false_2_0;
 
 -- A27: a counting for loop re-tests its bound, honours body writes to the
 -- loop variable, updates a variable declared before the loop, and keeps a

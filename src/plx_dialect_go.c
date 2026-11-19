@@ -71,6 +71,11 @@ typedef struct
 	 * a loop nested in it: break inside a switch leaves only the switch.
 	 */
 	const char *brk_label;
+	/*
+	 * Length of the array type go_read_type last read ([N]T with N a plain
+	 * decimal number), or -1 for a slice or any other type.
+	 */
+	int			arrlen;
 } Go;
 
 static void go_stmt(Go *g, int ind);
@@ -1009,9 +1014,16 @@ go_read_type(Go *g, StringInfo dest)
 
 	while (go_cur(g)->kind == GO_OP && go_cur(g)->len == 1 && go_cur(g)->s[0] == '*')
 		g->pos++;								/* pointer: drop the * */
+	g->arrlen = -1;
 	if (go_cur(g)->kind == GO_LBRACK)			/* []T or [N]T -> T[] */
 	{
+		GoTok	   *n;
+
 		g->pos++;
+		n = go_cur(g);
+		if (n->kind == GO_NUM && g->t[g->pos + 1].kind == GO_RBRACK &&
+			n->len <= 9 && strspn(n->s, "0123456789") >= (size_t) n->len)
+			g->arrlen = atoi(pnstrdup(n->s, n->len));
 		while (go_cur(g)->kind != GO_RBRACK && go_cur(g)->kind != GO_EOF)
 			g->pos++;							/* skip an optional array length */
 		if (go_cur(g)->kind == GO_RBRACK)
@@ -2014,13 +2026,28 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 		 * the declaration, not in the hoisted DECLARE.
 		 */
 		const char *zero = go_zero_value(l->typ);
+		int			tl = (int) strlen(l->typ);
 
 		if (zero)
 		{
 			plx_indent(&g->cx->out, ind);
 			appendStringInfo(&g->cx->out, "%s := %s;\n", name, zero);
 		}
+		else if (g->arrlen >= 0 && tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+		{
+			/* [N]T: Go's zero value is N zero elements, not a nil slice */
+			char	   *el = pnstrdup(l->typ, tl - 2);
+
+			zero = go_zero_value(el);
+			if (zero)
+			{
+				plx_indent(&g->cx->out, ind);
+				appendStringInfo(&g->cx->out, "%s := array_fill((%s)::%s, ARRAY[%d]);\n",
+								 name, zero, el, g->arrlen);
+			}
+		}
 	}
+	g->arrlen = -1;
 }
 
 /* var x T [= e]  |  var x = e  |  var ( ... )  |  const ... */
@@ -3167,6 +3194,7 @@ plx_go_parse_body(Ctx *cx)
 
 	memset(&g, 0, sizeof(g));
 	g.cx = cx;
+	g.arrlen = -1;
 	go_lex(&g, cx->body);
 	go_eat_semi(&g);
 

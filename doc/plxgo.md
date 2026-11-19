@@ -63,8 +63,11 @@ A `var` with no value starts at Go's zero value, as in Go: `0` for the
 integer and float types, `""` for `string`, and `false` for `bool`. plx assigns
 the zero value where the declaration stands, so a `var` inside a loop body is
 reset on every iteration. A slice declared without a value is `NULL`, which
-matches Go's nil slice (`len` of it is 0). Any other type, such as `time.Time`
-or a PostgreSQL type name, starts as `NULL`.
+matches Go's nil slice (`len` of it is 0). An array `[N]T` with a number for
+`N` and one of those element types starts as `N` zero elements, as in Go:
+`var e [3]int` is `{0,0,0}`. Any other type, such as `time.Time` or a
+PostgreSQL type name, starts as `NULL`, and so does an array whose length is a
+constant name rather than a number.
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
 literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
