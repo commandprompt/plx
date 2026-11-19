@@ -111,11 +111,12 @@ only when the result is the same:
 - The step changes the loop variable (`i++` or `i += K`).
 - The body does not assign the loop variable, or any variable in the bound or
   the step.
-- In a loop without `let`, the code after the loop does not read the loop
-  variable before it assigns it again.
-- In a loop without `let` that is inside another loop, the outer loop does
-  not read the loop variable on its next pass before the `for` runs again:
-  not in its condition, and not in its body before the `for`.
+- In a loop without `let` or `const`, the code after the loop does not read
+  the loop variable before it assigns it again. `var` does not count as
+  `let`: a `var` variable keeps its value after the loop.
+- In a loop without `let` or `const` that is inside another loop, the outer
+  loop does not read the loop variable on its next pass before the `for` runs
+  again: not in its condition, and not in its body before the `for`.
 
 `CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
 

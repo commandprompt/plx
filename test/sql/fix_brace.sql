@@ -463,3 +463,22 @@ while (k < 2) {
 return x;
 $$;
 SELECT fb_rv9();
+-- A17: for (var i ...) keeps i after the loop in JavaScript, so a read after the loop is rejected
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv10(n int) RETURNS int LANGUAGE plxjs AS $$
+var i = 7;
+for (var i = 0; i < n; i++) { }
+return i;
+$$;
+CREATE FUNCTION fb_rv11(n int) RETURNS int LANGUAGE plxts AS $$
+for (var i = 0; i < n; i++) { }
+return i;
+$$;
+\set VERBOSITY default
+-- a for (var i ...) whose variable is not read after the loop still compiles
+CREATE FUNCTION fb_rv12(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (var i = 0; i < n; i++) { c = c + i; }
+return c;
+$$;
+SELECT fb_rv12(4);

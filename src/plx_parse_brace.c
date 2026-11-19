@@ -659,11 +659,15 @@ parse_for_brace(Ctx *cx, int ind)
 
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
-	/* strip a leading let/const/var declaration keyword */
+	/*
+	 * strip a leading let/const/var declaration keyword; let and const scope
+	 * the variable to the loop, but var is function-scoped, so the value after
+	 * the loop still matters
+	 */
 	if (cx->t[ca].kind == T_KW && cx->t[ca].kw == KW_LET)
 	{
+		has_let = !plx_name_eq(&cx->t[ca], "var");
 		ca++;
-		has_let = true;
 	}
 	/* scan for top-level ';' (C-for) and KW_OF (for-of) */
 	for (i = ca; i < cb; i++)
