@@ -25,8 +25,11 @@ PLX_PYTHON ?= python3
 # Differential check: run every dialect's version of a program against the
 # plpgsql the same program would have been written in, and require them to
 # agree. Needs the extension installed and a running server, like installcheck.
+# It first runs the fuzzer's self-test, which needs no server, so that the
+# fuzzer's classifier is checked on every run.
 .PHONY: differentialcheck
 differentialcheck:
+	$(PLX_PYTHON) test/fuzz.py --selftest
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/finally_diff.py 300 1

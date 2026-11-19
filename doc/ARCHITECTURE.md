@@ -177,7 +177,10 @@ be rejected.
 
 `test/fuzz.py` feeds mutated and pathological sources to every front end. It
 asserts nothing about the output; it asserts that the transpiler does not
-crash, hang, or exhaust memory on input written to break it.
+crash, hang, or exhaust memory on input written to break it. You run the fuzzer
+by hand. `make differentialcheck` runs only its self-test
+(`python3 test/fuzz.py --selftest`), which checks how the fuzzer classifies
+psql output and needs no server.
 
 `make differentialcheck` runs `test/differential.py`, which answers the
 question the other three cannot. Each case is one small program written once

@@ -286,8 +286,14 @@ SELFTEST = [
     ("ERROR:  out of memory\nDETAIL:  Failed on request of size 8192.\n", "RESOURCE"),
     ("psql:<stdin>:1: ERROR:  canceling statement due to statement timeout\n", "HANG"),
     ("ERROR:  canceling statement due to user request\n", "HANG"),
-    # A transpile error that merely quotes the text is not a finding.
+    # A transpile error that merely quotes the text is not a finding: not
+    # when the quote ends the message (the $ anchor), and not when it is
+    # somewhere other than the start of a line (the ^ anchor).
     ("ERROR:  plxruby: unexpected 'ERROR:  out of memory'\n", "ok"),
+    ("ERROR:  plxruby: unexpected ERROR:  out of memory\n", "ok"),
+    ("ERROR:  plxjs: bad x ERROR:  canceling statement due to statement "
+     "timeout\n", "ok"),
+    ('ERROR:  plxphp: near ERROR:  language "plxruby" does not exist\n', "ok"),
     # Nothing was transpiled at all: the run tests nothing.
     ('ERROR:  language "plxruby" does not exist\n', "SETUP"),
 ]
