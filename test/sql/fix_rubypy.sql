@@ -187,3 +187,42 @@ return f"{br}'q'"
 $$;
 SELECT fr_a49_plain();
 \set VERBOSITY default
+-- A20: (review) a Ruby parameter, a use only inside a string, and nested reuse
+CREATE FUNCTION fr_a20_rb_param(n int) RETURNS int LANGUAGE plxruby AS $$
+for n in 0...n
+  x = 1
+end
+return n
+$$;
+SELECT fr_a20_rb_param(3) AS rb_expect_2;
+CREATE FUNCTION fr_a20_py_fstr() RETURNS text LANGUAGE plxpython3 AS $$
+for k in range(4):
+    pass
+return f"k={k}"
+$$;
+SELECT fr_a20_py_fstr() AS py_expect_k3;
+CREATE FUNCTION fr_a20_rb_interp() RETURNS text LANGUAGE plxruby AS $$
+for k in 1...4
+  x = 1
+end
+return "k=#{k}"
+$$;
+SELECT fr_a20_rb_interp() AS rb_expect_k3;
+CREATE FUNCTION fr_a20_py_nested() RETURNS int LANGUAGE plxpython3 AS $$
+t = 0
+for i in range(3):
+    for i in range(2):
+        t = t + 1
+return i * 10 + t
+$$;
+SELECT fr_a20_py_nested() AS py_expect_16;
+CREATE FUNCTION fr_a20_rb_nested() RETURNS int LANGUAGE plxruby AS $$
+t = 0
+for i in 0..2
+  for i in 0..1
+    t = t + 1
+  end
+end
+return i * 10 + t
+$$;
+SELECT fr_a20_rb_nested() AS rb_expect_16;
