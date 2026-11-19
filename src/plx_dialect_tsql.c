@@ -35,7 +35,8 @@ PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
 /*   - IF cond stmt|BEGIN..END [ELSE ...]  -> IF cond THEN ... END IF;       */
 /*   - WHILE cond stmt|BEGIN..END          -> WHILE cond LOOP ... END LOOP;  */
 /*   - BEGIN TRY..END TRY BEGIN CATCH..END CATCH -> BEGIN..EXCEPTION..END    */
-/*   - PRINT e -> RAISE NOTICE; RAISERROR/THROW -> RAISE EXCEPTION;          */
+/*   - PRINT e -> RAISE NOTICE; THROW -> RAISE EXCEPTION; RAISERROR ->       */
+/*     RAISE NOTICE (severity 10 or lower) or RAISE EXCEPTION;               */
 /*   - a library of type names (INT, NVARCHAR(n), DATETIME, ...) and         */
 /*     functions (ISNULL, LEN, GETDATE, IIF, CONVERT, ...).                  */
 /* Populates cx->locals + cx->out; the shared assemble path wraps it.       */
@@ -44,7 +45,8 @@ PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
 typedef enum
 {
 	TQ_EOF, TQ_WORD, TQ_VAR, TQ_GVAR, TQ_NUM, TQ_STR, TQ_OP,
-	TQ_LP, TQ_RP, TQ_COMMA, TQ_SEMI, TQ_DOT
+	TQ_LP, TQ_RP, TQ_COMMA, TQ_SEMI, TQ_DOT,
+	TQ_QIDENT					/* [delimited] or "quoted" identifier */
 } TqKind;
 
 typedef struct
@@ -53,6 +55,7 @@ typedef struct
 	const char *s;
 	int			len;
 	int			line;
+	char		q;				/* TQ_QIDENT: opening delimiter, '[' or '"' */
 } TqTok;
 
 typedef struct
@@ -60,6 +63,10 @@ typedef struct
 	Ctx		   *cx;
 	TqTok	   *t;
 	int			nt, pos;
+	int			nsel;			/* hidden SELECT-assignment loop records */
+	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
+	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
+	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
 } Tq;
 
 static void tq_stmt(Tq *tq, int ind);
@@ -117,13 +124,15 @@ tq_lex(Tq *tq, const char *body)
 
 #define TQPUSH(k, st, ln) do { \
 		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(TqTok) * cap); } \
-		t[n].kind = (k); t[n].s = (st); t[n].len = (ln); t[n].line = line; n++; \
+		t[n].kind = (k); t[n].s = (st); t[n].len = (ln); t[n].line = line; \
+		t[n].q = 0; n++; \
 	} while (0)
 #define TQALPHA(c) (((c) >= 'A' && (c) <= 'Z') || ((c) >= 'a' && (c) <= 'z') || (c) == '_')
 #define TQDIGIT(c) ((c) >= '0' && (c) <= '9')
 
 	while (p < end)
 	{
+		CHECK_FOR_INTERRUPTS();
 		if (*p == '\n')
 		{
 			line++;
@@ -192,26 +201,36 @@ tq_lex(Tq *tq, const char *body)
 				continue;
 			}
 		}
-		if (*p == '[')									/* [delimited identifier] */
+		if (*p == '[' || *p == '"')						/* [delimited] / "quoted" identifier */
 		{
+			/* the inner text keeps its doubled closing delimiter (]] or "");
+			 * tq_emit_qident undoes it when it writes the PostgreSQL form */
+			char		close = (*p == '[') ? ']' : '"';
 			const char *st = p + 1,
 					   *q = st;
+			bool		closed = false;
 
-			while (q < end && *q != ']')
+			while (q < end)
+			{
+				if (*q == close)
+				{
+					if (q + 1 < end && q[1] == close)
+					{
+						q += 2;
+						continue;
+					}
+					closed = true;
+					break;
+				}
+				if (*q == '\n')
+					line++;
 				q++;
-			TQPUSH(TQ_WORD, st, (int) (q - st));
-			p = (q < end) ? q + 1 : q;
-			continue;
-		}
-		if (*p == '"')									/* "quoted identifier" */
-		{
-			const char *st = p + 1,
-					   *q = st;
-
-			while (q < end && *q != '"')
-				q++;
-			TQPUSH(TQ_WORD, st, (int) (q - st));
-			p = (q < end) ? q + 1 : q;
+			}
+			if (!closed)
+				plx_err(tq->cx, line, "unterminated delimited identifier");
+			TQPUSH(TQ_QIDENT, st, (int) (q - st));
+			t[n - 1].q = *p;
+			p = q + 1;
 			continue;
 		}
 		if (*p == 'N' && p + 1 < end && p[1] == '\'')	/* N'unicode' -> drop N */
@@ -358,6 +377,36 @@ tq_sp(StringInfo out)
 		appendStringInfoChar(out, ' ');
 }
 
+/*
+ * emit a delimited identifier as a PostgreSQL quoted identifier. T-SQL
+ * [a]]b] is the name a]b and "a""b" is a"b; PostgreSQL doubles an embedded
+ * '"', so the name keeps its spaces and reserved words. A [bracketed] name is
+ * folded to lower case first: T-SQL names are case insensitive under the
+ * default collation, so [Orders] must reach a PostgreSQL table created as
+ * orders. A "quoted" name keeps its case, as in PostgreSQL.
+ */
+static void
+tq_emit_qident(TqTok *tk, StringInfo out)
+{
+	char		close = (tk->q == '[') ? ']' : '"';
+	int			i;
+
+	appendStringInfoChar(out, '"');
+	for (i = 0; i < tk->len; i++)
+	{
+		char		c = tk->s[i];
+
+		if (c == close && i + 1 < tk->len && tk->s[i + 1] == close)
+			i++;				/* doubled closing delimiter: one character */
+		if (tk->q == '[' && c >= 'A' && c <= 'Z')
+			c = c - 'A' + 'a';
+		if (c == '"')
+			appendStringInfoChar(out, '"');
+		appendStringInfoChar(out, c);
+	}
+	appendStringInfoChar(out, '"');
+}
+
 /* emit a T-SQL string literal (already 'quoted', ''-escaped) as SQL text */
 static void
 tq_emit_str(TqTok *tk, StringInfo out)
@@ -409,13 +458,15 @@ tq_read_type(Tq *tq, StringInfo dest)
 	bool		is_char = false,
 				is_bin = false;
 
-	if (w->kind != TQ_WORD)
+	if (w->kind != TQ_WORD && w->kind != TQ_QIDENT)
 		tq_err(tq, "expected a type name");
 	base = tq_base_type(w->s, w->len);
 	is_char = (base && (strcmp(base, "varchar") == 0 || strcmp(base, "char") == 0));
 	is_bin = (base && strcmp(base, "bytea") == 0);
 	if (base)
 		appendStringInfoString(dest, base);
+	else if (w->kind == TQ_QIDENT)
+		tq_emit_qident(w, dest);
 	else
 	{
 		/* unknown -> pass the identifier through (user-defined or PG type) */
@@ -476,14 +527,19 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 	TqTok	   *w;
 	const char *base;
 
-	if (a >= b || tq->t[a].kind != TQ_WORD)
+	if (a >= b || (tq->t[a].kind != TQ_WORD && tq->t[a].kind != TQ_QIDENT))
 	{
 		appendStringInfoString(dest, "text");
 		return;
 	}
 	w = &tq->t[a];
 	base = tq_base_type(w->s, w->len);
-	appendStringInfoString(dest, base ? base : tq_ident(w->s, w->len));
+	if (base)
+		appendStringInfoString(dest, base);
+	else if (w->kind == TQ_QIDENT)
+		tq_emit_qident(w, dest);
+	else
+		appendStringInfoString(dest, tq_ident(w->s, w->len));
 	if (base && (pg_strncasecmp(w->s, "char", 4) == 0 ||
 				 pg_strncasecmp(w->s, "varc", 4) == 0 ||
 				 pg_strncasecmp(w->s, "nvar", 4) == 0 ||
@@ -507,21 +563,54 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 	}
 }
 
+/*
+ * Pair every '(' with its ')' once, after lexing. A forward scan from each
+ * '(' (the old tq_match_lp) made unbalanced input such as f(f(f(... cost
+ * O(n^2): every call name rescanned to the end of the range. The same pass
+ * records the first two top-level commas inside each '(', so CONVERT, IIF and
+ * CHARINDEX need no scan of their argument list either: nested calls such as
+ * IIF(IIF(IIF(...))) with no comma failed one by one and rescanned each range.
+ */
+static void
+tq_pair_parens(Tq *tq)
+{
+	int		   *stack = palloc(sizeof(int) * (tq->nt + 1));
+	int			sp = 0,
+				i;
+
+	tq->match = palloc(sizeof(int) * (tq->nt + 1));
+	tq->comma1 = palloc(sizeof(int) * (tq->nt + 1));
+	tq->comma2 = palloc(sizeof(int) * (tq->nt + 1));
+	for (i = 0; i < tq->nt; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		tq->match[i] = -1;
+		tq->comma1[i] = -1;
+		tq->comma2[i] = -1;
+		if (tq->t[i].kind == TQ_LP)
+			stack[sp++] = i;
+		else if (tq->t[i].kind == TQ_RP && sp > 0)
+			tq->match[stack[--sp]] = i;
+		else if (tq->t[i].kind == TQ_COMMA && sp > 0)
+		{
+			int			top = stack[sp - 1];
+
+			if (tq->comma1[top] < 0)
+				tq->comma1[top] = i;
+			else if (tq->comma2[top] < 0)
+				tq->comma2[top] = i;
+		}
+	}
+	pfree(stack);
+}
+
 /* index of the ')' matching the '(' at lp, within [.,limit), or -1 */
 static int
 tq_match_lp(Tq *tq, int lp, int limit)
 {
-	int			depth = 0,
-				i;
+	int			close = tq->match[lp];
 
-	for (i = lp; i < limit; i++)
-	{
-		if (tq->t[i].kind == TQ_LP)
-			depth++;
-		else if (tq->t[i].kind == TQ_RP && --depth == 0)
-			return i;
-	}
-	return -1;
+	return (close >= 0 && close < limit) ? close : -1;
 }
 
 /* emit a function-call rename for a WORD at index i (followed by '('), or
@@ -543,26 +632,10 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 	if (tq_ci(tk, "CONVERT"))
 	{
 		int			c1 = lp + 1,
-					depth = 0,
-					comma = -1,
-					comma2 = -1,
-					j;
+					comma = tq->comma1[lp],
+					comma2 = tq->comma2[lp];
 		StringInfoData ty;
 
-		for (j = lp + 1; j < close; j++)
-		{
-			if (tq->t[j].kind == TQ_LP)
-				depth++;
-			else if (tq->t[j].kind == TQ_RP)
-				depth--;
-			else if (tq->t[j].kind == TQ_COMMA && depth == 0)
-			{
-				if (comma < 0)
-					comma = j;
-				else if (comma2 < 0)
-					comma2 = j;
-			}
-		}
 		if (comma < 0)
 			return false;
 		initStringInfo(&ty);
@@ -578,25 +651,9 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 	/* IIF(cond, a, b) -> CASE WHEN cond THEN a ELSE b END */
 	if (tq_ci(tk, "IIF"))
 	{
-		int			depth = 0,
-					c1 = -1,
-					c2 = -1,
-					j;
+		int			c1 = tq->comma1[lp],
+					c2 = tq->comma2[lp];
 
-		for (j = lp + 1; j < close; j++)
-		{
-			if (tq->t[j].kind == TQ_LP)
-				depth++;
-			else if (tq->t[j].kind == TQ_RP)
-				depth--;
-			else if (tq->t[j].kind == TQ_COMMA && depth == 0)
-			{
-				if (c1 < 0)
-					c1 = j;
-				else if (c2 < 0)
-					c2 = j;
-			}
-		}
 		if (c1 < 0 || c2 < 0)
 			return false;
 		tq_sp(out);
@@ -607,6 +664,17 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 		appendStringInfoString(out, " ELSE");
 		tq_emit_range(tq, c2 + 1, close, out);
 		appendStringInfoString(out, " END");
+		*ni = close + 1;
+		return true;
+	}
+
+	/* LEN(x) -> length(rtrim(x)): T-SQL LEN ignores trailing spaces */
+	if (tq_ci(tk, "LEN"))
+	{
+		tq_sp(out);
+		appendStringInfoString(out, "length(rtrim(");
+		tq_emit_range(tq, lp + 1, close, out);
+		appendStringInfoString(out, "))");
 		*ni = close + 1;
 		return true;
 	}
@@ -627,7 +695,7 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 			const char *tsql;
 			const char *pg;
 		}			r[] = {
-			{"isnull", "coalesce"}, {"len", "length"},
+			{"isnull", "coalesce"},
 			{"datalength", "octet_length"}, {"getdate", "now"},
 			{"sysdatetime", "now"}, {"getutcdate", "now"},
 			{"newid", "gen_random_uuid"}, {"ceiling", "ceil"},
@@ -641,19 +709,8 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 				/* CHARINDEX(sub, str) -> strpos(str, sub): swap the two args */
 				if (pg_strcasecmp(r[k].tsql, "charindex") == 0)
 				{
-					int			depth = 0,
-								comma = -1,
-								j;
+					int			comma = tq->comma1[lp];
 
-					for (j = lp + 1; j < close; j++)
-					{
-						if (tq->t[j].kind == TQ_LP)
-							depth++;
-						else if (tq->t[j].kind == TQ_RP)
-							depth--;
-						else if (tq->t[j].kind == TQ_COMMA && depth == 0 && comma < 0)
-							comma = j;
-					}
 					if (comma < 0)
 						return false;
 					tq_sp(out);
@@ -687,6 +744,7 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_VAR)
 		{
 			tq_sp(out);
@@ -726,6 +784,13 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 			}
 			tq_sp(out);
 			appendBinaryStringInfo(out, tk->s, tk->len);
+			i++;
+			continue;
+		}
+		if (tk->kind == TQ_QIDENT)
+		{
+			tq_sp(out);
+			tq_emit_qident(tk, out);
 			i++;
 			continue;
 		}
@@ -773,6 +838,8 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 			tq_sp(out);
 			if (tk->len == 2 && tk->s[0] == '!' && tk->s[1] == '=')
 				appendStringInfoString(out, "<>");
+			else if (tk->len == 1 && tk->s[0] == '^')
+				appendStringInfoChar(out, '#');	/* T-SQL XOR; PG ^ is power */
 			else
 				appendBinaryStringInfo(out, tk->s, tk->len);
 			i++;
@@ -797,17 +864,43 @@ tq_emit_range(Tq *tq, int a, int b, StringInfo out)
 	tq->cx->depth--;
 }
 
+/*
+ * CASE ... END nesting for the expression scanners below. T-SQL has CASE only
+ * as an expression, so every CASE opens one and its END closes it. Returns
+ * true when tk opens, closes or sits inside a CASE, so the caller must not
+ * take an END, ELSE, BEGIN or statement keyword there as the end of the
+ * expression. ';' and EOF still end it.
+ */
+static bool
+tq_in_case(TqTok *tk, int *cdepth)
+{
+	if (tq_ci(tk, "CASE"))
+	{
+		(*cdepth)++;
+		return true;
+	}
+	if (*cdepth > 0)
+	{
+		if (tq_ci(tk, "END"))
+			(*cdepth)--;
+		return tk->kind != TQ_SEMI && tk->kind != TQ_EOF;
+	}
+	return false;
+}
+
 /* end of an expression/raw statement: first depth-0 ; EOF END or ELSE */
 static int
 tq_value_end(Tq *tq, int from)
 {
 	int			i = from,
-				depth = 0;
+				depth = 0,
+				cdepth = 0;
 
 	while (i < tq->nt)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_LP)
 			depth++;
 		else if (tk->kind == TQ_RP)
@@ -815,7 +908,7 @@ tq_value_end(Tq *tq, int from)
 			if (depth > 0)
 				depth--;
 		}
-		else if (depth == 0)
+		else if (depth == 0 && !tq_in_case(tk, &cdepth))
 		{
 			if (tk->kind == TQ_SEMI || tk->kind == TQ_EOF ||
 				tq_ci(tk, "END") || tq_ci(tk, "ELSE"))
@@ -831,12 +924,14 @@ static int
 tq_cond_end(Tq *tq, int from)
 {
 	int			i = from,
-				depth = 0;
+				depth = 0,
+				cdepth = 0;
 
 	while (i < tq->nt)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_LP)
 			depth++;
 		else if (tk->kind == TQ_RP)
@@ -844,7 +939,7 @@ tq_cond_end(Tq *tq, int from)
 			if (depth > 0)
 				depth--;
 		}
-		else if (depth == 0)
+		else if (depth == 0 && !tq_in_case(tk, &cdepth))
 		{
 			if (tk->kind == TQ_SEMI || tk->kind == TQ_EOF ||
 				tq_ci(tk, "END") || tq_ci(tk, "ELSE") ||
@@ -896,7 +991,8 @@ tq_declare(Tq *tq, int ind)
 			e1 = tq->pos;
 			/* value runs to a top-level comma or the statement terminator */
 			{
-				int			depth = 0;
+				int			depth = 0,
+							cdepth = 0;
 
 				while (e1 < tq->nt)
 				{
@@ -906,7 +1002,7 @@ tq_declare(Tq *tq, int ind)
 						depth++;
 					else if (x->kind == TQ_RP && depth > 0)
 						depth--;
-					else if (depth == 0 &&
+					else if (depth == 0 && !tq_in_case(x, &cdepth) &&
 							 (x->kind == TQ_COMMA || x->kind == TQ_SEMI ||
 							  x->kind == TQ_EOF || tq_ci(x, "END")))
 						break;
@@ -1019,6 +1115,13 @@ tq_set(Tq *tq, int ind)
 	tq_eat_semi(tq);
 }
 
+/* qsort/bsearch comparator for an array of C strings */
+static int
+tq_cmp_name(const void *a, const void *b)
+{
+	return strcmp(*(char *const *) a, *(char *const *) b);
+}
+
 /* SELECT @x = e [, ...] [FROM ...] | SELECT ... (query) */
 static void
 tq_select(Tq *tq, int ind)
@@ -1031,21 +1134,34 @@ tq_select(Tq *tq, int ind)
 		tq->t[tq->pos + 1].kind == TQ_OP && tq->t[tq->pos + 1].len == 1 &&
 		tq->t[tq->pos + 1].s[0] == '=')
 	{
-		char	   *names[64];
-		int			estart[64],
-					eend[64],
+		int			cap = 8,
 					nassign = 0;
+		char	  **names = palloc(sizeof(char *) * cap);
+		int		   *estart = palloc(sizeof(int) * cap),
+				   *eend = palloc(sizeof(int) * cap);
 		int			frompos = -1;
 
 		for (;;)
 		{
 			TqTok	   *v = tq_cur(tq);
 			int			depth = 0,
+						cdepth = 0,
 						e0,
 						e1;
 
-			if (v->kind != TQ_VAR || nassign >= 64)
-				break;
+			/* each list entry must be "@v =": a VAR is never the EOF token, so
+			 * the token after it exists */
+			if (v->kind != TQ_VAR ||
+				!(tq->t[tq->pos + 1].kind == TQ_OP && tq->t[tq->pos + 1].len == 1 &&
+				  tq->t[tq->pos + 1].s[0] == '='))
+				tq_err(tq, "expected @variable = expression in the SELECT assignment list");
+			if (nassign >= cap)
+			{
+				cap *= 2;
+				names = repalloc(names, sizeof(char *) * cap);
+				estart = repalloc(estart, sizeof(int) * cap);
+				eend = repalloc(eend, sizeof(int) * cap);
+			}
 			names[nassign] = tq_ident(v->s, v->len);
 			tq->pos += 2;				/* @v = */
 			e0 = tq->pos;
@@ -1058,7 +1174,7 @@ tq_select(Tq *tq, int ind)
 					depth++;
 				else if (x->kind == TQ_RP && depth > 0)
 					depth--;
-				else if (depth == 0)
+				else if (depth == 0 && !tq_in_case(x, &cdepth))
 				{
 					if (x->kind == TQ_COMMA || x->kind == TQ_SEMI ||
 						x->kind == TQ_EOF || tq_ci(x, "END") || tq_ci(x, "ELSE"))
@@ -1088,22 +1204,66 @@ tq_select(Tq *tq, int ind)
 		}
 		if (frompos >= 0)
 		{
+			/*
+			 * T-SQL runs the assignments once per row: the variables end up
+			 * holding the last row, and keep their values when no row
+			 * matches. A plpgsql FOR loop over the query that assigns the
+			 * variables in its body does exactly that, where SELECT INTO
+			 * would take the first row and set NULL on no row. An expression that reads
+			 * one of the assigned variables (the accumulate idiom
+			 * SELECT @t = @t + v) cannot be lowered this way, because the
+			 * query sees the values from before the loop; reject it rather
+			 * than compute a different result.
+			 */
 			int			k,
+						j,
 						rend = tq_value_end(tq, frompos);
+			char	   *rec;
+			char	  **sorted = palloc(sizeof(char *) * nassign);
 
+			/* sorted copy of the targets, so each @ref is one bsearch */
+			memcpy(sorted, names, sizeof(char *) * nassign);
+			qsort(sorted, nassign, sizeof(char *), tq_cmp_name);
+			for (k = 0; k < nassign; k++)
+				for (j = estart[k]; j < eend[k]; j++)
+				{
+					char	   *ref;
+
+					if (tq->t[j].kind != TQ_VAR)
+						continue;
+					ref = tq_ident(tq->t[j].s, tq->t[j].len);
+					if (bsearch(&ref, sorted, nassign, sizeof(char *), tq_cmp_name))
+						plx_err(tq->cx, tq->t[j].line,
+								"SELECT @%s = ... FROM reads @%s in its own assignment list; use an aggregate such as SUM() or string_agg() instead",
+								names[k], ref);
+					pfree(ref);
+				}
+			pfree(sorted);
+
+			/* loop over a hidden record (the quoted mixed-case name cannot
+			 * clash with a lower-cased @variable) and assign in the body: a
+			 * plpgsql FOR loop sets its own target to NULL when no row comes
+			 * back, so the T-SQL variables must not be the loop target */
+			rec = psprintf("\"TqSel%d\"", ++tq->nsel);
+			plx_local_add(tq->cx, rec, (int) strlen(rec))->is_record = true;
 			plx_indent(&tq->cx->out, ind);
-			appendStringInfoString(&tq->cx->out, "SELECT");
+			appendStringInfo(&tq->cx->out, "FOR %s IN SELECT", rec);
 			for (k = 0; k < nassign; k++)
 			{
 				if (k)
 					appendStringInfoChar(&tq->cx->out, ',');
 				tq_emit_range(tq, estart[k], eend[k], &tq->cx->out);
+				appendStringInfo(&tq->cx->out, " AS c%d", k + 1);
 			}
-			appendStringInfoString(&tq->cx->out, " INTO");
-			for (k = 0; k < nassign; k++)
-				appendStringInfo(&tq->cx->out, "%s %s", k ? "," : "", names[k]);
 			tq_emit_range(tq, frompos, rend, &tq->cx->out);
-			appendStringInfoString(&tq->cx->out, ";\n");
+			appendStringInfoString(&tq->cx->out, " LOOP\n");
+			for (k = 0; k < nassign; k++)
+			{
+				plx_indent(&tq->cx->out, ind + 1);
+				appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
+			}
+			plx_indent(&tq->cx->out, ind);
+			appendStringInfoString(&tq->cx->out, "END LOOP;\n");
 			tq->pos = rend;
 		}
 		else
@@ -1148,15 +1308,23 @@ static void
 tq_if(Tq *tq, int ind)
 {
 	int			c0,
-				c1;
+				c1,
+				k;
 
 	tq->pos++;								/* IF */
 	c0 = tq->pos;
 	c1 = tq_cond_end(tq, c0);
+	/* plpgsql ends an IF condition at its first THEN, so a condition that
+	 * holds a CASE ... THEN goes in parentheses. IIF( becomes CASE ... THEN
+	 * when it is emitted, so it counts too. */
+	for (k = c0; k < c1; k++)
+		if (tq_ci(&tq->t[k], "CASE") ||
+			(tq_ci(&tq->t[k], "IIF") && k + 1 < c1 && tq->t[k + 1].kind == TQ_LP))
+			break;
 	plx_indent(&tq->cx->out, ind);
-	appendStringInfoString(&tq->cx->out, "IF");
+	appendStringInfoString(&tq->cx->out, k < c1 ? "IF (" : "IF");
 	tq_emit_range(tq, c0, c1, &tq->cx->out);
-	appendStringInfoString(&tq->cx->out, " THEN\n");
+	appendStringInfoString(&tq->cx->out, k < c1 ? ") THEN\n" : " THEN\n");
 	tq->pos = c1;
 	tq_body(tq, ind + 1);
 	tq_eat_semi(tq);
@@ -1241,30 +1409,92 @@ tq_return(Tq *tq, int ind)
 	tq_eat_semi(tq);
 }
 
-/* the message argument of RAISERROR(msg, sev, state, ...) or THROW n, msg, s */
+/* the message argument of RAISERROR(msg, sev, state, ...) or THROW n, msg, s,
+ * raised at level ("NOTICE", "LOG" or "EXCEPTION") */
 static void
-tq_raise_msg(Tq *tq, int msg0, int msg1, int ind)
+tq_raise_msg(Tq *tq, int msg0, int msg1, int ind, const char *level)
 {
 	plx_indent(&tq->cx->out, ind);
 	if (msg1 <= msg0)
 	{
-		appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION 'error';\n");
+		appendStringInfo(&tq->cx->out, "RAISE %s 'error';\n", level);
 		return;
 	}
-	appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION '%',");
+	appendStringInfo(&tq->cx->out, "RAISE %s '%%',", level);
 	tq_emit_range(tq, msg0, msg1, &tq->cx->out);
 	appendStringInfoString(&tq->cx->out, ";\n");
 }
 
-/* RAISERROR ( msg , severity , state [, args] ) */
+/* how a RAISERROR severity argument [a,b) decides the RAISE level */
+typedef enum
+{
+	TQ_SEV_NOTICE,				/* literal 10 or lower (but not -1) */
+	TQ_SEV_EXCEPTION,			/* literal 11 or higher, -1, ERROR_SEVERITY() */
+	TQ_SEV_RUNTIME				/* any other expression: test it at run time */
+} TqSev;
+
+static TqSev
+tq_severity(Tq *tq, int a, int b)
+{
+	bool		neg = false;
+	long		v = 0;
+	int			k;
+
+	if (a >= b)
+		return TQ_SEV_EXCEPTION;		/* no severity (malformed): as before */
+
+	/* ERROR_SEVERITY(): only an error reaches a CATCH block, so the caught
+	 * severity is always 11 or higher (and PostgreSQL has no such function) */
+	if (b - a == 3 && tq_ci(&tq->t[a], "ERROR_SEVERITY") &&
+		tq->t[a + 1].kind == TQ_LP && tq->t[a + 2].kind == TQ_RP)
+		return TQ_SEV_EXCEPTION;
+
+	/* an integer literal with an optional unary minus */
+	if (tq->t[a].kind == TQ_OP && tq->t[a].len == 1 && tq->t[a].s[0] == '-')
+	{
+		neg = true;
+		a++;
+	}
+	if (b - a != 1 || tq->t[a].kind != TQ_NUM)
+		return TQ_SEV_RUNTIME;
+	for (k = 0; k < tq->t[a].len; k++)
+	{
+		char		c = tq->t[a].s[k];
+
+		if (c < '0' || c > '9')
+			return TQ_SEV_RUNTIME;
+		if (v < 1000000)		/* cap: only the comparison with 10 matters */
+			v = v * 10 + (c - '0');
+	}
+	if (neg)
+		v = -v;
+	/* -1 means the severity stored for the message, which plx cannot look
+	 * up, so it fails safe; any other negative counts as 0 */
+	if (v == -1)
+		return TQ_SEV_EXCEPTION;
+	return v <= 10 ? TQ_SEV_NOTICE : TQ_SEV_EXCEPTION;
+}
+
+/*
+ * RAISERROR ( msg , severity , state [, args] ) [WITH option [, ...]]
+ *
+ * As in SQL Server, a severity of 10 or lower is an informational message
+ * (RAISE NOTICE, which a CATCH block does not catch) and 11 or higher raises
+ * an error. WITH NOWAIT and WITH SETERROR need no translation; WITH LOG adds
+ * RAISE LOG.
+ */
 static void
 tq_raiserror(Tq *tq, int ind)
 {
 	int			lp,
 				close,
 				depth = 0,
-				comma = -1,
+				c1 = -1,
+				c2 = -1,
+				msg1,
 				j;
+	bool		want_log = false;
+	TqSev		sev;
 
 	tq->pos++;								/* RAISERROR */
 	lp = tq->pos;
@@ -1281,12 +1511,67 @@ tq_raiserror(Tq *tq, int ind)
 			depth--;
 		else if (tq->t[j].kind == TQ_COMMA && depth == 0)
 		{
-			comma = j;
-			break;
+			if (c1 < 0)
+				c1 = j;
+			else
+			{
+				c2 = j;
+				break;
+			}
 		}
 	}
-	tq_raise_msg(tq, lp + 1, comma > 0 ? comma : close, ind);
+	msg1 = c1 > 0 ? c1 : close;
+	sev = c1 > 0 ? tq_severity(tq, c1 + 1, c2 > 0 ? c2 : close) : TQ_SEV_EXCEPTION;
 	tq->pos = close + 1;
+
+	/* WITH NOWAIT | LOG | SETERROR [, ...]: never left as a stray statement */
+	if (tq_ci(tq_cur(tq), "WITH"))
+	{
+		tq->pos++;
+		for (;;)
+		{
+			TqTok	   *o = tq_cur(tq);
+
+			if (o->kind != TQ_WORD)
+				tq_err(tq, "expected option after WITH in RAISERROR");
+			if (tq_ci(o, "LOG"))
+				want_log = true;
+			else if (!tq_ci(o, "NOWAIT") && !tq_ci(o, "SETERROR"))
+				plx_err(tq->cx, o->line, "unknown RAISERROR option: %.*s",
+						o->len, o->s);
+			tq->pos++;
+			if (tq_cur(tq)->kind != TQ_COMMA)
+				break;
+			tq->pos++;
+		}
+	}
+
+	/* WITH LOG: the message expression is emitted (and evaluated) a second
+	 * time; harmless for the literals and variables RAISERROR takes */
+	if (want_log)
+		tq_raise_msg(tq, lp + 1, msg1, ind, "LOG");
+	if (sev == TQ_SEV_RUNTIME)
+	{
+		int			s0 = c1 + 1,
+					s1 = c2 > 0 ? c2 : close;
+
+		/* NULL fails both tests and raises, like -1 */
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "IF (");
+		tq_emit_range(tq, s0, s1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ") <= 10 AND (");
+		tq_emit_range(tq, s0, s1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ") <> -1 THEN\n");
+		tq_raise_msg(tq, lp + 1, msg1, ind + 1, "NOTICE");
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "ELSE\n");
+		tq_raise_msg(tq, lp + 1, msg1, ind + 1, "EXCEPTION");
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "END IF;\n");
+	}
+	else
+		tq_raise_msg(tq, lp + 1, msg1, ind,
+					 sev == TQ_SEV_NOTICE ? "NOTICE" : "EXCEPTION");
 	tq_eat_semi(tq);
 }
 
@@ -1327,9 +1612,9 @@ tq_throw(Tq *tq, int ind)
 			}
 		}
 		if (c1 >= 0 && c2 >= 0)
-			tq_raise_msg(tq, c1 + 1, c2, ind);
+			tq_raise_msg(tq, c1 + 1, c2, ind, "EXCEPTION");
 		else
-			tq_raise_msg(tq, e0, e1, ind);
+			tq_raise_msg(tq, e0, e1, ind, "EXCEPTION");
 	}
 	tq->pos = e1;
 	tq_eat_semi(tq);
@@ -1511,6 +1796,7 @@ plx_tsql_parse_body(Ctx *cx)
 	memset(&tq, 0, sizeof(tq));
 	tq.cx = cx;
 	tq_lex(&tq, cx->body);
+	tq_pair_parens(&tq);
 	tq_eat_semi(&tq);
 
 	/* an outer BEGIN..END wrapper is unwrapped (its locals hoist anyway) */

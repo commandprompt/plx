@@ -53,6 +53,24 @@ type names in `DECLARE` are translated (see below).
 
 ## Transact-SQL to PostgreSQL translations
 
+### Identifiers
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `[Order Details]`, `[user]` | `"order details"`, `"user"` |
+| `"Name"` | `"Name"` |
+| `[a]]b]`, `"a""b"` | `"a]b"`, `"a""b"` |
+
+A delimited identifier keeps its delimiters, so it can hold a space or a
+reserved word.
+
+- A `[bracketed]` name is folded to lower case, then quoted. So `[Orders]`
+  matches a table created as `orders` or `Orders` without quotes, as in SQL
+  Server under its default case-insensitive collation.
+- A `"quoted"` name keeps its case, as in PostgreSQL. Use it to reach an object
+  created with a mixed-case quoted name: `"Name"` matches a column created as
+  `"Name"`, not one created as `name`.
+
 ### Variables and assignment
 
 | T-SQL | plpgsql |
@@ -64,7 +82,14 @@ type names in `DECLARE` are translated (see below).
 | `SET @x += e` | `x := x + (e);` (also `-=`, `*=`, `/=`, `%=`) |
 | `SELECT @x = e` (no `FROM`) | `x := e;` |
 | `SELECT @x = a, @y = b` | `x := a; y := b;` |
-| `SELECT @x = col FROM t ...` | `SELECT col INTO x FROM t ...;` |
+| `SELECT @x = col FROM t ...` | `FOR r IN SELECT col AS c1 FROM t ... LOOP x := r.c1; END LOOP;` |
+
+`SELECT @x = col FROM t ...` assigns once per row, as in SQL Server. After the
+statement, `@x` holds the value from the last row. When no row matches, `@x`
+keeps the value it had before. An expression in the list that reads one of the
+variables the same `SELECT` assigns, such as `SELECT @t = @t + v FROM t`, is
+rejected when you create the function. Use an aggregate instead, for example
+`SELECT @t = SUM(v) FROM t` or `SELECT @s = string_agg(name, ',') FROM t`.
 
 ### Control flow
 
@@ -87,11 +112,27 @@ keyword or `BEGIN`); there is no `THEN` keyword in T-SQL.
 | T-SQL | plpgsql |
 | --- | --- |
 | `PRINT e` | `RAISE NOTICE '%', e;` |
-| `RAISERROR('msg', sev, state)` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 10 or lower | `RAISE NOTICE '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 11 or higher, `-1`, or `ERROR_SEVERITY()` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', @sev, state)` | `IF sev <= 10 AND sev <> -1 THEN RAISE NOTICE ... ELSE RAISE EXCEPTION ... END IF;` |
+| `RAISERROR(...) WITH LOG` | adds `RAISE LOG '%', 'msg';` before the message |
 | `THROW n, 'msg', s` | `RAISE EXCEPTION '%', 'msg';` |
 | `THROW;` (bare, in CATCH) | `RAISE;` (re-raise) |
 | `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
 | `ERROR_MESSAGE()` | `SQLERRM` |
+
+RAISERROR follows SQL Server's severity rule. A severity of 10 or lower is an
+informational message: the function prints it as a notice and continues, and a
+CATCH block does not catch it. A severity of 11 or higher raises an error. Two
+values always raise an error: -1, which in SQL Server means the severity stored
+for the message (plx cannot look that up), and ERROR_SEVERITY(), because only an
+error reaches a CATCH block. Any other negative severity counts as 0. When the
+severity is a variable, plx checks it at run time, and a NULL severity raises an
+error. After the closing parenthesis you can write WITH followed by NOWAIT,
+SETERROR or LOG, separated by commas. NOWAIT needs no translation because
+PostgreSQL sends every notice to the client at once. SETERROR has no effect
+because plxtsql does not support @@ERROR. LOG also writes the message to the
+server log. Any other option is an error when you create the function.
 
 `RAISERROR`'s format arguments (its `%d`/`%s` printf-style substitutions) are not
 applied; the message argument is emitted as-is.
@@ -124,7 +165,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `ISNULL(a, b)` | `coalesce(a, b)` |
 | `IIF(c, a, b)` | `CASE WHEN c THEN a ELSE b END` |
 | `CONVERT(type, e)` | `CAST(e AS type)` (the style argument is ignored) |
-| `LEN(x)` | `length(x)` |
+| `LEN(x)` | `length(rtrim(x))` (trailing spaces are not counted, as in SQL Server) |
 | `DATALENGTH(x)` | `octet_length(x)` |
 | `CHARINDEX(sub, str)` | `strpos(str, sub)` (arguments swapped) |
 | `GETDATE()`, `SYSDATETIME()` | `now()` |
@@ -134,6 +175,23 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 `CAST(e AS type)` and most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`,
 `LOWER`, `ABS`, `ROUND`, ...) are already valid in PostgreSQL and pass through.
+
+### Operators
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `a ^ b` (bitwise exclusive OR) | `a # b` |
+| `a != b` | `a <> b` |
+
+In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
+`^` to `#`. Use `POWER(a, b)` for exponentiation.
+
+The bitwise operators `^`, `&` and `|` bind differently. T-SQL gives them the
+same precedence as `+` and `-` and evaluates left to right. PostgreSQL binds
+`#`, `&` and `|` more loosely than `+` and `-`. plx does not add parentheses.
+So `1 ^ 2 + 3` gives 6 in SQL Server, but 4 in plx, which computes
+`1 # (2 + 3)`. Put parentheses around a bitwise operation that is followed by
+`+` or `-`: write `(1 ^ 2) + 3`.
 
 ## Dynamic SQL
 
@@ -202,6 +260,11 @@ session option.
   procedure; plxgo does not.
 - Calling a stored procedure by name (`EXEC procname`); only `EXEC('<sql>')`
   dynamic SQL is supported.
+- A `SELECT @v = ... FROM ...` assignment list that reads a variable it assigns,
+  such as the accumulate idiom `SELECT @t = @t + v FROM t`. plx cannot run the
+  expression once per row with the updated value, so it rejects the function
+  rather than return a different result. Use an aggregate such as `SUM(v)` or
+  `string_agg(name, ',')`.
 - String concatenation with `+`. T-SQL overloads `+` for both numeric addition
   and string concatenation; plx cannot tell which is meant without type
   information, so it leaves `+` as `+`. Use `||` or `CONCAT(...)` for string
