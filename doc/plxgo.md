@@ -160,7 +160,8 @@ $$;
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
 
 plx decodes every escape Go defines in an interpreted string or rune literal:
-`\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each), and
+`\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each in a
+string, and a Unicode character in a rune, so `'\xe9'` is `é`, as in Go), and
 `\uHHHH` and `\UHHHHHHHH` (a Unicode character, stored in the database
 encoding). As in Go, any other escape is an error. A literal that would contain
 a NUL character, or whose `\x` or octal bytes do not form valid text in the

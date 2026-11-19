@@ -368,6 +368,11 @@ SELECT fg33_esc() = E'\u00e9|\U0001F600|A|A|\b|\007\f\013|''''''' AS go_true,
        length(fg33_esc()) AS go_len_17;
 CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return '\x41' $$;
 SELECT fg33_rune() AS go_a;
+-- in a rune literal, \x and octal escapes are code points, not bytes
+CREATE FUNCTION fg33_rune2() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("%s|%s|%s", '\xe9', '\351', "\xc3\xa9")
+$$;
+SELECT fg33_rune2() = E'\u00e9|\u00e9|\u00e9' AS go_true;
 CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
 SELECT fg33_oct() AS go_15;
 CREATE FUNCTION fg33_oct2() RETURNS int LANGUAGE plxgo AS $$ return 0o17 + 0O1 $$;

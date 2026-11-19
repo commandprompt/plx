@@ -576,6 +576,16 @@ SELECT fg33_rune() AS go_a;
  A
 (1 row)
 
+-- in a rune literal, \x and octal escapes are code points, not bytes
+CREATE FUNCTION fg33_rune2() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("%s|%s|%s", '\xe9', '\351', "\xc3\xa9")
+$$;
+SELECT fg33_rune2() = E'\u00e9|\u00e9|\u00e9' AS go_true;
+ go_true 
+---------
+ t
+(1 row)
+
 CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
 SELECT fg33_oct() AS go_15;
  go_15 

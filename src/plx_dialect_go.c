@@ -492,10 +492,26 @@ go_str_byte(Go *g, GoTok *tk, StringInfo out, unsigned int c)
 		appendStringInfoChar(out, (char) c);
 }
 
+/* append one Unicode code point to a SQL literal, in the server encoding */
+static void
+go_str_cp(Go *g, GoTok *tk, StringInfo out, pg_wchar cp)
+{
+	unsigned char buf[64];
+
+	if (cp < 0x80)
+	{
+		go_str_byte(g, tk, out, cp);
+		return;
+	}
+	pg_unicode_to_server(cp, buf);
+	appendStringInfoString(out, (char *) buf);
+}
+
 /*
  * emit a Go string/rune literal as a SQL string literal, decoding every Go
- * escape: \a \b \f \n \r \t \v \\ \' \", \xHH and \NNN (one byte each), and
- * \uHHHH and \UHHHHHHHH (a Unicode code point, in the server encoding). Go
+ * escape: \a \b \f \n \r \t \v \\ \' \", \xHH and \NNN (one byte each in a
+ * string, a code point in a rune, as in Go), and \uHHHH and \UHHHHHHHH (a
+ * Unicode code point, in the server encoding). Go
  * rejects any other escape, and so does plx. A decoded quote is doubled, so
  * an escape cannot end the SQL literal.
  */
@@ -542,7 +558,10 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 					case 'x':
 						if (s + 2 >= e || go_hexval(s[1]) < 0 || go_hexval(s[2]) < 0)
 							plx_err(g->cx, tk->line, "\\x in a string literal needs two hexadecimal digits");
-						go_str_byte(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
+						if (q == '\'')
+							go_str_cp(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
+						else
+							go_str_byte(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
 						s += 2;
 						break;
 					case '0': case '1': case '2': case '3':
@@ -556,7 +575,10 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 							v = (s[0] - '0') * 64 + (s[1] - '0') * 8 + (s[2] - '0');
 							if (v > 255)
 								plx_err(g->cx, tk->line, "octal escape value in a string literal is above 255");
-							go_str_byte(g, tk, out, v);
+							if (q == '\'')
+								go_str_cp(g, tk, out, v);
+							else
+								go_str_byte(g, tk, out, v);
 							s += 2;
 						}
 						break;
@@ -566,7 +588,6 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 							int			n = (*s == 'u') ? 4 : 8,
 										k;
 							pg_wchar	cp = 0;
-							unsigned char buf[64];
 
 							if (s + n >= e)
 								plx_err(g->cx, tk->line, "\\u needs four and \\U eight hexadecimal digits");
@@ -578,13 +599,7 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 							}
 							if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
 								plx_err(g->cx, tk->line, "invalid Unicode code point in a string literal");
-							if (cp < 0x80)
-								go_str_byte(g, tk, out, cp);
-							else
-							{
-								pg_unicode_to_server(cp, buf);
-								appendStringInfoString(out, (char *) buf);
-							}
+							go_str_cp(g, tk, out, cp);
 							s += n;
 						}
 						break;
