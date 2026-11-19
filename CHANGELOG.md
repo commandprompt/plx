@@ -63,6 +63,15 @@ PUBLIC has USAGE by default).
   quote consumed half of the escaped `''` pair, so text inside a Go string
   literal could end up as SQL in the generated body. Such directives now fall
   back to the `format()` lowering, which keeps the text literal.
+- **Revoking plpgsql now revokes plx.** A plx function is stored and run as
+  plpgsql, but a role that kept USAGE on a plx language could still create
+  plpgsql functions and run DO blocks after
+  `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC` (for example with
+  `DO LANGUAGE plxplsql`, or a body that already carried the transpiled
+  header). `CREATE FUNCTION` and `DO` in a plx language now also require USAGE
+  on plpgsql, failing with `permission denied for language plpgsql`. As with
+  plpgsql, functions that already exist keep running, and superusers are
+  unaffected.
 
 ### Changed
 
