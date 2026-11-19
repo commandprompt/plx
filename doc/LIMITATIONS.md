@@ -37,6 +37,13 @@ These follow from running as plpgsql and are not specific to any one dialect.
   plpgsql `DECLARE` block, so locals are visible for the whole function. There is
   no per-block (per-`{}`, per-`if`) scope, and a name cannot be redeclared with a
   new type partway through.
+- **Names that differ only by case are one name.** plpgsql ignores case in
+  names, so `total` and `Total` would be the same variable. In plxruby, plxphp,
+  plxjs, plxts, plxpython3 and plxgo, where case matters, `CREATE FUNCTION`
+  rejects a body that spells one name two ways, for example a local `A` beside
+  a local or parameter `a`. Rename one of them. SQL folds an unquoted parameter
+  name to lower case, so a parameter declared as `userId` may be written
+  `userId` in the body, as long as the body always spells it the same way.
 - **SQL semantics, not the source language's.** Decimal literals are exact
   `numeric`, not IEEE 754 floating point. Comparisons use SQL three-valued logic,
   so a comparison involving NULL is unknown rather than false, and `==`/`===`

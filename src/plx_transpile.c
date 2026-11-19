@@ -577,6 +577,62 @@ plx_skip_seps(Ctx *cx)
 		cx->pos++;
 }
 
+/*
+ * plpgsql ignores case in unquoted names, and plx emits names unquoted. In
+ * most dialects case matters: Ruby, JS, TS, PHP, Python and Go treat a and A
+ * as two variables. Merging them into one plpgsql variable silently changes
+ * what the program computes, so a body that spells one name two ways is
+ * rejected instead. COBOL, T-SQL and PL/SQL ignore case themselves, so for
+ * them two spellings are one name, as in plpgsql.
+ */
+static bool
+names_fold_case(Ctx *cx)
+{
+	switch (cx->surf->block_style)
+	{
+		case PLX_BLK_COBOL:
+		case PLX_BLK_TSQL:
+		case PLX_BLK_PLSQL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool
+same_spelling(const char *a, const char *b, int blen)
+{
+	return (int) strlen(a) == blen && strncmp(a, b, blen) == 0;
+}
+
+pg_noreturn static void
+name_clash(Ctx *cx, const char *first, const char *name, int len)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s: identifiers \"%s\" and \"%.*s\" are the same name to plpgsql, which ignores case",
+					cx->surf->lanname, first, len, name),
+			 errhint("Rename one of them.")));
+}
+
+/*
+ * Record the spelling the body uses for parameter i, and reject a second,
+ * different spelling. SQL folds an unquoted parameter name to lower case, so
+ * a body may spell parameter "userid" as userId; it may not spell it two ways.
+ */
+static void
+note_param_spelling(Ctx *cx, int i, const char *name, int len)
+{
+	if (names_fold_case(cx))
+		return;
+	if (!cx->pspell)
+		cx->pspell = palloc0(sizeof(char *) * cx->meta->nargs);
+	if (!cx->pspell[i])
+		cx->pspell[i] = pnstrdup(name, len);
+	else if (!same_spelling(cx->pspell[i], name, len))
+		name_clash(cx, cx->pspell[i], name, len);
+}
+
 /* case-insensitive name compare against a param list */
 bool
 plx_is_param(Ctx *cx, const char *name, int len)
@@ -590,7 +646,10 @@ plx_is_param(Ctx *cx, const char *name, int len)
 		const char *an = cx->meta->argnames ? cx->meta->argnames[i] : NULL;
 
 		if (an && (int) strlen(an) == len && pg_strncasecmp(an, name, len) == 0)
+		{
+			note_param_spelling(cx, i, name, len);
 			return true;
+		}
 	}
 	return false;
 }
@@ -648,8 +707,9 @@ plx_ext_object(const char *name)
 	return psprintf("%s.%s", quote_identifier(nsp), quote_identifier(name));
 }
 
-PlxLocal2 *
-plx_local_find(Ctx *cx, const char *name, int len)
+/* the local plpgsql would read for this name, whatever its spelling */
+static PlxLocal2 *
+local_lookup(Ctx *cx, const char *name, int len)
 {
 	char		key[NAMEDATALEN];
 	PlxLocalEnt *e;
@@ -660,6 +720,21 @@ plx_local_find(Ctx *cx, const char *name, int len)
 	plx_local_key(name, len, key);
 	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
 	return e ? e->l : NULL;
+}
+
+/*
+ * Find a local by name. A local the body spelled differently (a vs A, or two
+ * long names that differ only past NAMEDATALEN - 1 bytes) is an error in a
+ * case-sensitive dialect: see names_fold_case.
+ */
+PlxLocal2 *
+plx_local_find(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l = local_lookup(cx, name, len);
+
+	if (l && !names_fold_case(cx) && !same_spelling(l->name, name, len))
+		name_clash(cx, l->name, name, len);
+	return l;
 }
 
 PlxLocal2 *
@@ -696,6 +771,8 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	e = hash_search(cx->lhash, key, HASH_ENTER, &found);
 	if (!found)
 		e->l = l;				/* keep the first declaration */
+	else if (!names_fold_case(cx) && !same_spelling(e->l->name, name, len))
+		name_clash(cx, e->l->name, name, len);
 	return l;
 }
 
@@ -1069,6 +1146,34 @@ find_ternary_colon(const char *s, int len, int q)
 }
 
 /*
+ * A variable reference [i, j) in expression text s: reject it when it spells a
+ * local or a parameter differently from an earlier use (see names_fold_case).
+ * Field names (after '.' or '->'), symbols and type names (after ':'), hash
+ * keys (before ':') and function names (before '(') are not variables and are
+ * skipped.
+ */
+static void
+note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
+{
+	int			k = i - 1;
+	PlxLocal2  *l;
+
+	if (names_fold_case(cx))
+		return;
+	while (k >= 0 && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+		k--;
+	if (k >= 0 && (s[k] == '.' || s[k] == ':' ||
+				   (s[k] == '>' && k > 0 && s[k - 1] == '-')))
+		return;
+	if (j < len && (s[j] == '(' || (s[j] == ':' && !(j + 1 < len && s[j + 1] == ':'))))
+		return;
+	l = local_lookup(cx, s + i, j - i);
+	if (l && !same_spelling(l->name, s + i, j - i))
+		name_clash(cx, l->name, s + i, j - i);
+	(void) plx_is_param(cx, s + i, j - i);
+}
+
+/*
  * rewrite_expr: single left-to-right pass over source; honors strings; never
  * re-scans its own output. boolctx selects OR vs || and negation handling.
  */
@@ -1378,7 +1483,10 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
 			else
+			{
+				note_name_ref(cx, s, len, i, j);
 				appendBinaryStringInfo(&out, s + i, wl);
+			}
 			i = j;
 
 			/* record subscript: r[:id] / r['id'] / r["id"] -> r.id */
@@ -1721,7 +1829,7 @@ first_local_ref(Ctx *cx, const char *s, PlxLocal2 *self)
 				   IS_HIGHBIT_SET(*s))
 				s++;
 			if (prev != '.' && !after_cast &&
-				(l = plx_local_find(cx, w, (int) (s - w))) != NULL &&
+				(l = local_lookup(cx, w, (int) (s - w))) != NULL &&
 				l != self && !l->is_const)
 				return l->name;
 			prev = 'a';

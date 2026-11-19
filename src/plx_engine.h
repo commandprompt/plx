@@ -143,6 +143,8 @@ typedef struct PlxCtx
 	int			ninterp;		/* string interpolations rendered so far; an
 								 * interpolating initializer is not folded */
 	bool		retset;
+	char	  **pspell;			/* per parameter: the first spelling the body
+								 * used for it (see plx_is_param) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 
