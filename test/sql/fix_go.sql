@@ -248,3 +248,18 @@ CREATE FUNCTION fg30_cond(n int) RETURNS int[] LANGUAGE plxgo AS $$
  return []int{0}
 $$;
 SELECT fg30_cond(3) AS go_2_6, fg30_cond(4) AS go_0;
+
+-- A31: int(x) and int64(x) of a float truncate toward zero, as in Go
+CREATE FUNCTION fg31_int(f float8) RETURNS int LANGUAGE plxgo AS $$ return int(f) $$;
+SELECT fg31_int(3.7) AS go_3, fg31_int(-2.7) AS go_m2, fg31_int(2.5) AS go_2;
+CREATE FUNCTION fg31_int64(n numeric) RETURNS bigint LANGUAGE plxgo AS $$
+ var x float64 = 9.99
+ return int64(n) + int64(x) + int64(7.9)
+$$;
+SELECT fg31_int64(-5.5) AS go_11;
+-- an integer operand converts exactly, even past 2^53
+CREATE FUNCTION fg31_big(n bigint) RETURNS bigint LANGUAGE plxgo AS $$
+ var m int64 = n
+ return int64(n) - int64(m) + int64(n)
+$$;
+SELECT fg31_big(9007199254740993) AS go_9007199254740993;

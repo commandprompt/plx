@@ -11,6 +11,7 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
@@ -785,6 +786,20 @@ go_read_type(Go *g, StringInfo dest)
 		appendStringInfoString(dest, "[]");
 }
 
+/* true when a Go numeric literal is a float (has a '.' or a decimal exponent) */
+static bool
+go_num_is_float(const GoTok *tk)
+{
+	int			i;
+
+	if (tk->len > 1 && tk->s[0] == '0' && (tk->s[1] == 'x' || tk->s[1] == 'X'))
+		return false;			/* hex: 'e' and 'E' are digits */
+	for (i = 0; i < tk->len; i++)
+		if (tk->s[i] == '.' || tk->s[i] == 'e' || tk->s[i] == 'E')
+			return true;
+	return false;
+}
+
 /* infer a PostgreSQL type from an initializer range [a,b); NULL if unknown */
 static const char *
 go_infer_type(Go *g, int a, int b)
@@ -850,6 +865,44 @@ go_match(Go *g, int idx, int limit)
 				return i;
 	}
 	return -1;
+}
+
+/*
+ * True when the operand [a,b) of a conversion is known to be an integer: an
+ * integer literal, or a local or parameter of an integer type.
+ */
+static bool
+go_operand_is_int(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	PlxLocal2  *l;
+	int			i;
+
+	if (b - a != 1)
+		return false;
+	if (tk->kind == GO_NUM)
+		return !go_num_is_float(tk);
+	if (tk->kind != GO_WORD)
+		return false;
+	l = plx_local_find(g->cx, tk->s, tk->len);
+	if (l)
+		return l->typ && (strcmp(l->typ, "integer") == 0 ||
+						  strcmp(l->typ, "smallint") == 0 ||
+						  strcmp(l->typ, "bigint") == 0);
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return false;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+		{
+			Oid			t = g->cx->meta->argtypes[i];
+
+			return t == INT2OID || t == INT4OID || t == INT8OID;
+		}
+	}
+	return false;
 }
 
 /* a stdlib / builtin / type-conversion call at index i; sets *ni on success */
@@ -973,11 +1026,20 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	if (close < 0)
 		return false;
 
-	/* type conversion T(x) -> (x)::T for a base type T */
+	/*
+	 * type conversion T(x) -> (x)::T for a base type T. Go converts a float
+	 * to an integer type by truncating toward zero, but a SQL cast rounds, so
+	 * an integer conversion of an operand not known to be an integer goes
+	 * through trunc() first.
+	 */
 	conv = go_base_type(tk->s, tk->len);
 	if (conv)
 	{
 		go_sp(out);
+		if ((strcmp(conv, "integer") == 0 || strcmp(conv, "smallint") == 0 ||
+			 strcmp(conv, "bigint") == 0) &&
+			!go_operand_is_int(g, lp + 1, close))
+			appendStringInfoString(out, "trunc");
 		appendStringInfoChar(out, '(');
 		go_emit_range(g, lp + 1, close, out);
 		appendStringInfo(out, ")::%s", conv);
@@ -2086,20 +2148,6 @@ go_loop_body(Go *g, int ind)
 	g->cx->loopdepth--;
 	g->cont_label = save_label;
 	g->brk_label = save_brk;
-}
-
-/* true when a Go numeric literal is a float (has a '.' or a decimal exponent) */
-static bool
-go_num_is_float(const GoTok *tk)
-{
-	int			i;
-
-	if (tk->len > 1 && tk->s[0] == '0' && (tk->s[1] == 'x' || tk->s[1] == 'X'))
-		return false;			/* hex: 'e' and 'E' are digits */
-	for (i = 0; i < tk->len; i++)
-		if (tk->s[i] == '.' || tk->s[i] == 'e' || tk->s[i] == 'E')
-			return true;
-	return false;
 }
 
 /*

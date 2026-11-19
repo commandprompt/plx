@@ -150,9 +150,16 @@ $$;
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` / `::bigint` / `::double precision` / `::text` |
+| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `trunc(x)::integer` / `trunc(x)::bigint` / `(x)::double precision` / `(x)::text` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
+
+A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
+3 and `int(-2.7)` is -2. A SQL cast would round instead, so plx calls `trunc`
+first. When the operand is an integer literal, or a local or parameter of an
+integer type, plx casts it directly. For any other operand, `trunc` works in
+`double precision` when the operand is an integer, so an integer expression
+beyond 2^53 can lose precision; convert such a value through a variable.
 
 SQL ranks `<<`, `>>`, `&` and `|` below `+` and `-`, while Go ranks `<<`, `>>`,
 `&` and `&^` with `*`, and `|` and `^` with `+`. When an expression uses a
