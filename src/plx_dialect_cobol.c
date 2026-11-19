@@ -12,6 +12,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/pg_list.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
@@ -53,7 +54,21 @@ typedef struct
 	Ctx		   *cx;
 	CbTok	   *t;
 	int			nt, pos;
+	/* the VARYING step of the innermost PERFORM (the new value of the control
+	 * variable cycle_step_var), or NULL when the innermost PERFORM has none;
+	 * EXIT PERFORM CYCLE runs it before CONTINUE */
+	const char *cycle_step;
+	const char *cycle_step_var;
+	/* the numeric PICTURE items (CbNum), whose stores truncate as in COBOL */
+	List	   *nums;
 } Cb;
+
+/* a numeric PICTURE item and its number of fractional digits */
+typedef struct
+{
+	char	   *name;
+	int			scale;
+} CbNum;
 
 /* case-insensitive: is token tk exactly the reserved word w? */
 static bool
@@ -124,7 +139,8 @@ cob_lex(Cb *cb, const char *body)
 			sp = true;
 			continue;
 		}
-		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == ';')
+		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\f' || *p == '\v' ||
+			*p == ';')
 		{
 			p++;
 			sp = true;
@@ -272,7 +288,16 @@ cob_lex(Cb *cb, const char *body)
 			p++;
 			continue;
 		}
-		p++;										/* skip anything else */
+		/*
+		 * Anything else is an error. Dropping it silently would change the
+		 * meaning of what remains: "A != B" would become "a = b", "$1" the
+		 * literal 1, and "@ A" plain "a".
+		 */
+		if ((unsigned char) *p >= 0x20 && (unsigned char) *p < 0x7f)
+			plx_err(cb->cx, line, "unexpected character \"%c\"", *p);
+		plx_err(cb->cx, line,
+				"unexpected byte 0x%02x outside a string literal or comment",
+				(unsigned char) *p);
 	}
 	CBPUSH(CB_EOF, p, 0);
 	cb->t = t;
@@ -841,6 +866,9 @@ cob_decl(Cb *cb)
 	const char *usage = NULL;
 	int			ulen = 0;
 	bool		is_array = false;
+	bool		from_pic = false;
+	CbTok	   *occurs = NULL;	/* the OCCURS count token */
+	bool		value_dec = false;	/* VALUE is a decimal literal */
 
 	/* level number */
 	if (cob_cur(cb)->kind != CB_NUM)
@@ -880,6 +908,7 @@ cob_decl(Cb *cb)
 				cb->pos++;
 			}
 			l->typ = cob_type_from_pic(cb, rs, (int) (re - rs), usage, ulen);
+			from_pic = true;
 		}
 		else if (cob_ci(tk, "USAGE"))
 		{
@@ -907,6 +936,7 @@ cob_decl(Cb *cb)
 			if (cob_ci(cob_cur(cb), "IS"))
 				cb->pos++;
 			vt = cob_cur(cb);
+			value_dec = false;
 			initStringInfo(&v);
 			fig = (vt->kind == CB_WORD) ? cob_figurative(vt) : NULL;
 			if (fig)
@@ -919,6 +949,7 @@ cob_decl(Cb *cb)
 			else if (vt->kind == CB_NUM)
 			{
 				appendBinaryStringInfo(&v, vt->s, vt->len);
+				value_dec = memchr(vt->s, '.', vt->len) != NULL;
 				cb->pos++;
 				l->init = v.data;
 			}
@@ -959,6 +990,7 @@ cob_decl(Cb *cb)
 		{
 			const char *rs, *re;
 
+			from_pic = false;
 			cb->pos++;
 			rs = cob_cur(cb)->s;
 			re = rs;
@@ -985,6 +1017,7 @@ cob_decl(Cb *cb)
 			cb->pos++;
 			if (cob_cur(cb)->kind != CB_NUM)
 				cob_err(cb, "OCCURS requires a count");
+			occurs = cob_cur(cb);
 			cb->pos++;
 			if (cob_ci(cob_cur(cb), "TIMES"))
 				cb->pos++;
@@ -996,10 +1029,38 @@ cob_decl(Cb *cb)
 	if (cob_cur(cb)->kind == CB_PERIOD)
 		cb->pos++;
 
+	/*
+	 * A numeric PICTURE item (not COMP-1/COMP-2, not a TYPE clause): COBOL
+	 * truncates the excess fractional digits of a value stored into it.
+	 */
+	if (from_pic && !l->is_const && l->typ &&
+		(strcmp(l->typ, "integer") == 0 || strcmp(l->typ, "bigint") == 0 ||
+		 strncmp(l->typ, "numeric(", 8) == 0))
+	{
+		CbNum	   *num = palloc(sizeof(CbNum));
+		const char *comma = strchr(l->typ, ',');
+
+		num->name = mapped;
+		num->scale = comma ? atoi(comma + 1) : 0;
+		cb->nums = lappend(cb->nums, num);
+		/* a decimal VALUE is truncated to the PICTURE too */
+		if (value_dec && l->init)
+			l->init = psprintf("trunc(%s, %d)", l->init, num->scale);
+	}
+
 	if (is_array)
 	{
 		if (!l->typ)
 			cob_err(cb, "an OCCURS item needs a PIC or TYPE for its element type");
+		/* VALUE gives every element the value: fill an array of OCCURS n */
+		if (l->init)
+		{
+			if (occurs->len > 9 || memchr(occurs->s, '.', occurs->len))
+				plx_err(cb->cx, occurs->line,
+						"OCCURS count is too large or not an integer");
+			l->init = psprintf("array_fill((%s)::%s, ARRAY[%.*s])",
+							   l->init, l->typ, occurs->len, occurs->s);
+		}
 		l->typ = psprintf("%s[]", l->typ);
 	}
 	if (!l->typ && !l->is_record)
@@ -1052,6 +1113,97 @@ cob_target(Cb *cb)
 	return nm;
 }
 
+/* the numeric PICTURE item named by a target (a data name, or name[i]) */
+static CbNum *
+cob_num_find(Cb *cb, const char *tgt, int len)
+{
+	ListCell   *lc;
+
+	foreach(lc, cb->nums)
+	{
+		CbNum	   *num = (CbNum *) lfirst(lc);
+
+		if ((int) strlen(num->name) == len && strncmp(num->name, tgt, len) == 0)
+			return num;
+	}
+	return NULL;
+}
+
+/*
+ * True if the SQL expression is sure to have an integral value: it holds only
+ * integer literals, numeric PICTURE items without fractional digits, and the
+ * operators + - * % with parentheses and subscripts. Storing such a value
+ * needs no truncation.
+ */
+static bool
+cob_integral(Cb *cb, const char *e)
+{
+	const char *p = e;
+
+	while (*p)
+	{
+		if (*p >= '0' && *p <= '9')
+		{
+			while (*p >= '0' && *p <= '9')
+				p++;
+			if (*p == '.')
+				return false;	/* a decimal literal */
+			continue;
+		}
+		if ((*p >= 'a' && *p <= 'z') || *p == '_')
+		{
+			const char *st = p;
+			CbNum	   *num;
+
+			while ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+				   *p == '_')
+				p++;
+			num = cob_num_find(cb, st, (int) (p - st));
+			if (!num || num->scale != 0 || *p == '.')
+				return false;
+			continue;
+		}
+		if (!strchr(" +-*%()[]", *p))
+			return false;
+		p++;
+	}
+	return true;
+}
+
+/*
+ * Emit "tgt := val;". A numeric PICTURE target keeps only its declared
+ * fractional digits: the excess is truncated, as in COBOL, or rounded half
+ * away from zero with ROUNDED. A plain plpgsql assignment would round.
+ */
+static void
+cob_store(Cb *cb, int ind, const char *tgt, const char *val, bool rounded)
+{
+	const char *br = strchr(tgt, '[');
+	CbNum	   *num = cob_num_find(cb, tgt, br ? (int) (br - tgt) : (int) strlen(tgt));
+
+	/* a whole table stored at once is an array: it keeps the SQL assignment */
+	if (num && !br && cob_is_array(cb, tgt))
+		num = NULL;
+	plx_indent(&cb->cx->out, ind);
+	if (num && !cob_integral(cb, val))
+		appendStringInfo(&cb->cx->out, "%s := %s((%s)::numeric, %d);\n",
+						 tgt, rounded ? "round" : "trunc", val, num->scale);
+	else
+		appendStringInfo(&cb->cx->out, "%s := %s;\n", tgt, val);
+}
+
+/* consume an optional ROUNDED phrase after a receiving field */
+static bool
+cob_rounded(Cb *cb)
+{
+	if (!cob_ci(cob_cur(cb), "ROUNDED"))
+		return false;
+	cb->pos++;
+	if (cob_ci(cob_cur(cb), "MODE"))
+		cob_err(cb, "ROUNDED MODE is not supported");
+	return true;
+}
+
 static void
 cob_move(Cb *cb, int ind)
 {
@@ -1070,8 +1222,7 @@ cob_move(Cb *cb, int ind)
 	{
 		char	   *tgt = cob_target(cb);
 
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := %s;\n", tgt, v.data);
+		cob_store(cb, ind, tgt, v.data, false);
 	}
 }
 
@@ -1079,6 +1230,7 @@ static void
 cob_compute(Cb *cb, int ind)
 {
 	char	   *tgts[16];
+	bool		rnd[16];
 	int			ntg = 0;
 	StringInfoData v;
 	int			k;
@@ -1088,7 +1240,9 @@ cob_compute(Cb *cb, int ind)
 	{
 		if (ntg >= 16)
 			cob_err(cb, "too many COMPUTE receivers");
-		tgts[ntg++] = cob_target(cb);
+		tgts[ntg] = cob_target(cb);
+		rnd[ntg] = cob_rounded(cb);
+		ntg++;
 	}
 	if (ntg == 0)
 		cob_err(cb, "COMPUTE requires a receiving field");
@@ -1100,10 +1254,7 @@ cob_compute(Cb *cb, int ind)
 	if (!cob_value(cb, &v, NULL, 0))
 		cob_err(cb, "COMPUTE requires an expression");
 	for (k = 0; k < ntg; k++)
-	{
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := (%s );\n", tgts[k], v.data);
-	}
+		cob_store(cb, ind, tgts[k], psprintf("(%s )", v.data), rnd[k]);
 }
 
 /*
@@ -1121,6 +1272,7 @@ cob_arith(Cb *cb, int ind)
 	CbTok	   *verb = cob_cur(cb);
 	char	   *recv,
 			   *giv = NULL;
+	bool		rounded;
 
 	cb->pos++;
 
@@ -1155,16 +1307,20 @@ cob_arith(Cb *cb, int ind)
 			recv = cob_operand(cb);
 			if (!recv)
 				cob_err(cb, "arithmetic verb requires a receiving field");
+			rounded = cob_rounded(cb);
 			if (cob_ci(cob_cur(cb), "GIVING"))
 			{
+				if (rounded)
+					cob_err(cb, "ROUNDED must follow the GIVING field");
 				cb->pos++;
 				giv = cob_operand(cb);
 				if (!giv)
 					cob_err(cb, "GIVING requires a receiving field");
+				rounded = cob_rounded(cb);
 			}
-			plx_indent(&cb->cx->out, ind);
-			appendStringInfo(&cb->cx->out, "%s := (%s %c (%s));\n",
-							 giv ? giv : recv, recv, is_add ? '+' : '-', sum.data);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s %c (%s))", recv, is_add ? '+' : '-', sum.data),
+					  rounded);
 		}
 		else if (is_add && cob_ci(cob_cur(cb), "GIVING"))
 		{
@@ -1172,8 +1328,8 @@ cob_arith(Cb *cb, int ind)
 			giv = cob_operand(cb);
 			if (!giv)
 				cob_err(cb, "GIVING requires a receiving field");
-			plx_indent(&cb->cx->out, ind);
-			appendStringInfo(&cb->cx->out, "%s := (%s);\n", giv, sum.data);
+			rounded = cob_rounded(cb);
+			cob_store(cb, ind, giv, psprintf("(%s)", sum.data), rounded);
 		}
 		else
 			cob_err(cb, is_add ? "ADD requires TO or GIVING"
@@ -1206,23 +1362,46 @@ cob_arith(Cb *cb, int ind)
 		recv = cob_operand(cb);
 		if (!recv)
 			cob_err(cb, "arithmetic verb requires a receiving field");
+		rounded = cob_rounded(cb);
 		if (cob_ci(cob_cur(cb), "GIVING"))
 		{
+			if (rounded)
+				cob_err(cb, "ROUNDED must follow the GIVING field");
 			cb->pos++;
 			giv = cob_operand(cb);
 			if (!giv)
 				cob_err(cb, "GIVING requires a receiving field");
+			rounded = cob_rounded(cb);
 		}
-		plx_indent(&cb->cx->out, ind);
+		/* COBOL has DIVIDE ... BY only with GIVING; without it the divisor
+		 * would be overwritten with the quotient */
+		if (!giv && strcmp(op, "/by") == 0)
+			plx_err(cb->cx, verb->line, "DIVIDE ... BY requires GIVING");
 		if (strcmp(op, "*") == 0)
-			appendStringInfo(&cb->cx->out, "%s := (%s * %s);\n",
-							 giv ? giv : recv, recv, src);
-		else if (strcmp(op, "/into") == 0)
-			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
-							 giv ? giv : recv, recv, src);
-		else					/* /by : DIVIDE a BY b GIVING g -> g := a / b */
-			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
-							 giv ? giv : recv, src, recv);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s * %s)", recv, src), rounded);
+		else
+		{
+			const char *tgt = giv ? giv : recv;
+			const char *br = strchr(tgt, '[');
+			bool		exact;
+
+			/*
+			 * SQL division of two integers drops the fraction before cob_store
+			 * can truncate or round it. For a numeric PICTURE receiver, divide
+			 * as numeric so the quotient keeps its fraction, as in COBOL.
+			 */
+			exact = cob_num_find(cb, tgt, br ? (int) (br - tgt) : (int) strlen(tgt)) &&
+				(br || !cob_is_array(cb, tgt));
+			if (strcmp(op, "/into") == 0)
+				cob_store(cb, ind, tgt,
+						  psprintf(exact ? "((%s)::numeric / %s)" : "(%s / %s)",
+								   recv, src), rounded);
+			else				/* /by : DIVIDE a BY b GIVING g -> g := a / b */
+				cob_store(cb, ind, tgt,
+						  psprintf(exact ? "((%s)::numeric / %s)" : "(%s / %s)",
+								   src, recv), rounded);
+		}
 	}
 }
 
@@ -1253,11 +1432,30 @@ cob_if(Cb *cb, int ind)
 	appendStringInfoString(&cb->cx->out, "END IF;\n");
 }
 
+/*
+ * A plpgsql CASE needs at least one WHEN arm. When an EVALUATE has none of its
+ * own (only WHEN OTHER, or WHENs stacked directly before it), emit an arm that
+ * never matches. In the simple form the subject is compared with NULL, which
+ * is never true.
+ */
+static void
+cob_evaluate_noarm(Cb *cb, int ind, bool searched, int narms)
+{
+	if (narms > 0)
+		return;
+	plx_indent(&cb->cx->out, ind + 1);
+	appendStringInfoString(&cb->cx->out, searched ? "WHEN false THEN\n"
+						   : "WHEN NULL THEN\n");
+	plx_indent(&cb->cx->out, ind + 2);
+	appendStringInfoString(&cb->cx->out, "NULL;\n");
+}
+
 static void
 cob_evaluate(Cb *cb, int ind)
 {
 	bool		searched;
 	bool		has_other = false;
+	int			narms = 0;
 
 	cb->pos++;								/* EVALUATE */
 	searched = cob_ci(cob_cur(cb), "TRUE");
@@ -1284,31 +1482,23 @@ cob_evaluate(Cb *cb, int ind)
 		if (cob_ci(&cb->t[cb->pos + 1], "OTHER"))
 		{
 			cb->pos += 2;
+			cob_evaluate_noarm(cb, ind, searched, narms);
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfoString(&cb->cx->out, "ELSE\n");
 			cob_block(cb, ind + 2);
 			has_other = true;
 			break;
 		}
-		if (searched)
-		{
-			StringInfoData c;
-
-			cb->pos++;
-			initStringInfo(&c);
-			if (!cob_value(cb, &c, NULL, 0))
-				cob_err(cb, "WHEN requires a condition");
-			plx_indent(&cb->cx->out, ind + 1);
-			appendStringInfo(&cb->cx->out, "WHEN %s THEN\n", c.data);
-			cob_block(cb, ind + 2);
-		}
-		else
 		{
 			StringInfoData vals;
-			bool		first = true;
+			int			n = 0;
 
+			/*
+			 * Stacked WHENs (no statements between them) share the statements
+			 * that follow: subject values become a list (WHEN 1, 2) and
+			 * searched conditions are joined with OR.
+			 */
 			initStringInfo(&vals);
-			/* stacked WHEN v1 WHEN v2 ... share the following statements */
 			while (cob_ci(cob_cur(cb), "WHEN") &&
 				   !cob_ci(&cb->t[cb->pos + 1], "OTHER"))
 			{
@@ -1317,15 +1507,34 @@ cob_evaluate(Cb *cb, int ind)
 				cb->pos++;
 				initStringInfo(&one);
 				if (!cob_value(cb, &one, NULL, 0))
-					cob_err(cb, "WHEN requires a value");
-				if (!first)
-					appendStringInfoString(&vals, ", ");
-				appendStringInfo(&vals, "%s", one.data);
-				first = false;
+					cob_err(cb, searched ? "WHEN requires a condition"
+							: "WHEN requires a value");
+				if (searched && n == 1)
+				{
+					/* a second condition: parenthesize both, joined by OR */
+					char	   *first = pstrdup(vals.data);
+
+					resetStringInfo(&vals);
+					appendStringInfo(&vals, "(%s ) OR (%s )", first, one.data);
+				}
+				else if (searched && n > 1)
+					appendStringInfo(&vals, " OR (%s )", one.data);
+				else if (searched)
+					appendStringInfoString(&vals, one.data);
+				else
+					appendStringInfo(&vals, "%s%s", n ? ", " : "", one.data);
+				n++;
 			}
+			/*
+			 * WHENs stacked directly before WHEN OTHER share its statements.
+			 * The ELSE arm already covers them, so they need no arm of their own.
+			 */
+			if (cob_ci(cob_cur(cb), "WHEN"))
+				continue;
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfo(&cb->cx->out, "WHEN %s THEN\n", vals.data);
 			cob_block(cb, ind + 2);
+			narms++;
 		}
 	}
 	cob_expect(cb, "END-EVALUATE");
@@ -1333,6 +1542,7 @@ cob_evaluate(Cb *cb, int ind)
 	 * CASE with no match raises case_not_found */
 	if (!has_other)
 	{
+		cob_evaluate_noarm(cb, ind, searched, narms);
 		plx_indent(&cb->cx->out, ind + 1);
 		appendStringInfoString(&cb->cx->out, "ELSE\n");
 		plx_indent(&cb->cx->out, ind + 2);
@@ -1342,45 +1552,27 @@ cob_evaluate(Cb *cb, int ind)
 	appendStringInfoString(&cb->cx->out, "END CASE;\n");
 }
 
+static void cob_perform_inner(Cb *cb, int ind);
+
 /*
- * True if the UNTIL condition starting at `from` (the token after the control
- * variable's comparison operator) is a *simple* "var op bound", i.e. the bound
- * runs to the loop body with no logical connector or second comparison. A
- * compound UNTIL (v > n AND done = 1) must use the general WHILE, not the
- * integer-FOR fast path (which would otherwise fold the connector into the FOR
- * bound and emit wrong output).
+ * PERFORM. Each form is one plpgsql loop, and EXIT PERFORM CYCLE (CONTINUE)
+ * applies to the innermost one, so the VARYING step that CYCLE must run is
+ * saved and restored around each PERFORM.
  */
-static bool
-cob_until_simple(Cb *cb, int from)
+static void
+cob_perform(Cb *cb, int ind)
 {
-	int			i,
-				depth = 0;
+	const char *saved = cb->cycle_step;
+	const char *saved_var = cb->cycle_step_var;
 
-	for (i = from; i < cb->nt; i++)
-	{
-		CbTok	   *t = &cb->t[i];
-
-		if (t->kind == CB_LP)
-			depth++;
-		else if (t->kind == CB_RP)
-			depth--;
-		else if (t->kind == CB_PERIOD || t->kind == CB_EOF)
-			break;
-		else if (depth == 0 && (cob_is_verb(t) || cob_ci(t, "END-PERFORM")))
-			break;					/* the loop body / terminator begins here */
-		else if (depth == 0 &&
-				 (cob_ci(t, "AND") || cob_ci(t, "OR") || cob_ci(t, "NOT") ||
-				  cob_ci(t, "EQUAL") || cob_ci(t, "EQUALS") ||
-				  cob_ci(t, "GREATER") || cob_ci(t, "LESS") ||
-				  (t->kind == CB_OP && t->len == 1 &&
-				   (t->s[0] == '<' || t->s[0] == '=' || t->s[0] == '>'))))
-			return false;			/* a connector or second comparison */
-	}
-	return true;
+	cb->cycle_step = NULL;
+	cob_perform_inner(cb, ind);
+	cb->cycle_step = saved;
+	cb->cycle_step_var = saved_var;
 }
 
 static void
-cob_perform(Cb *cb, int ind)
+cob_perform_inner(Cb *cb, int ind)
 {
 	cb->pos++;								/* PERFORM */
 
@@ -1422,55 +1614,27 @@ cob_perform(Cb *cb, int ind)
 		cob_expect(cb, "UNTIL");
 
 		/*
-		 * Fast path: PERFORM VARYING v FROM a BY 1 UNTIL v > b (or >= b) is an
-		 * integer FOR loop, which plpgsql runs faster than a WHILE with a manual
-		 * increment. Requires BY 1 and a condition "<var> > b" / "<var> >= b".
+		 * PERFORM VARYING -> WHILE with a manual step, for every step and
+		 * condition. A plpgsql integer FOR is not equivalent: its loop variable
+		 * is a new int4 that hides the data item, so the item would keep its
+		 * old value after the loop, a MOVE to it or to the bound in the body
+		 * would not affect the iteration, and a PIC 9(18) count would overflow.
+		 * The control variable needs a declaration; one that has none (as an
+		 * integer FOR allowed) is declared as an integer.
 		 */
-		{
-			char	   *bytrim = by.data;
-			CbTok	   *c0 = cob_cur(cb);
-			/* c1 only valid when c0 is not EOF (EOF is the last token) */
-			CbTok	   *c1 = (c0->kind != CB_EOF) ? &cb->t[cb->pos + 1] : c0;
-			bool		gt = (c1->kind == CB_OP && c1->len == 1 && c1->s[0] == '>');
-			bool		ge = (c1->kind == CB_OP && c1->len == 2 &&
-							  c1->s[0] == '>' && c1->s[1] == '=');
-
-			while (*bytrim == ' ')
-				bytrim++;
-			if (strcmp(bytrim, "1") == 0 && c0->kind == CB_WORD && (gt || ge) &&
-				strcmp(cob_map(c0->s, c0->len), var) == 0 &&
-				cob_until_simple(cb, cb->pos + 2))
-			{
-				StringInfoData bound;
-
-				cb->pos += 2;			/* control variable and the operator */
-				initStringInfo(&bound);
-				cob_value(cb, &bound, NULL, 0);
-				plx_indent(&cb->cx->out, ind);
-				if (gt)
-					appendStringInfo(&cb->cx->out, "FOR %s IN (%s )..(%s ) LOOP\n",
-									 var, from.data, bound.data);
-				else
-					appendStringInfo(&cb->cx->out, "FOR %s IN (%s )..((%s ) - 1) LOOP\n",
-									 var, from.data, bound.data);
-				cob_block(cb, ind + 1);
-				cob_expect(cb, "END-PERFORM");
-				plx_indent(&cb->cx->out, ind);
-				appendStringInfoString(&cb->cx->out, "END LOOP;\n");
-				return;
-			}
-		}
-
-		/* general PERFORM VARYING -> WHILE with a manual step */
+		if (!strchr(var, '.') && !plx_is_param(cb->cx, var, strlen(var)) &&
+			!plx_local_find(cb->cx, var, strlen(var)))
+			plx_local_add(cb->cx, var, strlen(var))->typ = pstrdup("integer");
 		initStringInfo(&c);
 		cob_value(cb, &c, NULL, 0);
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := (%s );\n", var, from.data);
+		cob_store(cb, ind, var, psprintf("(%s )", from.data), false);
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfo(&cb->cx->out, "WHILE NOT (%s ) LOOP\n", c.data);
+		/* the step ends the body; EXIT PERFORM CYCLE must run it too */
+		cb->cycle_step = psprintf("%s + (%s )", var, by.data);
+		cb->cycle_step_var = var;
 		cob_block(cb, ind + 1);
-		plx_indent(&cb->cx->out, ind + 1);
-		appendStringInfo(&cb->cx->out, "%s := %s + (%s );\n", var, var, by.data);
+		cob_store(cb, ind + 1, var, cb->cycle_step, false);
 		cob_expect(cb, "END-PERFORM");
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "END LOOP;\n");
@@ -1590,18 +1754,36 @@ cob_display(Cb *cb, int ind)
 	initStringInfo(&args);
 	while (!cob_value_stop(cb, stops, 2))
 	{
-		char	   *op = cob_operand(cb);
+		char	   *op;
 
+		/* NO ADVANCING may come without WITH */
+		if (cob_ci(cob_cur(cb), "NO") && cob_ci(&cb->t[cb->pos + 1], "ADVANCING"))
+			break;
+		/* a table element WS-ARR(i) reads like a receiving field */
+		if (cob_cur(cb)->kind == CB_WORD && cb->t[cb->pos + 1].kind == CB_LP)
+			op = cob_target(cb);
+		else
+			op = cob_operand(cb);
 		if (!op)
 			break;
 		if (nargs++)
 			appendStringInfoString(&args, ", ");
 		appendStringInfo(&args, "%s", op);
 	}
-	/* consume trailing UPON <dev> / WITH NO ADVANCING noise up to period */
-	while (cob_cur(cb)->kind != CB_PERIOD && cob_cur(cb)->kind != CB_EOF &&
-		   !cob_is_verb(cob_cur(cb)) && !cob_is_close(cob_cur(cb)))
+	/* optional UPON <device> and [WITH] NO ADVANCING, which change nothing */
+	if (cob_ci(cob_cur(cb), "UPON"))
+	{
 		cb->pos++;
+		if (cob_cur(cb)->kind == CB_WORD && !cob_value_stop(cb, stops, 2))
+			cb->pos++;
+	}
+	if (cob_ci(cob_cur(cb), "WITH"))
+		cb->pos++;
+	if (cob_ci(cob_cur(cb), "NO") && cob_ci(&cb->t[cb->pos + 1], "ADVANCING"))
+		cb->pos += 2;
+	/* anything else (a function call, an expression) would be dropped */
+	if (!cob_value_stop(cb, NULL, 0))
+		cob_err(cb, "DISPLAY operands must be data names, table elements, or literals");
 	if (nargs == 0)
 		cob_err(cb, "DISPLAY requires at least one operand");
 	plx_indent(&cb->cx->out, ind);
@@ -1716,14 +1898,18 @@ cob_exit(Cb *cb, int ind)
 	if (!cob_ci(cob_cur(cb), "PERFORM"))
 		cob_err(cb, "only EXIT PERFORM [CYCLE] is supported");
 	cb->pos++;
-	plx_indent(&cb->cx->out, ind);
 	if (cob_ci(cob_cur(cb), "CYCLE"))
 	{
 		cb->pos++;
+		/* CYCLE ends the iteration, and a VARYING loop then runs its step */
+		if (cb->cycle_step)
+			cob_store(cb, ind, cb->cycle_step_var, cb->cycle_step, false);
+		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "CONTINUE;\n");
+		return;
 	}
-	else
-		appendStringInfoString(&cb->cx->out, "EXIT;\n");
+	plx_indent(&cb->cx->out, ind);
+	appendStringInfoString(&cb->cx->out, "EXIT;\n");
 }
 
 static void

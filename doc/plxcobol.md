@@ -37,8 +37,11 @@ $$;
 
 Function arguments are referenced by name (case-insensitively). Most SQL
 expressions are valid inside `COMPUTE` and conditions, because expressions are
-passed through to plpgsql and SQL. The `||` operator and `::` casts are not:
-the tokenizer drops them, so use `CONCAT(...)` and `CAST(x AS type)`.
+passed through to plpgsql and SQL. The `||` operator and `::` casts are not,
+so use `CONCAT(...)` and `CAST(x AS type)`. Outside a string literal or a
+comment, a character that COBOL does not use, such as `|`, `!`, `$`, or `@`,
+is rejected at `CREATE FUNCTION` time. A `::` cast is not rejected, but the
+function fails with a syntax error when it runs.
 
 ### Local variables and types
 
@@ -83,8 +86,9 @@ A COBOL 2023 constant uses `CONSTANT AS`:
 ### Tables (arrays)
 
 `OCCURS n [TIMES]` makes an item a table, mapped to a PostgreSQL array of the
-element type (the fixed bound is not enforced). A subscript `WS-ARR(i)` reads or
-writes element `i` (1-based):
+element type (the fixed bound is not enforced). A `VALUE` clause gives each of
+the `n` elements that value; without one the table starts as NULL. A subscript
+`WS-ARR(i)` reads or writes element `i` (1-based):
 
 ```sql
 01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
@@ -94,7 +98,8 @@ COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I) *> read element
 ```
 
 Iterate the whole table with `PERFORM v OVER ARRAY WS-ARR`. A subscript is
-recognized in `MOVE`/`COMPUTE` targets and in expressions; use `COMPUTE` (not
+recognized in `MOVE`/`COMPUTE` targets, in `DISPLAY` operands, and in
+expressions; use `COMPUTE` (not
 `ADD`/`SUBTRACT`) when an operand is a subscripted element.
 
 ## Control flow
@@ -117,7 +122,9 @@ the COBOL relational words (`IS EQUAL TO`, `IS GREATER THAN`,
 ### EVALUATE
 
 A subject makes a simple `CASE`; `EVALUATE TRUE` makes a searched `CASE`. Stacked
-`WHEN` values share the following statements, and `WHEN OTHER` is the default.
+`WHEN` phrases share the following statements in both forms, and `WHEN OTHER`
+is the default. A `WHEN` stacked directly before `WHEN OTHER` shares the
+`WHEN OTHER` statements.
 
 ```sql
 EVALUATE N
@@ -157,8 +164,14 @@ PERFORM N TIMES
 END-PERFORM
 ```
 
-`EXIT PERFORM` leaves the loop and `EXIT PERFORM CYCLE` starts the next
-iteration. `CONTINUE` is a no-op.
+`PERFORM VARYING` tests `UNTIL` before each iteration and changes the control
+variable itself, as COBOL does. After the loop the variable holds the first
+value that satisfied `UNTIL`, or its value at `EXIT PERFORM`. A `MOVE` to the
+variable or to the bound inside the body affects the next test.
+
+`EXIT PERFORM` leaves the loop. `EXIT PERFORM CYCLE` ends the current
+iteration; in a `PERFORM VARYING` the step and the `UNTIL` test then run as
+usual. `CONTINUE` is a no-op.
 
 ## Working with data
 
@@ -176,6 +189,38 @@ SUBTRACT B FROM A GIVING WS-D
 MULTIPLY A BY B GIVING WS-P
 DIVIDE B INTO A GIVING WS-Q
 ```
+
+`DIVIDE a BY b` needs `GIVING`, as in COBOL; without it plx rejects the
+statement. `DIVIDE a INTO b` may omit `GIVING` and stores into `b`.
+
+A value stored into a numeric `PICTURE` item keeps only the fractional digits
+that the `PICTURE` allows, and the rest are truncated, as in COBOL.
+`COMPUTE WS-I = 7.9` stores 7 in a `PIC 9(4)` item, and `MOVE 2.5 TO WS-I`
+stores 2. To round instead, write `ROUNDED` after the receiving field; it
+rounds half away from zero:
+
+```sql
+COMPUTE WS-M ROUNDED = 2.0 / 3       *> PIC 9(3)V99: stores 0.67
+ADD 1.5 TO WS-Q ROUNDED
+MULTIPLY A BY B GIVING WS-P ROUNDED
+```
+
+This applies to `MOVE`, `COMPUTE`, the four arithmetic verbs, the
+`PERFORM VARYING` control variable, and the `VALUE` clause (`PIC 9(4) VALUE
+2.5` starts at 2). `ROUNDED MODE` is not supported. An item declared with a
+`TYPE` clause or `USAGE COMP-1` / `COMP-2`, a whole table stored at once
+(`MOVE WS-A TO WS-B` where `WS-B` has `OCCURS`), the loop variable of
+`PERFORM v OVER ARRAY`, and a value stored by `EXECUTE ... INTO`,
+`FETCH-CURSOR`, or `GET`, follow the SQL assignment rule, which rounds.
+
+`DIVIDE` into a numeric `PICTURE` item divides as `numeric`, so the quotient
+keeps its fraction until it is stored: `DIVIDE 2 INTO 7 GIVING WS-M` stores
+3.50 in a `PIC 9V99` item, and `DIVIDE 4 INTO WS-A ROUNDED` stores 1 when
+`WS-A` is 3. In `COMPUTE` and in conditions, `/` follows SQL instead: the
+quotient of two integers is truncated before `ROUNDED` can act, so
+`COMPUTE WS-C ROUNDED = WS-A / WS-B` stores 0 when `WS-A` is 3 and `WS-B`
+is 4. To keep the fraction, make one operand `numeric`, for example
+`WS-A * 1.0 / WS-B`.
 
 ### Iterating a query
 
@@ -292,7 +337,10 @@ RAISE NOTICE "processed rows"
 ```
 
 Levels are `EXCEPTION` (or `ERROR`), `NOTICE`, `WARNING`, `INFO`, `LOG`, and
-`DEBUG`. `DISPLAY` emits a `NOTICE`, concatenating its operands.
+`DEBUG`. `DISPLAY` emits a `NOTICE`, concatenating its operands. An operand is
+a data name, a table element (`WS-ARR(I)`), or a literal; to display an
+expression, `COMPUTE` it into a data item first. `UPON <device>` and
+`[WITH] NO ADVANCING` are accepted and have no effect.
 
 ### Handling
 
@@ -351,7 +399,13 @@ $$;
 These are intentional. plx pins semantics to SQL and plpgsql.
 
 - Decimal literals infer `numeric`, not a floating-point type.
-- Integer division and modulo follow SQL (truncate toward zero).
+- Integer division and modulo in expressions follow SQL (truncate toward
+  zero). The `DIVIDE` verb into a numeric `PICTURE` item is the exception; see
+  [Assignment and arithmetic](#assignment-and-arithmetic).
+- The number of integer digits in a `PICTURE` is not enforced: a `PIC 9(n)`
+  item holds any value of its `integer` or `bigint` type, and a value too large
+  for a `numeric(p,s)` item raises an error. COBOL would drop the high-order
+  digits.
 - A condition must be a boolean expression; there is no COBOL 88-level or
   class-condition abbreviation. An 88-level entry is rejected. A class
   condition such as `N IS NUMERIC` is not rejected but mistranslated (`IS` is
