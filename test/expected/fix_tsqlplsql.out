@@ -384,3 +384,13 @@ DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_cidx() RETURNS void LANGUAGE plxtsql 
 DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad3() RETURNS void LANGUAGE plxplsql AS $plx$BEGIN ' || repeat('RAISE_APPLICATION_ERROR(', 160000) || '1' || repeat(')', 160000) || '; END;$plx$'; END $d$;
 RESET check_function_bodies;
 RESET statement_timeout;
+-- A45: a bitwise operation in parentheses, as doc/plxtsql.md advises, keeps the T-SQL result
+CREATE FUNCTION fx45_prec() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN (1 ^ 2) + 3;
+$$;
+SELECT fx45_prec();
+ fx45_prec 
+-----------
+         6
+(1 row)
+

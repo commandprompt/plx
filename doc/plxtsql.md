@@ -186,6 +186,13 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
 `^` to `#`. Use `POWER(a, b)` for exponentiation.
 
+The bitwise operators `^`, `&` and `|` bind differently. T-SQL gives them the
+same precedence as `+` and `-` and evaluates left to right. PostgreSQL binds
+`#`, `&` and `|` more loosely than `+` and `-`. plx does not add parentheses.
+So `1 ^ 2 + 3` gives 6 in SQL Server, but 4 in plx, which computes
+`1 # (2 + 3)`. Put parentheses around a bitwise operation that is followed by
+`+` or `-`: write `(1 ^ 2) + 3`.
+
 ## Dynamic SQL
 
 `EXEC('<sql>')` (equivalently `EXECUTE('<sql>')`) becomes `EXECUTE '<sql>';`.
