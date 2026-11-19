@@ -483,6 +483,16 @@ SELECT fg32_pad('ab') AS go_padded, fg32_pad('abcdefgh') AS go_whole, fg32_pad(N
 CREATE FUNCTION fg32_idx() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%[1]d", 5) $$;
 ERROR:  plxgo: fmt.Sprintf explicit argument indexes (%[n]) are not supported
 DETAIL:  at plxgo source line 1
+-- fmt.Printf, and a Sprintf with too many arguments for the || lowering,
+-- reject an explicit argument index too
+CREATE FUNCTION fg32_pfidx() RETURNS void LANGUAGE plxgo AS $$ fmt.Printf("%[2]d %[1]d\n", 1, 2) $$;
+ERROR:  plxgo: fmt.Printf explicit argument indexes (%[n]) are not supported
+DETAIL:  at plxgo source line 1
+CREATE FUNCTION fg32_manyidx() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("%[2]d", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+$$;
+ERROR:  plxgo: fmt.Sprintf explicit argument indexes (%[n]) are not supported
+DETAIL:  at plxgo source line 2
 -- A33: every Go string escape keeps its value, and octal, hexadecimal and
 -- binary integer literals keep theirs
 CREATE FUNCTION fg33_esc() RETURNS text LANGUAGE plxgo AS $$ return "\u00e9|\U0001F600|\x41|\101|\b|\a\f\v|\x27\047\u0027" $$;

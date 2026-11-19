@@ -607,6 +607,40 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 	appendStringInfoChar(out, '\'');
 }
 
+/*
+ * Reject a format string that uses an explicit argument index (%[n]d). No
+ * lowering models it: each would consume '[' as the verb, or take the
+ * arguments in order, and print the wrong values. fn names the fmt function
+ * for the message. Every path that reads a format string calls this.
+ */
+static void
+go_check_argindex(Go *g, GoTok *tk, const char *fn)
+{
+	StringInfoData raw;
+	int			i;
+
+	initStringInfo(&raw);
+	go_emit_str(g, tk, &raw);	/* quoted, escapes decoded */
+	for (i = 1; i + 1 < raw.len; i++)
+	{
+		int			j = i + 1;
+
+		if (raw.data[i] != '%')
+			continue;
+		if (raw.data[j] == '%')
+		{
+			i++;
+			continue;
+		}
+		while (j + 1 < raw.len && strchr("-+ #0123456789.", raw.data[j]))
+			j++;
+		if (raw.data[j] == '[')
+			plx_err(g->cx, tk->line,
+					"fmt.%s explicit argument indexes (%%[n]) are not supported", fn);
+	}
+	pfree(raw.data);
+}
+
 /* emit a Go format string as one SQL format() accepts.
 
  * Go's verbs all render their operand as text, which is what format()'s %s
@@ -781,27 +815,6 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 
 	initStringInfo(&raw);
 	go_emit_str(g, &g->t[lp + 1], &raw);	/* quoted, escapes decoded */
-
-	/*
-	 * An explicit argument index (%[n]d) is not modelled: reject it rather
-	 * than consume '[' as the verb and print the rest as text.
-	 */
-	for (i = 1; i + 1 < raw.len; i++)
-	{
-		int			j = i + 1;
-
-		if (raw.data[i] != '%')
-			continue;
-		if (raw.data[j] == '%')
-		{
-			i++;
-			continue;
-		}
-		while (j + 1 < raw.len && strchr("-+ #0123456789.", raw.data[j]))
-			j++;
-		if (raw.data[j] == '[')
-			go_err(g, "fmt.Sprintf explicit argument indexes (%[n]) are not supported");
-	}
 
 	/* count directives so a mismatch can fall back before emitting anything */
 	for (i = 1; i + 1 < raw.len; i++)
@@ -1166,6 +1179,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 		if (go_ci(pkg, "fmt") && go_ci(meth, "Sprintf") &&
 			close > lp + 1 && g->t[lp + 1].kind == GO_STR)
 		{
+			go_check_argindex(g, &g->t[lp + 1], "Sprintf");
 			if (go_emit_sprintf_concat(g, lp, close, out))
 			{
 				*ni = close + 1;
@@ -2142,6 +2156,10 @@ go_simple(Go *g, int ind, int stop)
 				int			d = 0,
 							comma = -1,
 							j;
+
+				if (g->t[lp + 1].kind == GO_STR)
+					go_check_argindex(g, &g->t[lp + 1],
+									  go_ci(m, "Printf") ? "Printf" : "Sprintf");
 
 				for (j = lp + 1; j < close; j++)
 				{

@@ -194,7 +194,8 @@ first (`var a []int = p`). Go slice expressions (`a[i:j]`) are not translated.
 `fmt.Println`/`fmt.Printf` used as a statement raise a `NOTICE` with one `%`
 placeholder per value argument (space-separated); there the format string's
 literal text and directives are not reproduced, since SQL `RAISE` has no printf
-verbs.
+verbs. A format string with an explicit argument index (`%[1]d`) is rejected
+here too, because the values would print in the wrong order.
 
 `fmt.Sprintf` in an expression becomes a SQL concatenation, with the format
 string's literal text reproduced between the operands:

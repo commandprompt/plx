@@ -310,6 +310,12 @@ CREATE FUNCTION fg32_pad(s text) RETURNS text LANGUAGE plxgo AS $$
 $$;
 SELECT fg32_pad('ab') AS go_padded, fg32_pad('abcdefgh') AS go_whole, fg32_pad(NULL) IS NULL AS go_null;
 CREATE FUNCTION fg32_idx() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%[1]d", 5) $$;
+-- fmt.Printf, and a Sprintf with too many arguments for the || lowering,
+-- reject an explicit argument index too
+CREATE FUNCTION fg32_pfidx() RETURNS void LANGUAGE plxgo AS $$ fmt.Printf("%[2]d %[1]d\n", 1, 2) $$;
+CREATE FUNCTION fg32_manyidx() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("%[2]d", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+$$;
 
 -- A33: every Go string escape keeps its value, and octal, hexadecimal and
 -- binary integer literals keep theirs
