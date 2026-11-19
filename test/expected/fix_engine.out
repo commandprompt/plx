@@ -770,6 +770,29 @@ SELECT fe_a23_rb_f(-1.4, '12');
  -2 12 4 -1 0 -1 1
 (1 row)
 
+-- A23: Python int() of a string does not accept a fraction, as in Python
+CREATE FUNCTION fe_a23_str_py(s text) RETURNS text LANGUAGE plxpython3 AS $$
+v = s #:: text
+return f"{int(s)} {int(v)} {int('12')} {int(' 7 ')}"
+$$;
+SELECT fe_a23_str_py('42');
+ fe_a23_str_py 
+---------------
+ 42 42 12 7
+(1 row)
+
+SELECT fe_a23_str_py('4.7');
+ERROR:  invalid input syntax for type integer: "4.7"
+CONTEXT:  PL/pgSQL function fe_a23_str_py(text) line 6 at RETURN
+CREATE FUNCTION fe_a23_lit_py() RETURNS int LANGUAGE plxpython3 AS $$
+return int("4.7")
+$$;
+SELECT fe_a23_lit_py();
+ERROR:  invalid input syntax for type integer: "4.7"
+LINE 1: ('4.7')::integer
+         ^
+QUERY:  ('4.7')::integer
+CONTEXT:  PL/pgSQL function fe_a23_lit_py() line 3 at RETURN
 -- A23: int() of a boolean plx cannot see fails; a comparison makes it visible
 CREATE FUNCTION fe_a23_hb_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
 return int(starts_with(s, 'a'))

@@ -945,6 +945,82 @@ sql_is_boolish(Ctx *cx, const char *s, int len)
 }
 
 /*
+ * Is the SQL text s[0..len) visibly a string: one string literal, or a text,
+ * varchar or char parameter or local?  Python int() of a string must use
+ * ::integer, which rejects "4.7" as int() does; trunc(numeric) would accept
+ * it and give 4.
+ */
+static bool
+sql_is_textish(Ctx *cx, const char *s, int len)
+{
+	int			k;
+
+	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n'))
+		s++, len--;
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\n'))
+		len--;
+	if (len == 0)
+		return false;
+	if (s[0] == '\'' || ((s[0] == 'E' || s[0] == 'e') && len > 1 && s[1] == '\''))
+	{
+		/* one literal: its closing quote is the last character */
+		bool		esc = (s[0] != '\'');
+
+		for (k = esc ? 2 : 1; k < len; k++)
+		{
+			if (esc && s[k] == '\\')
+				k++;
+			else if (s[k] == '\'')
+			{
+				if (k + 1 < len && s[k + 1] == '\'')
+					k++;
+				else
+					return k == len - 1;
+			}
+		}
+		return false;
+	}
+	if (!plx_is_ident_start(s[0]))
+		return false;
+	for (k = 0; k < len; k++)
+		if (!plx_is_ident(s[k]))
+			return false;
+	if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+	{
+		int			a;
+
+		for (a = 0; a < cx->meta->nargs; a++)
+		{
+			const char *an = cx->meta->argnames[a];
+			Oid			at = cx->meta->argtypes[a];
+
+			if (an && (int) strlen(an) == len && pg_strncasecmp(an, s, len) == 0)
+				return at == TEXTOID || at == VARCHAROID || at == BPCHAROID;
+		}
+	}
+	{
+		PlxLocal2  *l = plx_local_find(cx, s, len);
+		char		buf[64];
+
+		if (l && !l->is_record && l->typ && type_norm(l->typ, buf, sizeof(buf)))
+		{
+			char	   *paren = strchr(buf, '(');
+
+			if (paren)
+				*paren = '\0';
+			k = (int) strlen(buf);
+			while (k > 0 && buf[k - 1] == ' ')
+				buf[--k] = '\0';
+			return strcmp(buf, "text") == 0 || strcmp(buf, "varchar") == 0 ||
+				strcmp(buf, "character varying") == 0 ||
+				strcmp(buf, "char") == 0 || strcmp(buf, "character") == 0 ||
+				strcmp(buf, "bpchar") == 0;
+		}
+	}
+	return false;
+}
+
+/*
  * Find where the operand ending at o[n] starts, for a postfix such as Ruby's
  * .to_i that is reached after its receiver was already written: a name or
  * number, a quoted string, a parenthesized or bracketed group with an
@@ -2600,9 +2676,12 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				 * Python int() truncates toward zero; a cast to integer rounds.
 				 * Go through trunc(numeric), which also parses text the way
 				 * int() does. A boolean has no numeric cast, so a value that is
-				 * visibly boolean keeps the plain cast (int(True) is 1).
+				 * visibly boolean keeps the plain cast (int(True) is 1). So does
+				 * a value that is visibly a string: int("4.7") is an error in
+				 * Python, and so is "4.7"::integer.
 				 */
-				if (s[i] == 'i' && !sql_is_boolish(cx, inner, (int) strlen(inner)))
+				if (s[i] == 'i' && !sql_is_boolish(cx, inner, (int) strlen(inner)) &&
+					!sql_is_textish(cx, inner, (int) strlen(inner)))
 					appendStringInfo(&out, "trunc((%s)::numeric)::integer", inner);
 				else
 					appendStringInfo(&out, "(%s)::%s", inner, cast);

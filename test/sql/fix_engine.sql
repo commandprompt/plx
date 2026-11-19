@@ -454,6 +454,17 @@ CREATE FUNCTION fe_a23_rb_f(x numeric, s text) RETURNS text LANGUAGE plxruby AS 
 return "#{(x * 2).to_i} #{s.to_i} #{'4.7'.to_i} #{x.to_s.to_i} #{1 + x.to_i} #{x.to_f.to_i} #{abs(x).to_i}"
 $$;
 SELECT fe_a23_rb_f(-1.4, '12');
+-- A23: Python int() of a string does not accept a fraction, as in Python
+CREATE FUNCTION fe_a23_str_py(s text) RETURNS text LANGUAGE plxpython3 AS $$
+v = s #:: text
+return f"{int(s)} {int(v)} {int('12')} {int(' 7 ')}"
+$$;
+SELECT fe_a23_str_py('42');
+SELECT fe_a23_str_py('4.7');
+CREATE FUNCTION fe_a23_lit_py() RETURNS int LANGUAGE plxpython3 AS $$
+return int("4.7")
+$$;
+SELECT fe_a23_lit_py();
 -- A23: int() of a boolean plx cannot see fails; a comparison makes it visible
 CREATE FUNCTION fe_a23_hb_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
 return int(starts_with(s, 'a'))

@@ -238,7 +238,10 @@ assert n > 0, "must be positive"
   or a comparison such as `int(a > b)`), `int(x)` becomes `(x)::integer`
   instead, because a boolean has no numeric cast. A boolean value plx cannot
   see, such as a function that returns boolean, fails with `cannot cast type
-  boolean to numeric`; write `int(f(x) == True)` or a `CASE`.
+  boolean to numeric`; write `int(f(x) == True)` or a `CASE`. When the argument
+  is visibly a string (a string literal, or a `text`, `varchar` or `char`
+  variable), `int(x)` also becomes `(x)::integer`, so `int("4.7")` fails with
+  `invalid input syntax for type integer`, as Python raises `ValueError`.
 - `None` becomes `NULL`.
 
 ## Building strings in a loop
