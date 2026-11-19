@@ -48,16 +48,26 @@ declarations are translated (see below).
 
 | Go | plpgsql |
 | --- | --- |
-| `var x int` | hoisted to `DECLARE x integer;` |
+| `var x int` | hoisted to `DECLARE x integer;`, plus `x := 0;` (Go's zero value) |
 | `var x int = 5` | `x integer;` plus `x := 5;` |
 | `var x = 5` / `x := 5` | type inferred (`integer`); `x := 5;` |
 | `var ( a int; b string )` | both hoisted |
 | `const pi = 3.14` | `pi CONSTANT double precision := 3.14;` |
 | `x = e` | `x := e;` |
-| `x += e` (also `-= *= /= %=`) | `x := x + (e);` |
+| `x += e` (also `-= *= /= %= <<= >>= &= \|= ^= &^=`) | `x := x + (e);` (`^=` uses `#`, `&^=` uses `& ~`) |
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
 | `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
+
+A `var` with no value starts at Go's zero value, as in Go: `0` for the
+integer and float types, `""` for `string`, and `false` for `bool`. plx assigns
+the zero value where the declaration stands, so a `var` inside a loop body is
+reset on every iteration. A slice declared without a value is `NULL`, which
+matches Go's nil slice (`len` of it is 0). An array `[N]T` with a number for
+`N` and one of those element types starts as `N` zero elements, as in Go:
+`var e [3]int` is `{0,0,0}`. Any other type, such as `time.Time` or a
+PostgreSQL type name, starts as `NULL`, and so does an array whose length is a
+constant name rather than a number.
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
 literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
@@ -72,20 +82,32 @@ literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
 | `if ... { } else if ... { } else { }` | `IF ... ELSE IF ... ELSE ... END IF;` |
 | `for { ... }` | `LOOP ... END LOOP;` |
 | `for cond { ... }` | `WHILE cond LOOP ... END LOOP;` |
-| `for i := A; i < B; i++ { ... }` | `FOR i IN A .. (B) - 1 LOOP ...` (an integer FOR) |
-| `for i := A; i > B; i-- { ... }` | `FOR i IN REVERSE A .. (B) + 1 LOOP ...` |
+| `for init; cond; post { ... }` | `init; WHILE cond LOOP ... post; END LOOP;` (see below) |
 | `for i := range n { ... }` | `FOR i IN 0 .. (n) - 1 LOOP ...` (integer range) |
 | `for _, v := range slice { ... }` | `FOREACH v IN ARRAY slice LOOP ...` |
 | `for _, row := range query("...") { ... }` | `FOR row IN EXECUTE '...' LOOP ...` |
-| `break` / `continue` | `EXIT;` / `CONTINUE;` |
+| `break` / `continue` | `EXIT;` / `CONTINUE;` (in a three-clause `for`, `continue` leaves the body block; in a `switch`, `break` leaves the switch; see below) |
 | `return e` | `RETURN e;` |
 
-A counting `for` (init `i := A`, condition `i < B`/`i <= B`/`i > B`/`i >= B`
-against the same variable, and post `i++`/`i--`/`i += S`/`i -= S`) lowers to a
-plpgsql integer `FOR`, so `continue` still advances the loop variable. Any other
-three-clause `for` lowers to a `WHILE` with the post statement at the end of the
-body; there, as in plpgsql, `continue` re-tests the condition without running the
-post statement, so prefer the counting form when you use `continue`.
+A three-clause `for` keeps Go's meaning. plx tests the condition before every
+pass and runs the post statement after the body, so the body may change the
+loop variable or the bound (`for i := 0; i < len(s); i++` sees elements that the
+body appends). `continue` jumps to the post statement, not past it: plx wraps
+the body in a labelled block and lowers `continue` to `EXIT` of that block.
+
+When the init statement declares the loop variable (`for i := A; ...`), the
+variable belongs to the loop, as in Go: plx declares it in a block around the
+loop, so it does not change a variable of the same name outside the loop. `A`
+is the variable's default value in that block, so `A` may read an outer
+variable of the same name (`for i := i; ...` starts at the outer `i`). Its
+type comes from `A`: a literal or one of the forms `:=` infers (below), else
+the type of the first variable in `A` (`for i := n - 1; ...` gives `i` the
+type of `n`). An element of a slice declared in the body gives the slice's
+element type (`for i := s[0]; ...`). If the first name in `A` is a function
+call, a row field (`r.n`) or an element of a slice parameter, plx cannot tell the
+type and rejects the function; declare the variable before the loop
+(`var i int`) and write `for i = A; ...`. With `for i = A; ...` the loop updates that variable, so it
+holds its final value after the loop.
 
 In a `range` loop over an integer, the single variable is the index. Over a
 slice, use `for _, v := range s`. The value variable's type is inferred from the
@@ -96,9 +118,17 @@ not supported; walk a slice by index with a counting loop
 
 ### switch
 
-A `switch` becomes an `IF`/`ELSIF`/`ELSE` chain (Go has no implicit
-fall-through). Both the tagged form and the tagless (boolean-case) form are
-supported. Comma-separated case values are OR-ed.
+A tagged `switch x { ... }` becomes a plpgsql `CASE x WHEN ... END CASE`, and a
+tagless `switch { ... }` (boolean cases) becomes an `IF`/`ELSIF`/`ELSE` chain.
+Go has no implicit fall-through, and neither form falls through. As in Go, the
+tag is evaluated once, and each case value is compared with it as a whole, so
+`case a || b:` matches when the tag equals `a || b`. Comma-separated case values
+match if any one matches. `default` runs only when no case matches, wherever it
+stands in the switch: plx always emits it as the final `ELSE`.
+
+`break` inside a switch leaves the switch, not a loop around it. plx puts such
+a switch in a labelled block and lowers `break` to `EXIT` of that block. A
+`break` in a loop nested inside the switch still leaves only that loop.
 
 ```sql
 CREATE FUNCTION classify(n int) RETURNS text LANGUAGE plxgo AS $$
@@ -119,17 +149,48 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
+| `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
+| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
-| `^`, `&^` | not supported: `CREATE FUNCTION` rejects them, because SQL's `^` is a power and SQL has no operator with Go's meaning and precedence for XOR, NOT or AND NOT |
-| `"..."`, `` `...` ``, `'x'` | SQL string literal. Escapes are decoded as Go decodes them, including `\x41`, `\101`, `\u00e9` and `\U0001F600`; an escape that gives NUL or bytes that are not valid text is rejected |
-| `0755`, `0o755`, `0x1F`, `0b101`, `1_000` | decimal integer (`493`, `493`, `31`, `5`, `1000`) |
+| `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
+| `0x1F`, `0o17`, `017`, `0b101`, `1_000` | the decimal value (`31`, `15`, `15`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` / `::bigint` / `::double precision` / `::text` |
+| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
+
+plx decodes every escape Go defines in an interpreted string or rune literal:
+`\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each in a
+string, and a Unicode character in a rune, so `'\xe9'` is `é`, as in Go), and
+`\uHHHH` and `\UHHHHHHHH` (a Unicode character, stored in the database
+encoding). As in Go, any other escape is an error. A literal that would contain
+a NUL character, or whose `\x` or octal bytes do not form valid text in the
+database encoding, is rejected, because PostgreSQL text cannot hold it.
+
+Integer literals in hexadecimal, octal and binary, and literals with `_`
+separators, become plain decimal numbers, so they mean the same on every
+supported PostgreSQL version. A number with letters Go does not allow (such as
+`12abc`), a hexadecimal float and an imaginary literal are rejected.
+
+A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
+3 and `int(-2.7)` is -2. A SQL cast would round instead. plx casts an integer
+literal, or a local or parameter of an integer type, directly. For a float or
+`numeric` literal, local or parameter, it calls `trunc` first. For any other
+operand, such as an expression or a row field, the type is known only when the
+function runs. plx evaluates the operand once and then chooses by its type: an
+integer casts exactly, a float goes through `trunc`, and any other value, such
+as `numeric` or `text`, goes through `trunc` as `numeric`. So `int64(n + 1)`
+and `int64(r.id)` stay exact beyond 2^53.
+
+SQL ranks `<<`, `>>`, `&` and `|` below `+` and `-`, while Go ranks `<<`, `>>`,
+`&` and `&^` with `*`, and `|` and `^` with `+`. When an expression uses a
+bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
+`(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
+binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
+plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 
 ### Slices and indexing
 
@@ -144,7 +205,8 @@ first (`var a []int = p`). Go slice expressions (`a[i:j]`) are not translated.
 `fmt.Println`/`fmt.Printf` used as a statement raise a `NOTICE` with one `%`
 placeholder per value argument (space-separated); there the format string's
 literal text and directives are not reproduced, since SQL `RAISE` has no printf
-verbs.
+verbs. A format string with an explicit argument index (`%[1]d`) is rejected
+here too, because the values would print in the wrong order.
 
 `fmt.Sprintf` in an expression becomes a SQL concatenation, with the format
 string's literal text reproduced between the operands:
@@ -162,7 +224,9 @@ as empty. A message built for `panic` is the exception and keeps each operand's
 empty-string fallback, so one NULL cannot swallow the message.
 
 Every verb renders its operand as text. A `-` flag and a width are kept and
-become `rpad`/`lpad`, so `%-8d` still pads to eight columns. Go's other flags
+become `rpad`/`lpad`, so `%-8d` still pads to eight columns. As in Go, the width
+is a minimum: an operand longer than the width prints in full. An explicit
+argument index such as `%[1]d` is not supported, and plx rejects the function. Go's other flags
 and its precision field are dropped, so `%.2f` prints the operand's full text
 rather than rounding it to two decimal places. Verbs that change an operand's
 representation rather than its padding are affected the same way: `%x`, `%o`,

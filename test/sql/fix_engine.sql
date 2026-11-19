@@ -133,14 +133,17 @@ CREATE FUNCTION fe_a7_xor_js() RETURNS int LANGUAGE plxjs AS $$
 return 5 ^ 3;
 $$;
 SELECT fe_a7_xor_js();
--- A7: Go ^ is XOR or NOT, not a power: plxgo rejects it
+-- A7: Go ^ is XOR or NOT, not a power, and &^ is AND NOT (A30 in
+-- fix_go computes them; 6 ^ 3 is 5 and 7 &^ 2 is 5, as in Go)
 CREATE FUNCTION fe_a7_xor_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
 return a ^ b
 $$;
+SELECT fe_a7_xor_go(6, 3);
 CREATE FUNCTION fe_a7_andnot_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
 a &^= b
 return a
 $$;
+SELECT fe_a7_andnot_go(7, 2);
 -- A7: SQL gives ^, &, | and the shifts one precedence, so a mix that
 -- the dialect would group differently is rejected instead of computed wrong
 CREATE FUNCTION fe_a7_mix_py(a int, b int, c int) RETURNS int LANGUAGE plxpython3 AS $$

@@ -32,7 +32,7 @@ SELECT grade(95), grade(83), grade(72), grade(40);
 
 ## Accumulating loop
 
-A counting `for i := 1; i <= n; i++` lowers to a plpgsql integer `FOR`. The accumulator uses the short declaration `sum := 0`, so plx infers its type as `integer` from the literal. Initialize it to `0`: a bare `var sum int` starts as `NULL`, and `NULL += i` stays `NULL`.
+A three-clause `for i := 1; i <= n; i++` lowers to a plpgsql `WHILE` loop that tests `i <= n` before every pass, as Go does. The accumulator uses the short declaration `sum := 0`, so plx infers its type as `integer` from the literal. A bare `var sum int` works too: it starts at 0, Go's zero value.
 
 ```go
 CREATE FUNCTION sum_to(n int) RETURNS int LANGUAGE plxgo AS $$
@@ -290,7 +290,7 @@ SELECT slice_demo();
 
 ## Type conversions and the standard library
 
-`float64(x)` and `int(x)` become `::double precision` and `::integer` casts, and `string(x)` becomes `::text`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
+`float64(x)` becomes a `::double precision` cast, and `string(x)` becomes `::text`. `int(x)` truncates toward zero, as in Go, and then casts to `::integer`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
 
 ```go
 CREATE FUNCTION describe_num(x int) RETURNS text LANGUAGE plxgo AS $$

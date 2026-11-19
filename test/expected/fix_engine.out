@@ -189,7 +189,7 @@ SELECT fe_a6_go();
 CREATE FUNCTION fe_a6_go_bad() RETURNS int LANGUAGE plxgo AS $$
 return 0789
 $$;
-ERROR:  plxgo: invalid digit in octal literal: 0789
+ERROR:  plxgo: invalid number literal "0789"
 DETAIL:  at plxgo source line 2
 -- A7: ^ is bitwise XOR in Ruby, PHP, JS, TS and Python, not SQL exponent
 CREATE FUNCTION fe_a7_xor_rb(a int, b int) RETURNS int LANGUAGE plxruby AS $$
@@ -210,18 +210,27 @@ SELECT fe_a7_xor_js();
             6
 (1 row)
 
--- A7: Go ^ is XOR or NOT, not a power: plxgo rejects it
+-- A7: Go ^ is XOR or NOT, not a power, and &^ is AND NOT (A30 in
+-- fix_go computes them; 6 ^ 3 is 5 and 7 &^ 2 is 5, as in Go)
 CREATE FUNCTION fe_a7_xor_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
 return a ^ b
 $$;
-ERROR:  plxgo: the operators ^ and &^ are not supported (in SQL, ^ is the power operator)
-DETAIL:  at plxgo source line 2
+SELECT fe_a7_xor_go(6, 3);
+ fe_a7_xor_go 
+--------------
+            5
+(1 row)
+
 CREATE FUNCTION fe_a7_andnot_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
 a &^= b
 return a
 $$;
-ERROR:  plxgo: the operators ^ and &^ are not supported (in SQL, ^ is the power operator)
-DETAIL:  at plxgo source line 2
+SELECT fe_a7_andnot_go(7, 2);
+ fe_a7_andnot_go 
+-----------------
+               5
+(1 row)
+
 -- A7: SQL gives ^, &, | and the shifts one precedence, so a mix that
 -- the dialect would group differently is rejected instead of computed wrong
 CREATE FUNCTION fe_a7_mix_py(a int, b int, c int) RETURNS int LANGUAGE plxpython3 AS $$
@@ -453,12 +462,13 @@ SELECT encode(convert_to(fe_a11_go(), 'UTF8'), 'hex') AS go;
 CREATE FUNCTION fe_a11_nul_go() RETURNS text LANGUAGE plxgo AS $$
 return "a\x00b"
 $$;
-ERROR:  plxgo: a string cannot contain a NUL character (\0)
+ERROR:  plxgo: a string literal cannot contain a NUL character
 DETAIL:  at plxgo source line 2
 CREATE FUNCTION fe_a11_bad_go() RETURNS text LANGUAGE plxgo AS $$
 return "a\xffb"
 $$;
-ERROR:  invalid byte sequence for encoding "UTF8": 0xff
+ERROR:  plxgo: a string literal's escapes do not form valid text in the database encoding
+DETAIL:  at plxgo source line 2
 -- A12: ? and : inside a template literal are text, not a ternary
 CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
 let s = `is it ${x}? yes: no`;
