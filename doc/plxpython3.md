@@ -222,6 +222,9 @@ assert n > 0, "must be positive"
 - Comparison: `==` and `!=` map to `=` and `<>`. `x is None` becomes `x IS NULL`
   and `x is not None` becomes `x IS NOT NULL`.
 - Boolean: `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers.
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
 - `None` becomes `NULL`.
 

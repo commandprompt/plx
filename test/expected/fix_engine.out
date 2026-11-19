@@ -110,3 +110,59 @@ return 0789
 $$;
 ERROR:  plxruby: invalid digit in octal literal: 0789
 DETAIL:  at plxruby source line 2
+-- A7: ^ is bitwise XOR in Ruby, PHP, JS, TS and Python, not SQL exponent
+CREATE FUNCTION fe_a7_xor_rb(a int, b int) RETURNS int LANGUAGE plxruby AS $$
+return a ^ b
+$$;
+SELECT fe_a7_xor_rb(6, 3);
+ fe_a7_xor_rb 
+--------------
+            5
+(1 row)
+
+CREATE FUNCTION fe_a7_xor_js() RETURNS int LANGUAGE plxjs AS $$
+return 5 ^ 3;
+$$;
+SELECT fe_a7_xor_js();
+ fe_a7_xor_js 
+--------------
+            6
+(1 row)
+
+-- A7: ** is right-associative and binds tighter than unary minus
+CREATE FUNCTION fe_a7_pow_py() RETURNS numeric LANGUAGE plxpython3 AS $$
+return 2 ** 3 ** 2
+$$;
+SELECT fe_a7_pow_py();
+ fe_a7_pow_py 
+--------------
+          512
+(1 row)
+
+CREATE FUNCTION fe_a7_powneg_rb() RETURNS numeric LANGUAGE plxruby AS $$
+return -2 ** 2
+$$;
+SELECT fe_a7_powneg_rb();
+ fe_a7_powneg_rb 
+-----------------
+              -4
+(1 row)
+
+CREATE FUNCTION fe_a7_pow_js(x int) RETURNS numeric LANGUAGE plxjs AS $$
+return (x + 1) ** 2 * 2 + abs(-x) ** 2 ** 1;
+$$;
+SELECT fe_a7_pow_js(2);
+ fe_a7_pow_js 
+--------------
+           22
+(1 row)
+
+CREATE FUNCTION fe_a7_pow_php() RETURNS numeric LANGUAGE plxphp AS $$
+return 2 ** -1;
+$$;
+SELECT fe_a7_pow_php();
+ fe_a7_pow_php 
+---------------
+           0.5
+(1 row)
+

@@ -243,6 +243,9 @@ assert($n > 0, "must be positive");
   `if`/`while` condition or a ternary test. Elsewhere (assignments, `return`)
   it passes through as SQL `||` (string concatenation), so write `OR` there:
   `$ok = $a OR $b /*:: boolean */;`.
+- Power and XOR: `$a ** $b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `$a ^ $b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers.
 - Ternary: `$c ? $a : $b` becomes `CASE WHEN $c THEN $a ELSE $b END`.
 - `null` becomes `NULL`.
 

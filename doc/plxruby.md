@@ -265,6 +265,9 @@ assert(n > 0, "must be positive")
   and `NOT`. `||` maps to `OR` only in a condition (`if`, `unless`, `while`,
   `until`, or a ternary test); elsewhere it passes through as SQL `||`
   (string concatenation), so write `or` there.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
 - Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
   `::double precision`. `nil` becomes `NULL`.

@@ -1200,6 +1200,246 @@ note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
 }
 
 /*
+ * Power operator support. Ruby, PHP, JS, TS and Python make ** right-
+ * associative and bind it tighter than unary minus: 2 ** 3 ** 2 is 512 and
+ * -2 ** 2 is -4. SQL ^ is left-associative and binds looser than unary minus,
+ * so ** cannot be replaced by ^ in place. Instead the operands are found and
+ * the power is emitted as ((a) ^ (b)).
+ */
+
+/* skip a quoted string starting at s[i]; returns the index after it */
+static int
+skip_quoted(const char *s, int len, int i)
+{
+	char		q = s[i];
+
+	for (i++; i < len && s[i] != q; i++)
+		if (s[i] == '\\' && i + 1 < len)
+			i++;
+	return (i < len) ? i + 1 : len;
+}
+
+/* first ** operator outside strings, or -1 (not **= and not ***) */
+static int
+find_pow(const char *s, int len)
+{
+	int			i;
+
+	for (i = 0; i + 1 < len; i++)
+	{
+		if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+		{
+			i = skip_quoted(s, len, i) - 1;
+			continue;
+		}
+		if (s[i] == '*' && s[i + 1] == '*' && (i == 0 || s[i - 1] != '*') &&
+			!(i + 2 < len && (s[i + 2] == '*' || s[i + 2] == '=')))
+			return i;
+	}
+	return -1;
+}
+
+static bool
+pow_word_char(char c)
+{
+	return plx_is_ident(c) || c == '$' || c == '@';
+}
+
+/*
+ * Start of the operand that ends just before the ** at p: a name, number,
+ * string or bracketed group, with any calls, subscripts and .field parts.
+ * A '.' is not crossed when it is the dialect's string-concatenation operator.
+ */
+static int
+pow_left(const char *s, int p, bool dot_is_concat)
+{
+	int			i = p;
+
+	while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' ||
+					 s[i - 1] == '\n' || s[i - 1] == '\r'))
+		i--;
+	for (;;)
+	{
+		if (i > 0 && (s[i - 1] == ')' || s[i - 1] == ']'))
+		{
+			int			depth = 0;
+
+			do
+			{
+				i--;
+				if (s[i] == ')' || s[i] == ']')
+					depth++;
+				else if (s[i] == '(' || s[i] == '[')
+					depth--;
+			} while (i > 0 && depth > 0);
+			continue;
+		}
+		if (i > 0 && (s[i - 1] == '\'' || s[i - 1] == '"'))
+		{
+			char		q = s[i - 1];
+
+			i--;
+			while (i > 0 && s[i - 1] != q)
+				i--;
+			if (i > 0)
+				i--;
+			continue;
+		}
+		if (i > 0 && pow_word_char(s[i - 1]))
+		{
+			while (i > 0 && pow_word_char(s[i - 1]))
+				i--;
+			/* the sign of a number's exponent: 1e-3 */
+			if (i > 1 && (s[i - 1] == '-' || s[i - 1] == '+') &&
+				(s[i - 2] == 'e' || s[i - 2] == 'E') &&
+				i > 2 && s[i - 3] >= '0' && s[i - 3] <= '9')
+			{
+				i--;
+				continue;
+			}
+			if (i > 0 && s[i - 1] == '.' && !(i > 1 && s[i - 2] == '.') &&
+				(!dot_is_concat || (s[i] >= '0' && s[i] <= '9')))
+			{
+				i--;
+				continue;
+			}
+			break;
+		}
+		break;
+	}
+	return i;
+}
+
+/*
+ * End of the operand that starts at s[i], just after a **: unary operators,
+ * a primary with its calls, subscripts and .field parts, and, since ** is
+ * right-associative, any further ** and its operand.
+ */
+static int
+pow_right(const char *s, int len, int i)
+{
+	for (;;)
+	{
+		int			start;
+
+		while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+						   s[i] == '\r' || s[i] == '-' || s[i] == '+' ||
+						   s[i] == '~' || s[i] == '!'))
+			i++;
+		start = i;
+		if (i < len && (s[i] == '\'' || s[i] == '"' || s[i] == '`'))
+			i = skip_quoted(s, len, i);
+		else
+			while (i < len && (pow_word_char(s[i]) ||
+							   (s[i] == '.' && i + 1 < len && s[i + 1] >= '0' &&
+								s[i + 1] <= '9' && i > start && s[i - 1] >= '0' &&
+								s[i - 1] <= '9') ||
+							   ((s[i] == '-' || s[i] == '+') && i > start + 1 &&
+								(s[i - 1] == 'e' || s[i - 1] == 'E') &&
+								s[start] >= '0' && s[start] <= '9')))
+				i++;
+		for (;;)
+		{
+			if (i < len && (s[i] == '(' || s[i] == '['))
+			{
+				int			depth = 0;
+
+				do
+				{
+					if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+					{
+						i = skip_quoted(s, len, i);
+						continue;
+					}
+					if (s[i] == '(' || s[i] == '[')
+						depth++;
+					else if (s[i] == ')' || s[i] == ']')
+						depth--;
+					i++;
+				} while (i < len && depth > 0);
+				continue;
+			}
+			if (i + 1 < len && s[i] == '.' && s[i + 1] != '.' && i > start)
+			{
+				i++;
+				while (i < len && pow_word_char(s[i]))
+					i++;
+				continue;
+			}
+			break;
+		}
+		if (i == start)
+			return -1;			/* no operand */
+		{
+			int			k = i;
+
+			while (k < len && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+				k++;
+			if (k + 1 < len && s[k] == '*' && s[k + 1] == '*' &&
+				!(k + 2 < len && (s[k + 2] == '*' || s[k + 2] == '=')))
+			{
+				i = k + 2;
+				continue;
+			}
+		}
+		return i;
+	}
+}
+
+/*
+ * Rewrite an expression that contains a ** operator. Each power becomes
+ * ((a) ^ (b)), and the text between powers is rewritten as usual. Returns
+ * NULL when s has no ** this can handle.
+ */
+static char *
+rewrite_pow(Ctx *cx, const char *s, int len, bool boolctx)
+{
+	StringInfoData out;
+	bool		any = false;
+
+	if (names_fold_case(cx))
+		return NULL;			/* COBOL keeps its own ** handling */
+	initStringInfo(&out);
+	for (;;)
+	{
+		int			p = find_pow(s, len);
+		int			l, r;
+		char	   *pre, *a, *b;
+
+		if (p < 0)
+			break;
+		l = pow_left(s, p, cx->surf->concat_op == '.');
+		r = pow_right(s, len, p + 2);
+		if (l == p || r < 0)
+			break;				/* f(**kw) and the like: leave as before */
+		pre = plx_rewrite_expr(cx, s, l, boolctx);
+		a = plx_rewrite_expr(cx, s + l, p - l, false);
+		b = plx_rewrite_expr(cx, s + p + 2, r - p - 2, false);
+		appendStringInfo(&out, "%s%s((%s) ^ (%s))", pre, *pre ? " " : "", a, b);
+		pfree(pre);
+		pfree(a);
+		pfree(b);
+		any = true;
+		s += r;
+		len -= r;
+	}
+	if (!any)
+	{
+		pfree(out.data);
+		return NULL;
+	}
+	if (len > 0)
+	{
+		char	   *post = plx_rewrite_expr(cx, s, len, boolctx);
+
+		if (*post)
+			appendStringInfo(&out, " %s", post);
+		pfree(post);
+	}
+	return out.data;
+}
+
+/*
  * rewrite_expr: single left-to-right pass over source; honors strings; never
  * re-scans its own output. boolctx selects OR vs || and negation handling.
  */
@@ -1261,6 +1501,14 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				return r;
 			}
 		}
+	}
+
+	/* ** next: it needs its operands, so it cannot be rewritten in place */
+	{
+		char	   *r = rewrite_pow(cx, s, len, boolctx);
+
+		if (r)
+			return r;
 	}
 
 	initStringInfo(&out);
@@ -1774,6 +2022,14 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				if (ol == 2 && strncmp(op, "**", 2) == 0)
 				{
 					appendStringInfoChar(&out, '^');
+					i = j;
+					continue;
+				}
+				/* ^ is bitwise XOR in the C-family and scripting dialects;
+				 * in SQL it is the exponent, and # is XOR */
+				if (ol == 1 && op[0] == '^' && !names_fold_case(cx))
+				{
+					appendStringInfoString(&out, " # ");
 					i = j;
 					continue;
 				}
