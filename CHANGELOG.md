@@ -179,6 +179,10 @@ The first two entries are breaking changes, and the third says how to upgrade.
   starts, so `v = 1; v = 2; c = v + 1 #:: int const` gave `c = 2`. A constant
   may now use only literals, parameters and earlier constants; reading another
   local is rejected at `CREATE FUNCTION`.
+- `.to_s`, `.to_i` and `.to_f` were rewritten as casts wherever the text
+  appeared, so a field whose name starts with one of them broke:
+  `r.to_status` became `r::texttatus`. They are now rewritten only as whole
+  words, and `x.to_s()` with an empty argument list works too.
 
 ## [2.0.1] - 2026-08-25
 

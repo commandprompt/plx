@@ -298,3 +298,12 @@ $$;
 SELECT f_fold_const(5);
 SELECT regexp_replace(prosrc, '/\*plx-orig.*', '') FROM pg_proc WHERE proname = 'f_fold_const';
 DROP FUNCTION f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php(), f_fold_const(int);
+
+-- .to_s / .to_i / .to_f are rewritten as whole words only, so a field whose
+-- name starts with to_s, to_i or to_f is left alone; x.to_s() also works
+CREATE FUNCTION f_to_cast(n int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("select 'shipped' as to_status, 'x' as to_s_name, 2 as to_items")
+return "#{r.to_status}/#{r.to_s_name}/#{r.to_items}/#{n.to_s}/#{n.to_s()}/#{'4.5'.to_f}/#{'12'.to_i + 1}"
+$$;
+SELECT f_to_cast(3);
+DROP FUNCTION f_to_cast(int);
