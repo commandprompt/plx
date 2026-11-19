@@ -151,3 +151,39 @@ end
 return total
 $$;
 \set VERBOSITY default
+-- A49: plxpython3 rejects triple-quoted strings and string prefixes other than f
+\set VERBOSITY terse
+CREATE FUNCTION fr_a49_tq_dq() RETURNS text LANGUAGE plxpython3 AS $$
+return """ab"""
+$$;
+CREATE FUNCTION fr_a49_tq_sq() RETURNS text LANGUAGE plxpython3 AS $$
+return '''ab'''
+$$;
+CREATE FUNCTION fr_a49_ftq() RETURNS text LANGUAGE plxpython3 AS $$
+return f"""a{1}b"""
+$$;
+CREATE FUNCTION fr_a49_raw() RETURNS text LANGUAGE plxpython3 AS $$
+return r"a\nb"
+$$;
+CREATE FUNCTION fr_a49_bytes() RETURNS text LANGUAGE plxpython3 AS $$
+return b'ab'
+$$;
+CREATE FUNCTION fr_a49_uni() RETURNS text LANGUAGE plxpython3 AS $$
+return u"ab"
+$$;
+CREATE FUNCTION fr_a49_rawf() RETURNS text LANGUAGE plxpython3 AS $$
+return rf"a{1}"
+$$;
+CREATE FUNCTION fr_a49_nested() RETURNS text LANGUAGE plxpython3 AS $$
+return f"{r'a\nb'}"
+$$;
+CREATE FUNCTION fr_a49_nested_tq() RETURNS text LANGUAGE plxpython3 AS $$
+return f"{'''x'''}"
+$$;
+-- plain strings and f-strings still work
+CREATE FUNCTION fr_a49_plain() RETURNS text LANGUAGE plxpython3 AS $$
+br = "x"
+return f"{br}'q'"
+$$;
+SELECT fr_a49_plain();
+\set VERBOSITY default

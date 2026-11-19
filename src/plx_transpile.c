@@ -84,6 +84,28 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 
 /* ---------------------------------------------------------------- lexer */
 
+/*
+ * plxpython3 only (the one surface with f-strings): reject the Python string
+ * forms the literal emitter cannot lower. A triple-quoted string would keep
+ * its extra quotes in the value, and a prefix such as r, b or u would be
+ * emitted as code in front of the literal. pfx/plen is the identifier just
+ * before q (plen 0 if none); q points at the character after it.
+ */
+static void
+py_check_string_start(Ctx *cx, int line, const char *pfx, int plen,
+					  const char *q, const char *end)
+{
+	if (q >= end || (*q != '"' && *q != '\''))
+		return;
+	if (plen > 0 && plen <= 2 && (int) strspn(pfx, "rRbBuUfF") >= plen &&
+		!(plen == 1 && (pfx[0] == 'f' || pfx[0] == 'F')))
+		plx_err(cx, line, "string prefix \"%.*s\" is not supported; only f-strings are",
+				plen, pfx);
+	if (end - q >= 3 && q[1] == q[0] && q[2] == q[0])
+		plx_err(cx, line, "triple-quoted strings are not supported; use \"...\" or '...'");
+}
+
+
 static Kw
 kw_lookup(const PlxSurface *surf, const char *s, int len)
 {
@@ -368,6 +390,7 @@ plx_lex(Ctx *cx)
 		{
 			char		q = p[1];
 
+			py_check_string_start(cx, line, NULL, 0, p + 1, end);
 			p += 2;
 			while (p < end && *p != q)
 			{
@@ -389,6 +412,8 @@ plx_lex(Ctx *cx)
 
 			while (p < end && plx_is_ident(*p))
 				p++;
+			if (surf->fstrings)
+				py_check_string_start(cx, line, tokstart, (int) (p - tokstart), p, end);
 			if (*p == '?' || *p == '!')
 				p++;			/* ruby method suffix */
 			k = kw_lookup(surf, tokstart, (int) (p - tokstart));
@@ -458,6 +483,8 @@ plx_lex(Ctx *cx)
 		{
 			char		q = *p;
 
+			if (surf->fstrings)
+				py_check_string_start(cx, line, NULL, 0, p, end);
 			p++;
 			while (p < end && *p != q)
 			{
@@ -1138,6 +1165,17 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	{
 		char		c = s[i];
 
+		/* Python: an f-string interpolation can hold a string the lexer never saw */
+		if (surf->fstrings && (c == '\'' || c == '"'))
+			py_check_string_start(cx, cx->t[cx->pos].line, NULL, 0, s + i, s + len);
+		if (surf->fstrings && plx_is_ident_start(c) && (i == 0 || !plx_is_ident(s[i - 1])))
+		{
+			int			j = i;
+
+			while (j < len && plx_is_ident(s[j]))
+				j++;
+			py_check_string_start(cx, cx->t[cx->pos].line, s + i, j - i, s + j, s + len);
+		}
 		/* strip variable sigil ($foo -> foo) */
 		if (surf->var_sigil && c == surf->var_sigil && i + 1 < len && plx_is_ident_start(s[i + 1]))
 		{

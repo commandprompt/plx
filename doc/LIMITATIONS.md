@@ -152,6 +152,7 @@ fail when the function runs.
 - `import`, modules, and the Python standard library.
 - Tuples, lists, dicts, and sets as general values.
 - `match`/`case`, and the conditional expression `a if c else b`.
+- Triple-quoted strings, and string prefixes other than `f` (`r`, `b`, `u`).
 - Floor division `//`; `/` on integers truncates toward zero.
 
 ### plxgo ([chapter](plxgo.md))

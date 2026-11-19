@@ -304,6 +304,9 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.
+- Triple-quoted strings (`"""..."""` and `'''...'''`), and string prefixes
+  other than `f`: raw strings (`r"..."`), byte strings (`b"..."`), `u"..."`, and
+  combined prefixes such as `rf"..."`. A plain `"..."` string may span lines.
 
 Not translated:
 
