@@ -259,7 +259,8 @@ assert(n > 0, "must be positive")
 ## Expressions
 
 - Interpolation: `"total is #{amount}"` becomes `'total is ' || (amount)::text`.
-  Single-quoted strings do not interpolate.
+  Single-quoted strings do not interpolate. Adjacent literals, `"a" 'b'`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x == nil` becomes `x IS NULL`.
 - Boolean: `&&`, `!`, `and`, `or`, and `not` map to `AND`, `NOT`, `AND`, `OR`,
   and `NOT`. `||` maps to `OR` only in a condition (`if`, `unless`, `while`,

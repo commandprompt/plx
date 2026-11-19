@@ -219,6 +219,9 @@ assert n > 0, "must be positive"
 
 - Interpolation: f-strings, `f"total is {amount}"`. Plain strings do not
   interpolate. `{{` and `}}` are literal braces.
+- Strings: a triple-quoted string (`"""..."""`, `'''...'''`, or `f"""..."""`)
+  is one literal and may span lines. Adjacent literals, `"a" "b"`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x is None` becomes `x IS NULL`
   and `x is not None` becomes `x IS NOT NULL`.
 - Boolean: `and`, `or`, `not` map to `AND`, `OR`, `NOT`.

@@ -159,3 +159,38 @@ CREATE FUNCTION fe_a12_tern_js(x int) RETURNS text LANGUAGE plxjs AS $$
 return x > 0 ? `pos? ${x}` : `neg: ${x}`;
 $$;
 SELECT fe_a12_tern_js(2), fe_a12_tern_js(-2);
+
+-- A22: adjacent string literals concatenate, as in Ruby and Python
+CREATE FUNCTION fe_a22_rb() RETURNS text LANGUAGE plxruby AS $$
+return "a""b"
+$$;
+SELECT fe_a22_rb();
+CREATE FUNCTION fe_a22_py() RETURNS text LANGUAGE plxpython3 AS $$
+return 'a''b' "c"
+$$;
+SELECT fe_a22_py();
+-- A22: an escape string next to a raw string ending in a backslash stays closed
+CREATE FUNCTION fe_a22_esc_rb() RETURNS text LANGUAGE plxruby AS $$
+x = "\n"'x\\' #:: text
+return x
+$$;
+SELECT replace(fe_a22_esc_rb(), E'\n', '|');
+-- A22: a Python triple-quoted string is one literal
+CREATE FUNCTION fe_a22_triple_py() RETURNS text LANGUAGE plxpython3 AS $$
+return """hello"""
+$$;
+SELECT fe_a22_triple_py();
+CREATE FUNCTION fe_a22_triple2_py(n int) RETURNS text LANGUAGE plxpython3 AS $$
+s = f"""say "hi" {n}
+it's '''here'''""" #:: text
+return s
+$$;
+SELECT replace(fe_a22_triple2_py(1), E'\n', '|');
+-- A22: line numbers after a multi-line triple-quoted string stay right
+CREATE FUNCTION fe_a22_line_py() RETURNS int LANGUAGE plxpython3 AS $$
+s = """a
+b
+c"""
+break
+return 1
+$$;

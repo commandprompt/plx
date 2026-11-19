@@ -134,6 +134,39 @@ suppress_newline(Tok *t, int n)
 	}
 }
 
+/*
+ * Scan a quoted string whose opening quote is at p; return the position after
+ * its closing quote (or end). A Python triple-quoted string ("""...""" or
+ * '''...''') runs to the next three quotes, may span lines, and counts them
+ * in *line so later line numbers stay right.
+ */
+static const char *
+lex_string_body(const char *p, const char *end, char q, bool triple, int *line)
+{
+	p += triple ? 3 : 1;
+	while (p < end)
+	{
+		if (*p == '\\' && p + 1 < end)
+		{
+			if (triple && p[1] == '\n')
+				(*line)++;
+			p += 2;
+			continue;
+		}
+		if (triple)
+		{
+			if (p + 2 < end && p[0] == q && p[1] == q && p[2] == q)
+				return p + 3;
+			if (*p == '\n')
+				(*line)++;
+		}
+		else if (*p == q)
+			return p + 1;
+		p++;
+	}
+	return end;
+}
+
 void
 plx_lex(Ctx *cx)
 {
@@ -367,20 +400,14 @@ plx_lex(Ctx *cx)
 			(p[1] == '"' || p[1] == '\''))
 		{
 			char		q = p[1];
+			bool		triple = (p + 3 < end && p[2] == q && p[3] == q);
 
-			p += 2;
-			while (p < end && *p != q)
-			{
-				if (*p == '\\' && p + 1 < end)
-					p++;
-				p++;
-			}
-			if (p < end)
-				p++;
+			p = lex_string_body(p + 1, end, q, triple, &line);
 			PUSH(T_STRING);		/* token spans f"..."; consumers skip the 'f' */
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
 			t[n - 1].fstr = true;
+			t[n - 1].triple = triple;
 			continue;
 		}
 		if (plx_is_ident_start(*p))
@@ -457,19 +484,14 @@ plx_lex(Ctx *cx)
 		if (*p == '\'' || *p == '"' || *p == '`')
 		{
 			char		q = *p;
+			bool		triple = (surf->fstrings && p + 2 < end &&
+								  p[1] == q && p[2] == q);
 
-			p++;
-			while (p < end && *p != q)
-			{
-				if (*p == '\\' && p + 1 < end)
-					p++;
-				p++;
-			}
-			if (p < end)
-				p++;			/* closing quote */
+			p = lex_string_body(p, end, q, triple, &line);
 			PUSH(T_STRING);
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
+			t[n - 1].triple = triple;
 			continue;
 		}
 		switch (*p)
@@ -777,6 +799,24 @@ plx_local_add(Ctx *cx, const char *name, int len)
 }
 
 /* ---------------------------------------------------------------- string decode */
+
+/* length of a string token's opening delimiter ([f] plus one or three quotes)
+ * and of its closing one; the token may be cut short by the end of input */
+static int
+str_open_len(const Tok *tk)
+{
+	int			n = (tk->fstr ? 1 : 0) + (tk->triple ? 3 : 1);
+
+	return Min(n, tk->len);
+}
+
+static int
+str_close_len(const Tok *tk)
+{
+	int			n = tk->triple ? 3 : 1;
+
+	return Min(n, tk->len - str_open_len(tk));
+}
 
 /*
  * If an interpolation starts at s within a double-quoted string body [s,e), set
@@ -1206,8 +1246,8 @@ decode_escape(Ctx *cx, const char *s, const char *e, StringInfo lit, bool *need_
 static void
 emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 {
-	const char *s = tk->s + (tk->fstr ? 2 : 1);	/* skip [f]"opening quote */
-	const char *e = tk->s + tk->len - 1;	/* before closing quote */
+	const char *s = tk->s + str_open_len(tk);	/* skip [f]"opening quote */
+	const char *e = tk->s + tk->len - str_close_len(tk);	/* before closing quote */
 	StringInfoData lit;
 	bool		need_e = false;
 	int			nparts = 0;
@@ -1417,6 +1457,51 @@ find_ternary_colon(const char *s, int len, int q)
 		}
 	}
 	return -1;
+}
+
+static int
+skip_space(const char *s, int len, int i)
+{
+	while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+		i++;
+	return i;
+}
+
+/*
+ * If a string literal starts at s[i] (a quote, or a Python f-string's f),
+ * fill *st with a token for it and return the index after it; else -1.
+ * Python triple-quoted strings are one literal.
+ */
+static int
+scan_string(const PlxSurface *surf, const char *s, int len, int i, Tok *st)
+{
+	int			k = i;
+	bool		fstr = false;
+	bool		triple;
+	char		q;
+	int			line = 0;
+
+	if (i >= len)
+		return -1;
+	if (surf->fstrings && (s[k] == 'f' || s[k] == 'F') && k + 1 < len &&
+		(s[k + 1] == '"' || s[k + 1] == '\''))
+	{
+		fstr = true;
+		k++;
+	}
+	else if (s[k] != '\'' && s[k] != '"' && s[k] != '`')
+		return -1;
+	q = s[k];
+	triple = (surf->fstrings && k + 2 < len && s[k + 1] == q && s[k + 2] == q);
+	memset(st, 0, sizeof(*st));
+	st->kind = T_STRING;
+	st->s = s + i;
+	st->len = (int) (lex_string_body(s + k, s + len, q, triple, &line) - (s + i));
+	st->sq = (q == '\'');
+	st->quote = q;
+	st->fstr = fstr;
+	st->triple = triple;
+	return i + st->len;
 }
 
 /*
@@ -1844,56 +1929,44 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			i = j;
 			continue;
 		}
-		if (c == '\'' || c == '"' || c == '`')
-		{
-			/* build a synthetic token to reuse emit_string_value */
-			Tok			st;
-			int			j = i + 1;
-
-			while (j < len && s[j] != c)
-			{
-				if (s[j] == '\\' && j + 1 < len)
-					j++;
-				j++;
-			}
-			if (j < len)
-				j++;
-			memset(&st, 0, sizeof(st));
-			st.kind = T_STRING;
-			st.s = s + i;
-			st.len = j - i;
-			st.sq = (c == '\'');
-			st.quote = c;
-			emit_string_value(cx, &st, &out);
-			i = j;
-			continue;
-		}
-		/* Python f-string in expression position: f"...{expr}..." */
-		if (surf->fstrings && (c == 'f' || c == 'F') && i + 1 < len &&
-			(s[i + 1] == '"' || s[i + 1] == '\''))
+		/*
+		 * A string literal, or a Python f-string. Adjacent literals ("a" "b",
+		 * Ruby and Python) are one value: each is emitted as its own SQL
+		 * literal, joined with || and parenthesized. Written side by side,
+		 * 'a''b' would be one SQL literal holding a quote, and an E'' literal
+		 * next to one ending in a backslash would swallow the code after it.
+		 */
 		{
 			Tok			st;
-			char		q = s[i + 1];
-			int			j = i + 2;
+			int			j = scan_string(surf, s, len, i, &st);
 
-			while (j < len && s[j] != q)
+			if (j >= 0)
 			{
-				if (s[j] == '\\' && j + 1 < len)
-					j++;
-				j++;
+				int			k = skip_space(s, len, j);
+				Tok			nx;
+				int			nj = scan_string(surf, s, len, k, &nx);
+
+				if (nj < 0)
+				{
+					emit_string_value(cx, &st, &out);
+					i = j;
+					continue;
+				}
+				appendStringInfoChar(&out, '(');
+				for (;;)
+				{
+					emit_string_value(cx, &st, &out);
+					i = j;
+					k = skip_space(s, len, j);
+					if ((nj = scan_string(surf, s, len, k, &nx)) < 0)
+						break;
+					appendStringInfoString(&out, " || ");
+					st = nx;
+					j = nj;
+				}
+				appendStringInfoChar(&out, ')');
+				continue;
 			}
-			if (j < len)
-				j++;
-			memset(&st, 0, sizeof(st));
-			st.kind = T_STRING;
-			st.s = s + i;
-			st.len = j - i;
-			st.sq = (q == '\'');
-			st.quote = q;
-			st.fstr = true;
-			emit_string_value(cx, &st, &out);
-			i = j;
-			continue;
 		}
 		if (plx_is_ident_start(c))
 		{
@@ -3037,8 +3110,8 @@ typedef enum
 static int
 tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 {
-	const char *s = tk->s + (tk->fstr ? 2 : 1);
-	const char *e = tk->s + tk->len - 1;
+	const char *s = tk->s + str_open_len(tk);
+	const char *e = tk->s + tk->len - str_close_len(tk);
 	bool		can_interp = tk->fstr ||
 		(cx->surf->interp_quote && tk->quote == cx->surf->interp_quote);
 	bool		raw = tk->sq && cx->surf->sq_is_raw;
@@ -3519,8 +3592,8 @@ plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
 static bool
 sql_is_row_returning(Tok *tk)
 {
-	const char *s = tk->s + 1;
-	const char *e = tk->s + tk->len - 1;
+	const char *s = tk->s + str_open_len(tk);
+	const char *e = tk->s + tk->len - str_close_len(tk);
 	static const char *verbs[] = {"select", "with", "values", "table", NULL};
 	int			i;
 
@@ -3998,7 +4071,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				Tok		   *pn = &cx->t[as[0]];
 
 				/* an f-string's prefix would be unquoted as part of the name */
-				if (pn->fstr)
+				if (pn->fstr || pn->triple)
 					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
 				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}

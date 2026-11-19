@@ -57,6 +57,8 @@ typedef struct
 	bool		sq;				/* single-quoted string */
 	bool		fstr;			/* Python f-string (interpolating) */
 	char		quote;			/* opening quote char: ' " or ` */
+	bool		triple;			/* Python triple-quoted string (three quote
+								 * chars at each end) */
 	const char *ann;			/* TYPEANN: type text start */
 	int			annlen;
 } Tok;
