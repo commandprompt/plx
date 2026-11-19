@@ -66,3 +66,16 @@ $$;
 CREATE FUNCTION fx43_trail() RETURNS int LANGUAGE plxtsql AS $$ DECLARE @a int, @b int; SELECT @a = 1, @b$$;
 CREATE FUNCTION fx43_65() RETURNS int LANGUAGE plxtsql AS $$ DECLARE @v0 int, @v1 int, @v2 int, @v3 int, @v4 int, @v5 int, @v6 int, @v7 int, @v8 int, @v9 int, @v10 int, @v11 int, @v12 int, @v13 int, @v14 int, @v15 int, @v16 int, @v17 int, @v18 int, @v19 int, @v20 int, @v21 int, @v22 int, @v23 int, @v24 int, @v25 int, @v26 int, @v27 int, @v28 int, @v29 int, @v30 int, @v31 int, @v32 int, @v33 int, @v34 int, @v35 int, @v36 int, @v37 int, @v38 int, @v39 int, @v40 int, @v41 int, @v42 int, @v43 int, @v44 int, @v45 int, @v46 int, @v47 int, @v48 int, @v49 int, @v50 int, @v51 int, @v52 int, @v53 int, @v54 int, @v55 int, @v56 int, @v57 int, @v58 int, @v59 int, @v60 int, @v61 int, @v62 int, @v63 int, @v64 int; SET @v0 = -1; SELECT @v0 = 0, @v1 = 1, @v2 = 2, @v3 = 3, @v4 = 4, @v5 = 5, @v6 = 6, @v7 = 7, @v8 = 8, @v9 = 9, @v10 = 10, @v11 = 11, @v12 = 12, @v13 = 13, @v14 = 14, @v15 = 15, @v16 = 16, @v17 = 17, @v18 = 18, @v19 = 19, @v20 = 20, @v21 = 21, @v22 = 22, @v23 = 23, @v24 = 24, @v25 = 25, @v26 = 26, @v27 = 27, @v28 = 28, @v29 = 29, @v30 = 30, @v31 = 31, @v32 = 32, @v33 = 33, @v34 = 34, @v35 = 35, @v36 = 36, @v37 = 37, @v38 = 38, @v39 = 39, @v40 = 40, @v41 = 41, @v42 = 42, @v43 = 43, @v44 = 44, @v45 = 45, @v46 = 46, @v47 = 47, @v48 = 48, @v49 = 49, @v50 = 50, @v51 = 51, @v52 = 52, @v53 = 53, @v54 = 54, @v55 = 55, @v56 = 56, @v57 = 57, @v58 = 58, @v59 = 59, @v60 = 60, @v61 = 61, @v62 = 62, @v63 = 63, @v64 = 64 FROM fx43_amt WHERE v > 100; RETURN @v0; $$;
 SELECT fx43_65();
+-- A44: [bracketed] and "quoted" identifiers keep their delimiters
+CREATE TABLE fx44_acct("user" text, "Name" text, name text, "odd ]""col" text);
+INSERT INTO fx44_acct VALUES ('alice', 'UPPER', 'lower', 'odd');
+CREATE TABLE "fx44 Order Details"(qty int);
+INSERT INTO "fx44 Order Details" VALUES (5);
+CREATE FUNCTION fx44_q() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @u varchar(50), @n varchar(50), @o varchar(50), @q [int];
+  SELECT @u = [user], @n = "Name", @o = [odd ]]"col] FROM fx44_acct;
+  SELECT @q = qty FROM [fx44 Order Details];
+  RETURN @u || '/' || @n || '/' || @o || '/' || CONVERT([varchar](10), @q);
+$$;
+SELECT fx44_q();
+CREATE FUNCTION fx44_bad() RETURNS int LANGUAGE plxtsql AS $$ RETURN [abc $$;

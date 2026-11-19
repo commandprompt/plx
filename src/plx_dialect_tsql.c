@@ -44,7 +44,8 @@ PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
 typedef enum
 {
 	TQ_EOF, TQ_WORD, TQ_VAR, TQ_GVAR, TQ_NUM, TQ_STR, TQ_OP,
-	TQ_LP, TQ_RP, TQ_COMMA, TQ_SEMI, TQ_DOT
+	TQ_LP, TQ_RP, TQ_COMMA, TQ_SEMI, TQ_DOT,
+	TQ_QIDENT					/* [delimited] or "quoted" identifier */
 } TqKind;
 
 typedef struct
@@ -53,6 +54,7 @@ typedef struct
 	const char *s;
 	int			len;
 	int			line;
+	char		q;				/* TQ_QIDENT: opening delimiter, '[' or '"' */
 } TqTok;
 
 typedef struct
@@ -118,7 +120,8 @@ tq_lex(Tq *tq, const char *body)
 
 #define TQPUSH(k, st, ln) do { \
 		if (n >= cap) { cap *= 2; t = repalloc(t, sizeof(TqTok) * cap); } \
-		t[n].kind = (k); t[n].s = (st); t[n].len = (ln); t[n].line = line; n++; \
+		t[n].kind = (k); t[n].s = (st); t[n].len = (ln); t[n].line = line; \
+		t[n].q = 0; n++; \
 	} while (0)
 #define TQALPHA(c) (((c) >= 'A' && (c) <= 'Z') || ((c) >= 'a' && (c) <= 'z') || (c) == '_')
 #define TQDIGIT(c) ((c) >= '0' && (c) <= '9')
@@ -193,26 +196,36 @@ tq_lex(Tq *tq, const char *body)
 				continue;
 			}
 		}
-		if (*p == '[')									/* [delimited identifier] */
+		if (*p == '[' || *p == '"')						/* [delimited] / "quoted" identifier */
 		{
+			/* the inner text keeps its doubled closing delimiter (]] or "");
+			 * tq_emit_qident undoes it when it writes the PostgreSQL form */
+			char		close = (*p == '[') ? ']' : '"';
 			const char *st = p + 1,
 					   *q = st;
+			bool		closed = false;
 
-			while (q < end && *q != ']')
+			while (q < end)
+			{
+				if (*q == close)
+				{
+					if (q + 1 < end && q[1] == close)
+					{
+						q += 2;
+						continue;
+					}
+					closed = true;
+					break;
+				}
+				if (*q == '\n')
+					line++;
 				q++;
-			TQPUSH(TQ_WORD, st, (int) (q - st));
-			p = (q < end) ? q + 1 : q;
-			continue;
-		}
-		if (*p == '"')									/* "quoted identifier" */
-		{
-			const char *st = p + 1,
-					   *q = st;
-
-			while (q < end && *q != '"')
-				q++;
-			TQPUSH(TQ_WORD, st, (int) (q - st));
-			p = (q < end) ? q + 1 : q;
+			}
+			if (!closed)
+				plx_err(tq->cx, line, "unterminated delimited identifier");
+			TQPUSH(TQ_QIDENT, st, (int) (q - st));
+			t[n - 1].q = *p;
+			p = q + 1;
 			continue;
 		}
 		if (*p == 'N' && p + 1 < end && p[1] == '\'')	/* N'unicode' -> drop N */
@@ -359,6 +372,31 @@ tq_sp(StringInfo out)
 		appendStringInfoChar(out, ' ');
 }
 
+/*
+ * emit a delimited identifier as a PostgreSQL quoted identifier. T-SQL
+ * [a]]b] is the name a]b and "a""b" is a"b; PostgreSQL doubles an embedded
+ * '"', so the name keeps its case, spaces and reserved words.
+ */
+static void
+tq_emit_qident(TqTok *tk, StringInfo out)
+{
+	char		close = (tk->q == '[') ? ']' : '"';
+	int			i;
+
+	appendStringInfoChar(out, '"');
+	for (i = 0; i < tk->len; i++)
+	{
+		char		c = tk->s[i];
+
+		if (c == close && i + 1 < tk->len && tk->s[i + 1] == close)
+			i++;				/* doubled closing delimiter: one character */
+		if (c == '"')
+			appendStringInfoChar(out, '"');
+		appendStringInfoChar(out, c);
+	}
+	appendStringInfoChar(out, '"');
+}
+
 /* emit a T-SQL string literal (already 'quoted', ''-escaped) as SQL text */
 static void
 tq_emit_str(TqTok *tk, StringInfo out)
@@ -410,13 +448,15 @@ tq_read_type(Tq *tq, StringInfo dest)
 	bool		is_char = false,
 				is_bin = false;
 
-	if (w->kind != TQ_WORD)
+	if (w->kind != TQ_WORD && w->kind != TQ_QIDENT)
 		tq_err(tq, "expected a type name");
 	base = tq_base_type(w->s, w->len);
 	is_char = (base && (strcmp(base, "varchar") == 0 || strcmp(base, "char") == 0));
 	is_bin = (base && strcmp(base, "bytea") == 0);
 	if (base)
 		appendStringInfoString(dest, base);
+	else if (w->kind == TQ_QIDENT)
+		tq_emit_qident(w, dest);
 	else
 	{
 		/* unknown -> pass the identifier through (user-defined or PG type) */
@@ -477,14 +517,19 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 	TqTok	   *w;
 	const char *base;
 
-	if (a >= b || tq->t[a].kind != TQ_WORD)
+	if (a >= b || (tq->t[a].kind != TQ_WORD && tq->t[a].kind != TQ_QIDENT))
 	{
 		appendStringInfoString(dest, "text");
 		return;
 	}
 	w = &tq->t[a];
 	base = tq_base_type(w->s, w->len);
-	appendStringInfoString(dest, base ? base : tq_ident(w->s, w->len));
+	if (base)
+		appendStringInfoString(dest, base);
+	else if (w->kind == TQ_QIDENT)
+		tq_emit_qident(w, dest);
+	else
+		appendStringInfoString(dest, tq_ident(w->s, w->len));
 	if (base && (pg_strncasecmp(w->s, "char", 4) == 0 ||
 				 pg_strncasecmp(w->s, "varc", 4) == 0 ||
 				 pg_strncasecmp(w->s, "nvar", 4) == 0 ||
@@ -727,6 +772,13 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 			}
 			tq_sp(out);
 			appendBinaryStringInfo(out, tk->s, tk->len);
+			i++;
+			continue;
+		}
+		if (tk->kind == TQ_QIDENT)
+		{
+			tq_sp(out);
+			tq_emit_qident(tk, out);
 			i++;
 			continue;
 		}

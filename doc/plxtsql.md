@@ -53,6 +53,20 @@ type names in `DECLARE` are translated (see below).
 
 ## Transact-SQL to PostgreSQL translations
 
+### Identifiers
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `[Order Details]`, `[user]` | `"Order Details"`, `"user"` |
+| `"Name"` | `"Name"` |
+| `[a]]b]` | `"a]b"` |
+
+A delimited identifier keeps its delimiters, so it can hold a space or a
+reserved word, and its case is kept. A PostgreSQL quoted identifier is case
+sensitive: `[Name]` matches a column created as `"Name"`, not one created as
+`name`. Write an identifier without brackets to get PostgreSQL's usual folding
+to lower case.
+
 ### Variables and assignment
 
 | T-SQL | plpgsql |

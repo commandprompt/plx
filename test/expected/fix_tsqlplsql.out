@@ -98,3 +98,22 @@ SELECT fx43_65();
       -1
 (1 row)
 
+-- A44: [bracketed] and "quoted" identifiers keep their delimiters
+CREATE TABLE fx44_acct("user" text, "Name" text, name text, "odd ]""col" text);
+INSERT INTO fx44_acct VALUES ('alice', 'UPPER', 'lower', 'odd');
+CREATE TABLE "fx44 Order Details"(qty int);
+INSERT INTO "fx44 Order Details" VALUES (5);
+CREATE FUNCTION fx44_q() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @u varchar(50), @n varchar(50), @o varchar(50), @q [int];
+  SELECT @u = [user], @n = "Name", @o = [odd ]]"col] FROM fx44_acct;
+  SELECT @q = qty FROM [fx44 Order Details];
+  RETURN @u || '/' || @n || '/' || @o || '/' || CONVERT([varchar](10), @q);
+$$;
+SELECT fx44_q();
+      fx44_q       
+-------------------
+ alice/UPPER/odd/5
+(1 row)
+
+CREATE FUNCTION fx44_bad() RETURNS int LANGUAGE plxtsql AS $$ RETURN [abc $$;
+ERROR:  plxtsql: unterminated delimited identifier
