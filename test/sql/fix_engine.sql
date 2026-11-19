@@ -349,3 +349,33 @@ $$;
 SELECT fe_a23_hb_py('abc');
 \set VERBOSITY default
 SELECT fe_a23_hb2_py('abc');
+-- A25: a quote or brace inside an interpolated expression stays in the expression
+CREATE FUNCTION fe_a25_py(x text) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{concat('}', x)}|{x == '{'}"
+$$;
+SELECT fe_a25_py('a');
+CREATE FUNCTION fe_a25_rb(s text) RETURNS text LANGUAGE plxruby AS $$
+return "#{s} is #{s == "a" ? "A" : "other"}, #{concat(s, "}")}"
+$$;
+SELECT fe_a25_rb('a'), fe_a25_rb('b');
+CREATE FUNCTION fe_a25_rb_nest(s text) RETURNS text LANGUAGE plxruby AS $$
+return "<#{concat("[#{s}]", '}')}>"
+$$;
+SELECT fe_a25_rb_nest('a');
+CREATE FUNCTION fe_a25_js(x text) RETURNS text LANGUAGE plxjs AS $$
+return `${concat(x, "}")}`;
+$$;
+SELECT fe_a25_js('a');
+CREATE FUNCTION fe_a25_php() RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'bob'::text AS name");
+return "{$r["name"]}!";
+$$;
+SELECT fe_a25_php();
+-- A25: deeply nested interpolations stop with an error, not a crash
+\set VERBOSITY terse
+DO $d$ BEGIN
+EXECUTE 'CREATE FUNCTION fe_a25_deep() RETURNS text LANGUAGE plxruby AS $b$' || E'\n'
+  || 'return ' || repeat('"#{', 200000) || '1' || repeat('}"', 200000) || E'\n$b$';
+END $d$;
+\set VERBOSITY default
+SELECT 1 AS still_up;

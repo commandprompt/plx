@@ -142,6 +142,9 @@ typedef struct PlxCtx
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		diag_msg;		/* rewriting a RAISE message: interpolate NULL as '' */
+	bool		interp_plain;	/* a string's interpolation was unbalanced, so
+								 * strings are scanned by their quotes alone
+								 * from then on (see lex_string) */
 	int			ninterp;		/* string interpolations rendered so far; an
 								 * interpolating initializer is not folded */
 	bool		retset;

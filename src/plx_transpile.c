@@ -139,13 +139,82 @@ suppress_newline(Tok *t, int n)
  * its closing quote (or end). A Python triple-quoted string ("""...""" or
  * '''...''') runs to the next three quotes, may span lines, and counts them
  * in *line so later line numbers stay right.
+ *
+ * In a string that interpolates (fstr, or the dialect's interpolating quote),
+ * an interpolation runs to its matching '}' and may itself hold strings, so a
+ * quote inside "#{s == "a"}" does not end the outer string.
+ */
+static const char *lex_string_body(const PlxSurface *surf, const char *p, const char *end,
+								   char q, bool triple, bool fstr, int *line,
+								   bool *closed);
+
+/*
+ * p is just past an interpolation opener ("#{", "${", "{$" or an f-string
+ * "{"). Return the position of the matching '}', or end. Braces are counted
+ * only outside nested string literals, which are skipped whole (with their
+ * own interpolations), so "}" in a nested string does not close it.
  */
 static const char *
-lex_string_body(const char *p, const char *end, char q, bool triple, int *line)
+interp_body_end(const PlxSurface *surf, const char *p, const char *end, int *line)
 {
+	int			depth = 1;
+
+	/* nested strings recurse through lex_string_body */
+	check_stack_depth();
+	while (p < end)
+	{
+		char		c = *p;
+
+		if (c == '\'' || c == '"' || c == '`')
+		{
+			bool		closed;
+
+			p = lex_string_body(surf, p, end, c, false, false, line, &closed);
+			if (!closed)
+				return end;
+			continue;
+		}
+		if (c == '\n')
+			(*line)++;
+		else if (c == '{')
+			depth++;
+		else if (c == '}' && --depth == 0)
+			return p;
+		p++;
+	}
+	return end;
+}
+
+/* length of an interpolation opener at p in a string quoted with q, or 0 */
+static int
+interp_opener(const PlxSurface *surf, const char *p, const char *end, char q, bool fstr)
+{
+	if (!surf)
+		return 0;
+	if (fstr)
+		return (p[0] == '{' && !(p + 1 < end && p[1] == '{')) ? 1 : 0;
+	if (!surf->interp_quote || q != surf->interp_quote || p + 1 >= end)
+		return 0;
+	if (surf->interp_hashbrace && p[0] == '#' && p[1] == '{')
+		return 2;
+	if ((surf->interp_dollarbrace || surf->interp_dollar) && p[0] == '$' && p[1] == '{')
+		return 2;
+	if (surf->interp_dollar && p[0] == '{' && p[1] == '$')
+		return 1;
+	return 0;
+}
+
+static const char *
+lex_string_body(const PlxSurface *surf, const char *p, const char *end, char q,
+				bool triple, bool fstr, int *line, bool *closed)
+{
+	if (closed)
+		*closed = false;
 	p += triple ? 3 : 1;
 	while (p < end)
 	{
+		int			ol;
+
 		if (*p == '\\' && p + 1 < end)
 		{
 			if (triple && p[1] == '\n')
@@ -153,18 +222,89 @@ lex_string_body(const char *p, const char *end, char q, bool triple, int *line)
 			p += 2;
 			continue;
 		}
+		if (fstr && p + 1 < end && ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}')))
+		{
+			p += 2;
+			continue;
+		}
+		if ((ol = interp_opener(surf, p, end, q, fstr)) > 0)
+		{
+			int			dummy = 0;
+
+			/* only a triple-quoted string counts its newlines */
+			p = interp_body_end(surf, p + ol, end, triple ? line : &dummy);
+			if (p >= end)
+				return end;		/* unbalanced: not closed */
+			p++;
+			continue;
+		}
 		if (triple)
 		{
 			if (p + 2 < end && p[0] == q && p[1] == q && p[2] == q)
+			{
+				if (closed)
+					*closed = true;
 				return p + 3;
+			}
 			if (*p == '\n')
 				(*line)++;
 		}
 		else if (*p == q)
+		{
+			if (closed)
+				*closed = true;
 			return p + 1;
+		}
 		p++;
 	}
 	return end;
+}
+
+/*
+ * Scan a string token. The interpolation-aware scan is tried first. If it
+ * finds no end (an interpolation or a string inside one is never closed), the
+ * string is scanned again by its quotes alone, as plx did before nested
+ * strings were understood, and *plain is set so every later string is scanned
+ * that way too. One failed scan per body keeps the lexer linear.
+ */
+static const char *
+lex_string(const PlxSurface *surf, const char *p, const char *end, char q,
+		   bool triple, bool fstr, int *line, bool *plain)
+{
+	if (!*plain)
+	{
+		int			l2 = *line;
+		bool		closed;
+		const char *r = lex_string_body(surf, p, end, q, triple, fstr, &l2, &closed);
+
+		if (closed)
+		{
+			*line = l2;
+			return r;
+		}
+		*plain = true;
+	}
+	return lex_string_body(NULL, p, end, q, triple, fstr, line, NULL);
+}
+
+/* interp_body_end, falling back to counting braces alone when unbalanced */
+static const char *
+interp_close(const PlxSurface *surf, const char *p, const char *e)
+{
+	int			dummy = 0;
+	const char *r = interp_body_end(surf, p, e, &dummy);
+	int			depth = 1;
+
+	if (r < e)
+		return r;
+	for (; p < e; p++)
+	{
+		if (*p == '{')
+			depth++;
+		else if (*p == '}' && --depth == 0)
+			return p;
+	}
+	return e;
 }
 
 void
@@ -402,7 +542,7 @@ plx_lex(Ctx *cx)
 			char		q = p[1];
 			bool		triple = (p + 3 < end && p[2] == q && p[3] == q);
 
-			p = lex_string_body(p + 1, end, q, triple, &line);
+			p = lex_string(surf, p + 1, end, q, triple, true, &line, &cx->interp_plain);
 			PUSH(T_STRING);		/* token spans f"..."; consumers skip the 'f' */
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
@@ -487,7 +627,7 @@ plx_lex(Ctx *cx)
 			bool		triple = (surf->fstrings && p + 2 < end &&
 								  p[1] == q && p[2] == q);
 
-			p = lex_string_body(p, end, q, triple, &line);
+			p = lex_string(surf, p, end, q, triple, false, &line, &cx->interp_plain);
 			PUSH(T_STRING);
 			t[n - 1].sq = (q == '\'');
 			t[n - 1].quote = q;
@@ -1153,21 +1293,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 {
 	if (fstr && s < e && s[0] == '{' && !(s + 1 < e && s[1] == '{'))	/* f-string {expr} */
 	{
-		int			depth = 1;
-		const char *x = s + 1, *q = x;
+		const char *x = s + 1,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -1175,21 +1304,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	}
 	if (surf->interp_hashbrace && s + 1 < e && s[0] == '#' && s[1] == '{')
 	{
-		int			depth = 1;
-		const char *x = s + 2, *q = x;
+		const char *x = s + 2,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -1197,21 +1315,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	}
 	if (surf->interp_dollarbrace && s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${expr} (JS) */
 	{
-		int			depth = 1;
-		const char *x = s + 2, *q = x;
+		const char *x = s + 2,
+					   *q;
 
-		while (q < e && depth > 0)
-		{
-			if (*q == '{')
-				depth++;
-			else if (*q == '}')
-			{
-				depth--;
-				if (!depth)
-					break;
-			}
-			q++;
-		}
+		q = interp_close(surf, x, e);
 		*exs = x;
 		*exl = (int) (q - x);
 		*next = (q < e) ? q + 1 : q;
@@ -1221,21 +1328,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	{
 		if (s + 1 < e && s[0] == '$' && s[1] == '{')	/* ${name} (PHP curly) */
 		{
-			int			depth = 1;
-			const char *x = s + 2, *q = x;
+			const char *x = s + 2,
+						   *q;
 
-			while (q < e && depth > 0)
-			{
-				if (*q == '{')
-					depth++;
-				else if (*q == '}')
-				{
-					depth--;
-					if (!depth)
-						break;
-				}
-				q++;
-			}
+			q = interp_close(surf, x, e);
 			*exs = x;
 			*exl = (int) (q - x);
 			*next = (q < e) ? q + 1 : q;
@@ -1248,21 +1344,10 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 			  (e - s > 9 && strncmp(s + 1, "literal(", 8) == 0) ||
 			  (e - s > 5 && strncmp(s + 1, "raw(", 4) == 0))))
 		{
-			int			depth = 1;
-			const char *x = s + 1, *q = x;
+			const char *x = s + 1,
+						   *q;
 
-			while (q < e && depth > 0)
-			{
-				if (*q == '{')
-					depth++;
-				else if (*q == '}')
-				{
-					depth--;
-					if (!depth)
-						break;
-				}
-				q++;
-			}
+			q = interp_close(surf, x, e);
 			*exs = x;
 			*exl = (int) (q - x);
 			*next = (q < e) ? q + 1 : q;
@@ -1851,7 +1936,8 @@ skip_space(const char *s, int len, int i)
  * Python triple-quoted strings are one literal.
  */
 static int
-scan_string(const PlxSurface *surf, const char *s, int len, int i, Tok *st)
+scan_string(const PlxSurface *surf, const char *s, int len, int i, Tok *st,
+			bool *plain)
 {
 	int			k = i;
 	bool		fstr = false;
@@ -1874,7 +1960,7 @@ scan_string(const PlxSurface *surf, const char *s, int len, int i, Tok *st)
 	memset(st, 0, sizeof(*st));
 	st->kind = T_STRING;
 	st->s = s + i;
-	st->len = (int) (lex_string_body(s + k, s + len, q, triple, &line) - (s + i));
+	st->len = (int) (lex_string(surf, s + k, s + len, q, triple, fstr, &line, plain) - (s + i));
 	st->sq = (q == '\'');
 	st->quote = q;
 	st->fstr = fstr;
@@ -2316,13 +2402,13 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		 */
 		{
 			Tok			st;
-			int			j = scan_string(surf, s, len, i, &st);
+			int			j = scan_string(surf, s, len, i, &st, &cx->interp_plain);
 
 			if (j >= 0)
 			{
 				int			k = skip_space(s, len, j);
 				Tok			nx;
-				int			nj = scan_string(surf, s, len, k, &nx);
+				int			nj = scan_string(surf, s, len, k, &nx, &cx->interp_plain);
 
 				if (nj < 0)
 				{
@@ -2336,7 +2422,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					emit_string_value(cx, &st, &out);
 					i = j;
 					k = skip_space(s, len, j);
-					if ((nj = scan_string(surf, s, len, k, &nx)) < 0)
+					if ((nj = scan_string(surf, s, len, k, &nx, &cx->interp_plain)) < 0)
 						break;
 					appendStringInfoString(&out, " || ");
 					st = nx;
