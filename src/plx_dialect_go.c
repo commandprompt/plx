@@ -58,6 +58,12 @@ typedef struct
 	Ctx		   *cx;
 	GoTok	   *t;
 	int			nt, pos;
+	/*
+	 * Label of the block that holds the body of the innermost enclosing
+	 * three-clause for loop, or NULL inside any other loop. continue leaves
+	 * that block (EXIT label) so the loop's post statement still runs.
+	 */
+	const char *cont_label;
 } Go;
 
 static void go_stmt(Go *g, int ind);
@@ -1739,6 +1745,74 @@ go_if(Go *g, int ind)
 	g->cx->depth--;
 }
 
+/*
+ * The body of a loop whose continue plpgsql's CONTINUE already gets right
+ * (range, condition-only and infinite loops): hide any enclosing three-clause
+ * loop's continue label while it is parsed.
+ */
+static void
+go_loop_body(Go *g, int ind)
+{
+	const char *save_label = g->cont_label;
+
+	g->cont_label = NULL;
+	g->cx->loopdepth++;
+	go_block(g, ind);
+	g->cx->loopdepth--;
+	g->cont_label = save_label;
+}
+
+/* true when a Go numeric literal is a float (has a '.' or a decimal exponent) */
+static bool
+go_num_is_float(const GoTok *tk)
+{
+	int			i;
+
+	if (tk->len > 1 && tk->s[0] == '0' && (tk->s[1] == 'x' || tk->s[1] == 'X'))
+		return false;			/* hex: 'e' and 'E' are digits */
+	for (i = 0; i < tk->len; i++)
+		if (tk->s[i] == '.' || tk->s[i] == 'e' || tk->s[i] == 'E')
+			return true;
+	return false;
+}
+
+/*
+ * The PostgreSQL type of a three-clause for loop's variable, from its start
+ * expression [a,b); NULL when it cannot be told. Go gives an arithmetic
+ * expression the type of its typed operand (untyped constants adapt to it),
+ * so the first plain variable in the expression decides, as "name%TYPE".
+ */
+static char *
+go_loop_var_type(Go *g, int a, int b)
+{
+	const char *inf = go_infer_type(g, a, b);
+	bool		isfloat = false;
+	int			i;
+
+	if (inf)
+		return pstrdup(inf);
+	for (i = a; i < b; i++)
+	{
+		GoTok	   *tk = &g->t[i];
+
+		if (tk->kind == GO_WORD)
+		{
+			if (i + 1 < b && (g->t[i + 1].kind == GO_LP ||
+							  g->t[i + 1].kind == GO_DOT ||
+							  g->t[i + 1].kind == GO_LBRACK))
+				return NULL;	/* a call, field or element: type unknown */
+			if (go_ci(tk, "true") || go_ci(tk, "false") || go_ci(tk, "nil"))
+				return NULL;
+			return psprintf("%s%%TYPE", go_ident(tk->s, tk->len));
+		}
+		if (tk->kind == GO_NUM)
+			isfloat = isfloat || go_num_is_float(tk);
+		else if (tk->kind != GO_OP && tk->kind != GO_LP && tk->kind != GO_RP)
+			return NULL;
+	}
+	return pstrdup(isfloat ? "double precision" : "integer");
+}
+
 /* for { } | for cond { } | for init; cond; post { } | for k,v := range e { } */
 static void
 go_for(Go *g, int ind)
@@ -1829,9 +1903,7 @@ go_for(Go *g, int ind)
 			go_emit_range(g, rs + 2, close, &g->cx->out);
 			appendStringInfoString(&g->cx->out, " LOOP\n");
 			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
+			go_loop_body(g, ind + 1);
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END LOOP;\n");
 			go_eat_semi(g);
@@ -1854,9 +1926,7 @@ go_for(Go *g, int ind)
 			go_emit_range(g, rs, hb, &g->cx->out);
 			appendStringInfoString(&g->cx->out, ") - 1 LOOP\n");
 			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
+			go_loop_body(g, ind + 1);
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END LOOP;\n");
 			go_eat_semi(g);
@@ -1892,144 +1962,117 @@ go_for(Go *g, int ind)
 		go_emit_range(g, rs, hb, &g->cx->out);
 		appendStringInfoString(&g->cx->out, " LOOP\n");
 		g->pos = hb;
-		g->cx->loopdepth++;
-		go_block(g, ind + 1);
-		g->cx->loopdepth--;
+		go_loop_body(g, ind + 1);
 		plx_indent(&g->cx->out, ind);
 		appendStringInfoString(&g->cx->out, "END LOOP;\n");
 		go_eat_semi(g);
 		return;
 	}
 
-	/* for init; cond; post { } */
-	if (semi1 >= 0 && semi2 >= 0)
-	{
-		/*
-		 * The canonical counting loop -- for i := A; i < B; i++  (or <=, or
-		 * i += S) -- becomes a plpgsql integer FOR. This is not just tidier:
-		 * plpgsql CONTINUE jumps to the loop's own increment, whereas in a
-		 * hand-built WHILE it would skip the post statement and loop forever.
-		 */
-		int			ivar = -1;
-		bool		inclusive = false;
-		char		dir = 0;			/* 'u' counts up (++/+=), 'd' down (--/-=) */
-		char		condc = 0;			/* comparison direction: '<' or '>' */
-		int			step0 = -1,
-					step1 = -1;
-
-		/* init: <var> :=|= <A> */
-		if (g->t[h0].kind == GO_WORD && h0 + 2 <= semi1 &&
-			g->t[h0 + 1].kind == GO_OP &&
-			((g->t[h0 + 1].len == 2 && g->t[h0 + 1].s[0] == ':' && g->t[h0 + 1].s[1] == '=') ||
-			 (g->t[h0 + 1].len == 1 && g->t[h0 + 1].s[0] == '=')))
-			ivar = h0;
-		/* post: <var>++ / <var>-- / <var> += S / <var> -= S sets the direction */
-		if (ivar >= 0 && g->t[semi2 + 1].kind == GO_WORD &&
-			g->t[semi2 + 1].len == g->t[ivar].len &&
-			strncmp(g->t[semi2 + 1].s, g->t[ivar].s, g->t[ivar].len) == 0 &&
-			g->t[semi2 + 2].kind == GO_OP && g->t[semi2 + 2].len == 2)
-		{
-			GoTok	   *po = &g->t[semi2 + 2];
-
-			if (po->s[0] == '+' && po->s[1] == '+')
-				dir = 'u';
-			else if (po->s[0] == '-' && po->s[1] == '-')
-				dir = 'd';
-			else if (po->s[0] == '+' && po->s[1] == '=')
-			{
-				dir = 'u';
-				step0 = semi2 + 3;
-				step1 = hb;
-			}
-			else if (po->s[0] == '-' && po->s[1] == '=')
-			{
-				dir = 'd';
-				step0 = semi2 + 3;
-				step1 = hb;
-			}
-		}
-		if (!dir)
-			ivar = -1;
-		/* cond: <var> </<= (up) or >/>= (down), comparison immediately after var */
-		if (ivar >= 0 && g->t[semi1 + 1].kind == GO_WORD &&
-			g->t[semi1 + 1].len == g->t[ivar].len &&
-			strncmp(g->t[semi1 + 1].s, g->t[ivar].s, g->t[ivar].len) == 0 &&
-			g->t[semi1 + 2].kind == GO_OP &&
-			(g->t[semi1 + 2].s[0] == '<' || g->t[semi1 + 2].s[0] == '>') &&
-			(g->t[semi1 + 2].len == 1 ||
-			 (g->t[semi1 + 2].len == 2 && g->t[semi1 + 2].s[1] == '=')))
-		{
-			condc = g->t[semi1 + 2].s[0];
-			inclusive = (g->t[semi1 + 2].len == 2);
-		}
-		else
-			ivar = -1;
-		/* the comparison must agree with the increment direction */
-		if (ivar >= 0 && ((dir == 'u' && condc != '<') || (dir == 'd' && condc != '>')))
-			ivar = -1;
-
-		if (ivar >= 0)
-		{
-			plx_indent(&g->cx->out, ind);
-			appendStringInfo(&g->cx->out, "FOR %s IN%s", go_ident(g->t[ivar].s, g->t[ivar].len),
-							 dir == 'd' ? " REVERSE" : "");
-			go_emit_range(g, ivar + 2, semi1, &g->cx->out);		/* A (loop start) */
-			appendStringInfoString(&g->cx->out, " ..");
-			if (inclusive)
-				go_emit_range(g, semi1 + 3, semi2, &g->cx->out);	/* B (bound) */
-			else
-			{
-				appendStringInfoString(&g->cx->out, " (");
-				go_emit_range(g, semi1 + 3, semi2, &g->cx->out);	/* B */
-				appendStringInfo(&g->cx->out, ") %c 1", dir == 'd' ? '+' : '-');
-			}
-			if (step0 >= 0)
-			{
-				if (step1 <= step0)
-					go_err(g, "for loop step (+=/-=) is missing its amount");
-				appendStringInfoString(&g->cx->out, " BY");
-				go_emit_range(g, step0, step1, &g->cx->out);
-			}
-			appendStringInfoString(&g->cx->out, " LOOP\n");
-			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
-			plx_indent(&g->cx->out, ind);
-			appendStringInfoString(&g->cx->out, "END LOOP;\n");
-			go_eat_semi(g);
-			return;
-		}
-	}
-
-	/* general C-style for -> [init;] WHILE cond LOOP body post; END LOOP.
-	 * (continue re-tests the condition without running the post statement, as
-	 * in plpgsql; use the counting form above when that matters.) */
+	/*
+	 * for init; cond; post { } becomes
+	 *
+	 *     [DECLARE v T; BEGIN]       when init is "v := A": v belongs to the loop
+	 *     init;
+	 *     WHILE cond LOOP
+	 *         [<<__plx_cN>> BEGIN] body [END;]
+	 *         post;
+	 *     END LOOP;
+	 *     [END;]
+	 *
+	 * A plpgsql integer FOR is not equivalent: it evaluates its bound once,
+	 * keeps its own counter (so the body cannot move the loop variable, and a
+	 * variable declared before the loop is never updated), and rounds a float
+	 * start to an integer. Go re-tests cond before every iteration. continue
+	 * leaves the labelled body block, so post still runs.
+	 */
 	if (semi1 >= 0)
 	{
-		if (semi1 > h0)					/* init statement */
+		const char *save_label = g->cont_label;
+		char	   *label = NULL;
+		char	   *lvar = NULL;
+		int			bodyend = go_match(g, hb, g->nt);
+		int			bind = ind;
+		int			j;
+
+		if (g->t[h0].kind == GO_WORD && h0 + 2 < semi1 &&
+			g->t[h0 + 1].kind == GO_OP && g->t[h0 + 1].len == 2 &&
+			g->t[h0 + 1].s[0] == ':' && g->t[h0 + 1].s[1] == '=')
 		{
-			go_simple(g, ind, semi1);
+			char	   *ltyp;
+
+			lvar = go_ident(g->t[h0].s, g->t[h0].len);
+			ltyp = go_loop_var_type(g, h0 + 2, semi1);
+			if (!ltyp)
+				plx_err(g->cx, g->t[h0].line,
+						"cannot infer a PostgreSQL type for loop variable \"%s\"; declare it before the loop (var %s T) and write for %s = ...",
+						lvar, lvar, lvar);
+			plx_indent(&g->cx->out, ind);
+			appendStringInfo(&g->cx->out, "DECLARE\n");
+			plx_indent(&g->cx->out, ind + 1);
+			appendStringInfo(&g->cx->out, "%s %s;\n", lvar, ltyp);
+			plx_indent(&g->cx->out, ind);
+			appendStringInfoString(&g->cx->out, "BEGIN\n");
+			bind = ind + 1;
+			plx_indent(&g->cx->out, bind);
+			appendStringInfo(&g->cx->out, "%s :=", lvar);
+			go_emit_range(g, h0 + 2, semi1, &g->cx->out);
+			appendStringInfoString(&g->cx->out, ";\n");
 		}
+		else if (semi1 > h0)				/* any other init statement */
+			go_simple(g, bind, semi1);
+
 		g->pos = hb;
-		plx_indent(&g->cx->out, ind);
+		plx_indent(&g->cx->out, bind);
 		appendStringInfoString(&g->cx->out, "WHILE");
 		if (semi2 > semi1 + 1)
 			go_emit_range(g, semi1 + 1, semi2, &g->cx->out);
 		else
 			appendStringInfoString(&g->cx->out, " true");
 		appendStringInfoString(&g->cx->out, " LOOP\n");
-		go_block(g, ind + 1);
+
+		/* a continue anywhere in the body needs the labelled block */
+		for (j = hb; j < bodyend; j++)
+			if (go_ci(&g->t[j], "continue"))
+			{
+				label = psprintf("__plx_c%d", ++g->cx->subq);
+				break;
+			}
+		g->cx->loopdepth++;
+		if (label)
+		{
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfo(&g->cx->out, "<<%s>>\n", label);
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfoString(&g->cx->out, "BEGIN\n");
+			g->cont_label = label;
+			go_block(g, bind + 2);
+			g->cont_label = save_label;
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfoString(&g->cx->out, "END;\n");
+		}
+		else
+		{
+			g->cont_label = NULL;
+			go_block(g, bind + 1);
+			g->cont_label = save_label;
+		}
+		g->cx->loopdepth--;
 		if (semi2 >= 0 && hb > semi2 + 1)		/* post statement */
 		{
 			int			save = g->pos;
 
 			g->pos = semi2 + 1;
-			go_simple(g, ind + 1, hb);
+			go_simple(g, bind + 1, hb);
 			g->pos = save;
 		}
-		plx_indent(&g->cx->out, ind);
+		plx_indent(&g->cx->out, bind);
 		appendStringInfoString(&g->cx->out, "END LOOP;\n");
+		if (lvar)
+		{
+			plx_indent(&g->cx->out, ind);
+			appendStringInfoString(&g->cx->out, "END;\n");
+		}
 		go_eat_semi(g);
 		return;
 	}
@@ -2045,9 +2088,7 @@ go_for(Go *g, int ind)
 	else
 		appendStringInfoString(&g->cx->out, "LOOP\n");
 	g->pos = hb;
-	g->cx->loopdepth++;
-	go_block(g, ind + 1);
-	g->cx->loopdepth--;
+	go_loop_body(g, ind + 1);
 	plx_indent(&g->cx->out, ind);
 	appendStringInfoString(&g->cx->out, "END LOOP;\n");
 	go_eat_semi(g);
@@ -2252,7 +2293,10 @@ go_stmt(Go *g, int ind)
 	{
 		g->pos++;
 		plx_indent(&g->cx->out, ind);
-		appendStringInfoString(&g->cx->out, "CONTINUE;\n");
+		if (g->cont_label)		/* leave the body block; post still runs */
+			appendStringInfo(&g->cx->out, "EXIT %s;\n", g->cont_label);
+		else
+			appendStringInfoString(&g->cx->out, "CONTINUE;\n");
 		go_eat_semi(g);
 	}
 	else if (go_ci(tk, "func"))

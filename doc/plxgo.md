@@ -79,20 +79,28 @@ literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
 | `if ... { } else if ... { } else { }` | `IF ... ELSE IF ... ELSE ... END IF;` |
 | `for { ... }` | `LOOP ... END LOOP;` |
 | `for cond { ... }` | `WHILE cond LOOP ... END LOOP;` |
-| `for i := A; i < B; i++ { ... }` | `FOR i IN A .. (B) - 1 LOOP ...` (an integer FOR) |
-| `for i := A; i > B; i-- { ... }` | `FOR i IN REVERSE A .. (B) + 1 LOOP ...` |
+| `for init; cond; post { ... }` | `init; WHILE cond LOOP ... post; END LOOP;` (see below) |
 | `for i := range n { ... }` | `FOR i IN 0 .. (n) - 1 LOOP ...` (integer range) |
 | `for _, v := range slice { ... }` | `FOREACH v IN ARRAY slice LOOP ...` |
 | `for _, row := range query("...") { ... }` | `FOR row IN EXECUTE '...' LOOP ...` |
-| `break` / `continue` | `EXIT;` / `CONTINUE;` |
+| `break` / `continue` | `EXIT;` / `CONTINUE;` (in a three-clause `for`, `continue` leaves the body block, see below) |
 | `return e` | `RETURN e;` |
 
-A counting `for` (init `i := A`, condition `i < B`/`i <= B`/`i > B`/`i >= B`
-against the same variable, and post `i++`/`i--`/`i += S`/`i -= S`) lowers to a
-plpgsql integer `FOR`, so `continue` still advances the loop variable. Any other
-three-clause `for` lowers to a `WHILE` with the post statement at the end of the
-body; there, as in plpgsql, `continue` re-tests the condition without running the
-post statement, so prefer the counting form when you use `continue`.
+A three-clause `for` keeps Go's meaning. plx tests the condition before every
+pass and runs the post statement after the body, so the body may change the
+loop variable or the bound (`for i := 0; i < len(s); i++` sees elements that the
+body appends). `continue` jumps to the post statement, not past it: plx wraps
+the body in a labelled block and lowers `continue` to `EXIT` of that block.
+
+When the init statement declares the loop variable (`for i := A; ...`), the
+variable belongs to the loop, as in Go: plx declares it in a block around the
+loop, so it does not change a variable of the same name outside the loop. Its
+type comes from `A`: a literal or one of the forms `:=` infers (below), else
+the type of the first variable in `A` (`for i := n - 1; ...` gives `i` the
+type of `n`). If `A` is a function call, plx cannot tell the type and rejects
+the function; declare the variable before the loop (`var i int`) and write
+`for i = A; ...`. With `for i = A; ...` the loop updates that variable, so it
+holds its final value after the loop.
 
 In a `range` loop over an integer, the single variable is the index. Over a
 slice, use `for _, v := range s`. The value variable's type is inferred from the
