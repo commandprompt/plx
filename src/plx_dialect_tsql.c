@@ -623,8 +623,8 @@ tq_match_lp(Tq *tq, int lp, int limit)
  * numbers; PostgreSQL has no + for strings and spells concatenation ||. plx
  * has no expression types, so it classifies each operand of a chain
  * a + b + c from what it can see:
- *   TC_STR  a local or parameter declared with a string type, CAST or CONVERT
- *           to a string type, a string function, ISNULL whose first
+ *   TC_STR  a local or parameter declared with a variable-length string
+ *           type, CAST or CONVERT to one, a string function, ISNULL whose first
  *           argument is a string local or literal, or COALESCE whose every
  *           argument is a known string;
  *   TC_LIT  a string literal;
@@ -644,11 +644,15 @@ typedef enum
 	TC_UNK, TC_NUM, TC_LIT, TC_STR
 } TqCls;
 
-/* class of a plpgsql type text from DECLARE (varchar(10), text, integer, ...) */
+/*
+ * class of a plpgsql type text from DECLARE (varchar(10), text, integer, ...).
+ * char(n) is not a string here: SQL Server keeps its trailing spaces when it
+ * concatenates, PostgreSQL's || drops them, so || would give a different value.
+ */
 static TqCls
 tq_type_class(const char *typ)
 {
-	static const char *str[] = {"varchar", "char", "text", NULL};
+	static const char *str[] = {"varchar", "text", NULL};
 	static const char *num[] = {"integer", "bigint", "smallint", "numeric",
 	"real", "double precision", NULL};
 	int			len,
@@ -689,7 +693,6 @@ tq_var_class(Tq *tq, TqTok *tk)
 			switch (m->argtypes[i])
 			{
 				case VARCHAROID:
-				case BPCHAROID:
 				case TEXTOID:
 					return TC_STR;
 				case INT2OID:

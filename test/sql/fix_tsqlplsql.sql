@@ -261,18 +261,15 @@ CREATE FUNCTION fx45_prec() RETURNS int LANGUAGE plxtsql AS $$
 $$;
 SELECT fx45_prec();
 -- tsql-plus-eq-string: += and + on a string-typed local concatenate, as in T-SQL; numeric locals still add
--- CHAR and NCHAR follow PostgreSQL: || drops the padding first, so @c ends as cy (SQL Server keeps it and truncates to c)
 CREATE FUNCTION fxps_pluseq() RETURNS text LANGUAGE plxtsql AS $$
-  DECLARE @v varchar(20) = 'a', @nv NVARCHAR(MAX) = 'b', @c char(3) = 'c', @nc nchar(2) = 'd', @t text = 'e', @nt ntext = 'f', @i int = 1, @m decimal(5,2) = 1.5;
+  DECLARE @v varchar(20) = 'a', @nv NVARCHAR(MAX) = 'b', @t text = 'e', @nt ntext = 'f', @i int = 1, @m decimal(5,2) = 1.5;
   SET @v += 'x';
   SET @nv += @v + '!';
-  SET @c += 'y';
-  SET @nc += 'z';
   SET @t += 'w';
   SET @nt += 'v';
   SET @i += 2;
   SET @m += 1;
-  RETURN @v + '|' + @nv + '|' + @c + '|' + @nc + '|' + @t + '|' + @nt + '|' + CONVERT(varchar(10), @i) + '|' + CONVERT(varchar(10), @m);
+  RETURN @v + '|' + @nv + '|' + @t + '|' + @nt + '|' + CONVERT(varchar(10), @i) + '|' + CONVERT(varchar(10), @m);
 $$;
 SELECT fxps_pluseq();
 CREATE FUNCTION fxps_plus() RETURNS text LANGUAGE plxtsql AS $$
@@ -391,3 +388,33 @@ CREATE FUNCTION fxco_str() RETURNS text LANGUAGE plxtsql AS $$
   RETURN COALESCE(@z, 'a', @s) + COALESCE(@s, @z) + COALESCE(@z, UPPER(@s) + 'c');
 $$;
 SELECT fxco_str() AS r;  -- SQL Server: abBc
+-- review of 641976f: a fixed-length CHAR(n) or NCHAR(n) value is not a known string. SQL Server keeps its
+-- trailing spaces when it concatenates, but PostgreSQL's || drops them, so || would give a different value
+-- without an error. + stays +, and the call fails ("operator does not exist"). SQL Server's answer is in each comment.
+CREATE FUNCTION fxch_cast() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('a' AS char(3)) + 'b';
+$$;
+SELECT fxch_cast();  -- SQL Server: 'a  b'
+CREATE FUNCTION fxch_conv() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(char(3), 'a') + 'b';
+$$;
+SELECT fxch_conv();  -- SQL Server: 'a  b'
+CREATE FUNCTION fxch_castn() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('' AS nchar) + 'b';
+$$;
+SELECT fxch_castn();  -- SQL Server: ' b' (NCHAR without a length is NCHAR(1))
+CREATE FUNCTION fxch_var() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s nchar(2) = 'a';
+  RETURN @s + 'b';
+$$;
+SELECT fxch_var();  -- SQL Server: 'a b'
+CREATE FUNCTION fxch_par(p char(3)) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN @p + 'b';
+$$;
+SELECT fxch_par('a');  -- SQL Server: 'a  b'
+CREATE FUNCTION fxch_pe() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @c char(3) = 'c';
+  SET @c += 'y';
+  RETURN @c;
+$$;
+SELECT fxch_pe();  -- SQL Server: 'c  ' (the result cut to 3 characters)

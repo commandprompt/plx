@@ -205,8 +205,8 @@ plx writes `+` as `||` only when every operand of the chain is a known string.
 A chain is a run of operands joined by `+`, such as `@a + ' ' + @b`. A known
 string is one of:
 
-- a variable or parameter declared with a string type: `VARCHAR`, `NVARCHAR`,
-  `CHAR`, `NCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
+- a variable or parameter declared with a variable-length string type:
+  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
 - a string literal, `'...'` or `N'...'`;
 - `CAST` or `CONVERT` to one of those types;
 - `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
@@ -220,8 +220,8 @@ string is one of:
 `e` is a known string or a chain of them.
 
 In every other case plx keeps `+`. This includes a chain with a number, a
-column, a parenthesized expression, a `CASE` expression, a `BIT` variable or a
-function not in the list above, such as `LEN`. It also includes a chain followed
+column, a parenthesized expression, a `CASE` expression, a `BIT` variable, a
+`CHAR` or `NCHAR` value, or a function not in the list above, such as `LEN`. It also includes a chain followed
 by `-`, `&`, `|` or `^`, because PostgreSQL would group that operator with the
 last operand. What happens then depends on the operands:
 
@@ -249,9 +249,20 @@ the default `CONCAT_NULL_YIELDS_NULL ON`.
 Write `||` or `CONCAT(...)` yourself to join strings that are not all known
 strings, for example two columns, or a column and a literal.
 
-`CHAR(n)` and `NCHAR(n)` variables keep PostgreSQL behavior. `||` drops their
-trailing spaces before it joins, and assigning a value longer than `n` is an
-error. SQL Server keeps the padding and cuts the result to `n`.
+`CHAR(n)` and `NCHAR(n)` values are not known strings. This covers a variable,
+a parameter, and `CAST` or `CONVERT` to `CHAR` or `NCHAR`, with or without a
+length. SQL Server keeps their trailing spaces when it joins them, but
+PostgreSQL's `||` drops them, so `||` would return a different value without an
+error. plx keeps `+`, and the call fails:
+`CAST('a' AS char(3)) + 'b'` raises
+`operator does not exist: character + unknown`. Say what you want instead:
+
+- `RTRIM(@c) + 'b'` joins without the padding and gives the same value in both
+  systems.
+- `rpad(@c, 3) || 'b'` keeps the padding, as SQL Server does.
+
+Assigning a value longer than `n` to a `CHAR(n)` variable is an error
+(`value too long for type character(3)`). SQL Server cuts the value to `n`.
 
 ## Dynamic SQL
 
