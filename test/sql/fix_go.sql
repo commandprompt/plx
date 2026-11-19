@@ -121,6 +121,26 @@ CREATE FUNCTION fg27_shadow() RETURNS text LANGUAGE plxgo AS $$
  return fmt.Sprintf("%d %d", c, i)
 $$;
 SELECT fg27_shadow() AS go_23_2;
+-- the start value may be an element of a slice declared in the body; a row
+-- field has no known type, so it is rejected with a clear message
+CREATE FUNCTION fg27_elem(a int[]) RETURNS int LANGUAGE plxgo AS $$
+ var s []int = a
+ c := 0
+ for i := s[0] + 1; i < 5; i++ {
+   c++
+ }
+ return c
+$$;
+SELECT fg27_elem(ARRAY[1]) AS go_3;
+CREATE FUNCTION fg27_field() RETURNS int LANGUAGE plxgo AS $$
+ c := 0
+ for _, r := range query("SELECT 1 AS n") {
+   for i := r.n; i < 5; i++ {
+     c++
+   }
+ }
+ return c
+$$;
 
 -- A28: switch runs default only when no case matches, wherever default
 -- stands, and break inside a switch leaves only the switch

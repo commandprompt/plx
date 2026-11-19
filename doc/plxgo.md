@@ -99,9 +99,11 @@ is the variable's default value in that block, so `A` may read an outer
 variable of the same name (`for i := i; ...` starts at the outer `i`). Its
 type comes from `A`: a literal or one of the forms `:=` infers (below), else
 the type of the first variable in `A` (`for i := n - 1; ...` gives `i` the
-type of `n`). If `A` is a function call, plx cannot tell the type and rejects
-the function; declare the variable before the loop (`var i int`) and write
-`for i = A; ...`. With `for i = A; ...` the loop updates that variable, so it
+type of `n`). An element of a slice declared in the body gives the slice's
+element type (`for i := s[0]; ...`). If the first name in `A` is a function
+call, a row field (`r.n`) or an element of a slice parameter, plx cannot tell the
+type and rejects the function; declare the variable before the loop
+(`var i int`) and write `for i = A; ...`. With `for i = A; ...` the loop updates that variable, so it
 holds its final value after the loop.
 
 In a `range` loop over an integer, the single variable is the index. Over a

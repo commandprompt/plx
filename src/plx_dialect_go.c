@@ -2504,10 +2504,19 @@ go_loop_var_type(Go *g, int a, int b)
 
 		if (tk->kind == GO_WORD)
 		{
+			if (i + 1 < b && g->t[i + 1].kind == GO_LBRACK)
+			{
+				/* an element of a slice declared in the body: its element type */
+				PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+				int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+				if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+					return pnstrdup(l->typ, tl - 2);
+				return NULL;
+			}
 			if (i + 1 < b && (g->t[i + 1].kind == GO_LP ||
-							  g->t[i + 1].kind == GO_DOT ||
-							  g->t[i + 1].kind == GO_LBRACK))
-				return NULL;	/* a call, field or element: type unknown */
+							  g->t[i + 1].kind == GO_DOT))
+				return NULL;	/* a call or a field: type unknown */
 			if (go_ci(tk, "true") || go_ci(tk, "false") || go_ci(tk, "nil"))
 				return NULL;
 			return psprintf("%s%%TYPE", go_ident(tk->s, tk->len));
