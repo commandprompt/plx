@@ -92,3 +92,29 @@ CREATE FUNCTION fe_a7_pow_php() RETURNS numeric LANGUAGE plxphp AS $$
 return 2 ** -1;
 $$;
 SELECT fe_a7_pow_php();
+
+-- A8: chained assignment a = b = v is rejected, not compiled to a := (b = v)
+CREATE FUNCTION fe_a8_js() RETURNS text LANGUAGE plxjs AS $$
+let a = "x";
+let b = "y";
+a = b = "z";
+return `${a},${b}`;
+$$;
+CREATE FUNCTION fe_a8_py() RETURNS int LANGUAGE plxpython3 AS $$
+a = 0
+b = 0
+a = b = 1
+return a + b
+$$;
+CREATE FUNCTION fe_a8_rb() RETURNS int LANGUAGE plxruby AS $$
+a = 0
+b = 0
+a += b = 1
+return a + b
+$$;
+-- A8: == in a right-hand side is a comparison, not an assignment
+CREATE FUNCTION fe_a8_ok_rb(x int) RETURNS boolean LANGUAGE plxruby AS $$
+ok = x == 1 #:: boolean
+return ok
+$$;
+SELECT fe_a8_ok_rb(1);

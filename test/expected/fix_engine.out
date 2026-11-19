@@ -166,3 +166,39 @@ SELECT fe_a7_pow_php();
            0.5
 (1 row)
 
+-- A8: chained assignment a = b = v is rejected, not compiled to a := (b = v)
+CREATE FUNCTION fe_a8_js() RETURNS text LANGUAGE plxjs AS $$
+let a = "x";
+let b = "y";
+a = b = "z";
+return `${a},${b}`;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 4
+CREATE FUNCTION fe_a8_py() RETURNS int LANGUAGE plxpython3 AS $$
+a = 0
+b = 0
+a = b = 1
+return a + b
+$$;
+ERROR:  plxpython3: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxpython3 source line 4
+CREATE FUNCTION fe_a8_rb() RETURNS int LANGUAGE plxruby AS $$
+a = 0
+b = 0
+a += b = 1
+return a + b
+$$;
+ERROR:  plxruby: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxruby source line 4
+-- A8: == in a right-hand side is a comparison, not an assignment
+CREATE FUNCTION fe_a8_ok_rb(x int) RETURNS boolean LANGUAGE plxruby AS $$
+ok = x == 1 #:: boolean
+return ok
+$$;
+SELECT fe_a8_ok_rb(1);
+ fe_a8_ok_rb 
+-------------
+ t
+(1 row)
+

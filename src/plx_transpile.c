@@ -3632,6 +3632,33 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 		appendStringInfo(o, "RAISE %s '%%', %s;\n", level, msg);
 }
 
+/*
+ * Reject an assignment inside the right-hand side [ra, rb), as in a = b = v
+ * or a += b = v. In every dialect that reaches here, a = b = v sets both a
+ * and b. SQL reads the inner = as a comparison, so b would be left unchanged
+ * and a would get a boolean.
+ */
+static void
+reject_chained_assignment(Ctx *cx, int ra, int rb, int line)
+{
+	int			i, depth = 0;
+
+	for (i = ra; i < rb; i++)
+	{
+		Tok		   *tk = &cx->t[i];
+
+		if (tk->kind == T_LPAREN || tk->kind == T_LBRACKET || tk->kind == T_LBRACE)
+			depth++;
+		else if (tk->kind == T_RPAREN || tk->kind == T_RBRACKET || tk->kind == T_RBRACE)
+			depth--;
+		else if (depth == 0 && tk->kind == T_OP &&
+				 (plx_tok_is(tk, "=") || plx_tok_is(tk, "**=") ||
+				  (tk->len == 2 && tk->s[1] == '=' && strchr("+-*/%", tk->s[0]))))
+			plx_err(cx, line,
+					"chained assignment is not supported; assign each variable in its own statement");
+	}
+}
+
 /* emit the core (non-block) statement given range [a,b); returns nothing */
 void
 plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
@@ -3959,6 +3986,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		}
 		if (rhs_a >= rhs_b)
 			plx_err(cx, t0->line, "assignment requires a value on the right-hand side");
+		reject_chained_assignment(cx, rhs_a, rhs_b, t0->line);
 		if (plx_is_param(cx, t0->s, t0->len))
 		{
 			/* assigning to an OUT/param: plain := (never hoist) */
@@ -4078,8 +4106,12 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			 (cx->t[a + 1].kind == T_OP && cx->t[a + 1].len == 2 &&
 			  cx->t[a + 1].s[0] == '-' && cx->t[a + 1].s[1] == '>')))
 		{
-			char	   *lhs = plx_rw_range(cx, a, eq, false);
-			char	   *rhs = plx_rw_range(cx, eq + 1, b, false);
+			char	   *lhs;
+			char	   *rhs;
+
+			reject_chained_assignment(cx, eq + 1, b, t0->line);
+			lhs = plx_rw_range(cx, a, eq, false);
+			rhs = plx_rw_range(cx, eq + 1, b, false);
 
 			plx_indent(o, ind);
 			appendStringInfo(o, "%s := %s;\n", lhs, rhs);

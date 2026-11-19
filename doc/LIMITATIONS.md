@@ -44,6 +44,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
   a local or parameter `a`. Rename one of them. SQL folds an unquoted parameter
   name to lower case, so a parameter declared as `userId` may be written
   `userId` in the body, as long as the body always spells it the same way.
+- **One assignment per statement.** In plxruby, plxphp, plxjs, plxts and
+  plxpython3, `CREATE FUNCTION` rejects a chained assignment such as
+  `a = b = 0` or `a += b = 1`. Assign each variable in its own statement.
 - **SQL semantics, not the source language's.** Decimal literals are exact
   `numeric`, not IEEE 754 floating point. Comparisons use SQL three-valued logic,
   so a comparison involving NULL is unknown rather than false, and `==`/`===`
