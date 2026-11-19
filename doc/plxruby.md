@@ -272,8 +272,10 @@ assert(n > 0, "must be positive")
   meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
   becomes SQL `a # b`; it works on integers.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
-- Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
-  `::double precision`. `nil` becomes `NULL`.
+- Casts: `x.to_s` and `x.to_f` become `::text` and `::double precision`.
+  `x.to_i` becomes `trunc((x)::numeric)::integer`, so it truncates toward zero
+  as Ruby does: `2.7.to_i` is 2 and `-2.7.to_i` is -2. A string such as
+  `"4.7"` gives 4. `nil` becomes `NULL`.
 
 ## Building strings in a loop
 

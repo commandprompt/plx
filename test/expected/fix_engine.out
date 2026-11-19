@@ -556,3 +556,57 @@ SELECT fe_a18_str_php();
  a # b /* c */
 (1 row)
 
+-- A23: int(x) and x.to_i truncate toward zero, as Python and Ruby do
+CREATE FUNCTION fe_a23_py(x numeric) RETURNS int LANGUAGE plxpython3 AS $$
+return int(x)
+$$;
+SELECT fe_a23_py(2.7) AS p27, fe_a23_py(-2.5) AS m25, fe_a23_py(-2.7) AS m27;
+ p27 | m25 | m27 
+-----+-----+-----
+   2 |  -2 |  -2
+(1 row)
+
+CREATE FUNCTION fe_a23_py_f(x float8, s text, b bool) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{int(x * 2)} {int(s)} {int(b)} {int(x > 1)} {int(True)} {int(x) + 1}"
+$$;
+SELECT fe_a23_py_f(1.4, '42', true);
+ fe_a23_py_f  
+--------------
+ 2 42 1 1 1 2
+(1 row)
+
+CREATE FUNCTION fe_a23_rb(x numeric) RETURNS int LANGUAGE plxruby AS $$
+return x.to_i
+$$;
+SELECT fe_a23_rb(2.7) AS p27, fe_a23_rb(-2.5) AS m25;
+ p27 | m25 
+-----+-----
+   2 |  -2
+(1 row)
+
+CREATE FUNCTION fe_a23_rb_f(x numeric, s text) RETURNS text LANGUAGE plxruby AS $$
+return "#{(x * 2).to_i} #{s.to_i} #{'4.7'.to_i} #{x.to_s.to_i} #{1 + x.to_i} #{x.to_f.to_i} #{abs(x).to_i}"
+$$;
+SELECT fe_a23_rb_f(-1.4, '12');
+    fe_a23_rb_f    
+-------------------
+ -2 12 4 -1 0 -1 1
+(1 row)
+
+-- A23: int() of a boolean plx cannot see fails; a comparison makes it visible
+CREATE FUNCTION fe_a23_hb_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
+return int(starts_with(s, 'a'))
+$$;
+CREATE FUNCTION fe_a23_hb2_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
+return int(starts_with(s, 'a') == True)
+$$;
+\set VERBOSITY sqlstate
+SELECT fe_a23_hb_py('abc');
+ERROR:  42846
+\set VERBOSITY default
+SELECT fe_a23_hb2_py('abc');
+ fe_a23_hb2_py 
+---------------
+             1
+(1 row)
+

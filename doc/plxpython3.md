@@ -229,6 +229,14 @@ assert n > 0, "must be positive"
   meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
   becomes SQL `a # b`; it works on integers.
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
+- Conversions: `str(x)` and `float(x)` become `(x)::text` and
+  `(x)::double precision`. `int(x)` becomes `trunc((x)::numeric)::integer`, so
+  it truncates toward zero as Python does: `int(2.7)` is 2 and `int(-2.7)` is
+  -2. When the argument is visibly boolean (`True`, `False`, a boolean variable,
+  or a comparison such as `int(a > b)`), `int(x)` becomes `(x)::integer`
+  instead, because a boolean has no numeric cast. A boolean value plx cannot
+  see, such as a function that returns boolean, fails with `cannot cast type
+  boolean to numeric`; write `int(f(x) == True)` or a `CASE`.
 - `None` becomes `NULL`.
 
 ## Building strings in a loop

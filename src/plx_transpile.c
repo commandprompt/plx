@@ -702,6 +702,206 @@ field_subscript_ok(Ctx *cx, const char *w, int wl)
 	return true;
 }
 
+/*
+ * Is the SQL text s[0..len) visibly a boolean: true/false, a boolean
+ * parameter or local, or an expression with a comparison or logical operator
+ * outside parentheses and quotes?  Python int() of such a value must use
+ * ::integer, because boolean has no cast to numeric.
+ */
+static bool
+sql_is_boolish(Ctx *cx, const char *s, int len)
+{
+	int			i = 0,
+				depth = 0;
+	PlxLocal2  *l;
+
+	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n'))
+		s++, len--;
+	while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\n'))
+		len--;
+	if ((len == 4 && pg_strncasecmp(s, "true", 4) == 0) ||
+		(len == 5 && pg_strncasecmp(s, "false", 5) == 0))
+		return true;
+	if (len > 0 && plx_is_ident_start(s[0]))
+	{
+		int			k = 0;
+
+		while (k < len && plx_is_ident(s[k]))
+			k++;
+		if (k == len)
+		{
+			if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+			{
+				int			a;
+
+				for (a = 0; a < cx->meta->nargs; a++)
+				{
+					const char *an = cx->meta->argnames[a];
+
+					if (an && (int) strlen(an) == len && pg_strncasecmp(an, s, len) == 0)
+						return cx->meta->argtypes[a] == BOOLOID;
+				}
+			}
+			l = plx_local_find(cx, s, len);
+			if (l && l->typ)
+			{
+				char		buf[16];
+
+				if (type_norm(l->typ, buf, sizeof(buf)) &&
+					(strcmp(buf, "boolean") == 0 || strcmp(buf, "bool") == 0))
+					return true;
+			}
+			return false;
+		}
+	}
+	while (i < len)
+	{
+		char		c = s[i];
+
+		if (c == '\'' || c == '"')
+		{
+			i++;
+			while (i < len && s[i] != c)
+				i++;
+			i++;
+			continue;
+		}
+		if (c == '(' || c == '[')
+			depth++;
+		else if (c == ')' || c == ']')
+			depth--;
+		else if (depth == 0 && strchr("=<>!", c))
+		{
+			int			j = i;
+
+			while (j < len && strchr("=<>!", s[j]))
+				j++;
+			/* << and >> are shifts, not comparisons */
+			if (!((j - i) == 2 && s[i] == s[i + 1] && (c == '<' || c == '>')))
+				return true;
+			i = j;
+			continue;
+		}
+		else if (depth == 0 && plx_is_ident_start(c) && (i == 0 || !plx_is_ident(s[i - 1])))
+		{
+			static const char *const kw[] = {"and", "or", "not", "is", "in", "like",
+			"ilike", "between"};
+			int			j = i,
+						k;
+
+			while (j < len && plx_is_ident(s[j]))
+				j++;
+			for (k = 0; k < (int) lengthof(kw); k++)
+				if ((int) strlen(kw[k]) == j - i && pg_strncasecmp(s + i, kw[k], j - i) == 0)
+					return true;
+			i = j;
+			continue;
+		}
+		i++;
+	}
+	return false;
+}
+
+/*
+ * Find where the operand ending at o[n] starts, for a postfix such as Ruby's
+ * .to_i that is reached after its receiver was already written: a name or
+ * number, a quoted string, a parenthesized or bracketed group with an
+ * optional function name or base before it, each with any ::type casts.
+ * Returns -1 if there is no such operand.
+ */
+static int
+last_operand_start(const char *o, int n)
+{
+	int			p = n;
+
+	while (p > 0 && (o[p - 1] == ' ' || o[p - 1] == '\t' || o[p - 1] == '\n'))
+		p--;
+	for (;;)
+	{
+		char		c;
+		int			q;
+
+		if (p <= 0)
+			return -1;
+		c = o[p - 1];
+		if (c == ')' || c == ']')
+		{
+			int			depth = 0;
+
+			q = p - 1;
+			while (q >= 0)
+			{
+				char		d = o[q];
+
+				if (d == '\'' || d == '"')
+				{
+					/* a doubled quote reads as two adjacent strings: same result */
+					q--;
+					while (q >= 0 && o[q] != d)
+						q--;
+					if (q < 0)
+						return -1;
+					q--;
+					continue;
+				}
+				if (d == ')' || d == ']')
+					depth++;
+				else if (d == '(' || d == '[')
+				{
+					depth--;
+					if (depth == 0)
+						break;
+				}
+				q--;
+			}
+			if (q < 0)
+				return -1;
+			p = q;
+			while (p > 0 && (plx_is_ident(o[p - 1]) || o[p - 1] == '.'))
+				p--;
+		}
+		else if (c == '\'' || c == '"')
+		{
+			q = p - 2;
+			for (;;)
+			{
+				while (q >= 0 && o[q] != c)
+					q--;
+				if (q < 0)
+					return -1;
+				if (q > 0 && o[q - 1] == c)
+				{
+					q -= 2;
+					continue;
+				}
+				break;
+			}
+			p = q;
+			if (c == '\'' && p > 0 && (o[p - 1] == 'E' || o[p - 1] == 'e') &&
+				(p < 2 || !plx_is_ident(o[p - 2])))
+				p--;
+		}
+		else if (plx_is_ident(c) || c == '.')
+		{
+			int			wend = p;
+
+			while (p > 0 && (plx_is_ident(o[p - 1]) || o[p - 1] == '.'))
+				p--;
+			if (wend - p == 9 && strncmp(o + p, "precision", 9) == 0 &&
+				p >= 7 && strncmp(o + p - 7, "double ", 7) == 0)
+				p -= 7;
+		}
+		else
+			return -1;
+		if (p >= 2 && o[p - 1] == ':' && o[p - 2] == ':')
+		{
+			p -= 2;
+			continue;
+		}
+		return p;
+	}
+}
+
 /* is a declared type text-like (so string append applies)? */
 static bool
 is_stringy(const char *typ)
@@ -2181,7 +2381,16 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					k++;
 				}
 				inner = plx_rewrite_expr(cx, s + argstart, k - argstart, false);
-				appendStringInfo(&out, "(%s)::%s", inner, cast);
+				/*
+				 * Python int() truncates toward zero; a cast to integer rounds.
+				 * Go through trunc(numeric), which also parses text the way
+				 * int() does. A boolean has no numeric cast, so a value that is
+				 * visibly boolean keeps the plain cast (int(True) is 1).
+				 */
+				if (s[i] == 'i' && !sql_is_boolish(cx, inner, (int) strlen(inner)))
+					appendStringInfo(&out, "trunc((%s)::numeric)::integer", inner);
+				else
+					appendStringInfo(&out, "(%s)::%s", inner, cast);
 				i = (k < len) ? k + 1 : k;
 				continue;
 			}
@@ -2502,8 +2711,24 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		{
 			char		k = s[i + 4];
 
-			appendStringInfoString(&out, k == 'i' ? "::integer" :
-								   k == 's' ? "::text" : "::double precision");
+			if (k == 'i')
+			{
+				/*
+				 * Ruby to_i truncates toward zero; a cast to integer rounds.
+				 * Wrap the receiver, already written, in trunc(numeric).
+				 */
+				int			st = last_operand_start(out.data, out.len);
+				char	   *recv;
+
+				if (st < 0)
+					plx_err(cx, 0, "cannot tell which value .to_i applies to: put the value in parentheses");
+				recv = pstrdup(out.data + st);
+				out.len = st;
+				out.data[st] = '\0';
+				appendStringInfo(&out, "trunc((%s)::numeric)::integer", recv);
+			}
+			else
+				appendStringInfoString(&out, k == 's' ? "::text" : "::double precision");
 			i += 5;
 			if (i + 1 < len && s[i] == '(' && s[i + 1] == ')')
 				i += 2;
