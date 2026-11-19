@@ -205,3 +205,17 @@ SELECT id, total, tag FROM tq_trg;
 (1 row)
 
 DROP TABLE tq_trg CASCADE;
+-- hostile nesting raises a clean error instead of overflowing the C stack
+DO $d$ BEGIN
+  EXECUTE 'DO LANGUAGE plxtsql $b$RETURN '
+    || repeat('ISNULL(', 2000) || '1' || repeat(', 0)', 2000) || ';$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+WARNING:  caught: plxtsql: expression nested too deeply
+-- below the 500-level counter, a small stack is guarded by check_stack_depth()
+SET max_stack_depth = '100kB';
+DO $d$ BEGIN
+  EXECUTE 'DO LANGUAGE plxtsql $b$RETURN '
+    || repeat('ISNULL(', 450) || '1' || repeat(', 0)', 450) || ';$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+WARNING:  caught: stack depth limit exceeded
+RESET max_stack_depth;

@@ -25,7 +25,9 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "parser/scansup.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 
 #include "plx.h"
 #include "plx_int.h"
@@ -69,6 +71,7 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	char	   *r;
 
 	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
 	if (++cx->depth > PLX_MAX_DEPTH)
 		plx_err(cx, 0, "expression nested too deeply");
 	r = rewrite_expr_inner(cx, s, len, boolctx);
@@ -188,6 +191,7 @@ plx_lex(Ctx *cx)
 	{
 		const char *tokstart = p;
 
+		CHECK_FOR_INTERRUPTS();
 		if (*p == ' ' || *p == '\t' || *p == '\r')
 		{
 			p++;
@@ -204,12 +208,25 @@ plx_lex(Ctx *cx)
 			PUSH0(T_NEWLINE);
 			if (indent_mode)
 			{
-				/* find the next real line's indentation, skipping blanks/comments */
+				/*
+				 * Find the next real line's indentation, skipping blanks and
+				 * comments, and resume lexing after the skipped lines rather
+				 * than at the next newline: rescanning the run from every
+				 * newline made K blank lines cost O(K^2) and counted their
+				 * line numbers twice. A type-annotation line ends the scan
+				 * (it has to be lexed); its newline scans on from there, so
+				 * a run of them is linear too.
+				 */
 				const char *q = p;
+				const char *resume = p;
+				int			resume_line = line;
+				bool		ann_line = false;
 				int			col = 0;
 
 				for (;;)
 				{
+					const char *ls = q;
+
 					col = 0;
 					while (*q == ' ' || *q == '\t')
 					{
@@ -219,19 +236,30 @@ plx_lex(Ctx *cx)
 					if (q < end && *q == '\n')
 					{
 						q++;
-						line++;
+						resume = q;
+						resume_line++;
 						continue;
 					}
 					if (q < end && *q == '#')
 					{
+						if (surf->type_ann &&
+							strncmp(q, surf->type_ann, strlen(surf->type_ann)) == 0)
+						{
+							resume = ls;
+							ann_line = true;
+							break;
+						}
 						while (q < end && *q != '\n')
 							q++;
 						continue;
 					}
 					break;		/* real line, or EOF */
 				}
-				if (q >= end)
-					continue;	/* trailing dedents handled at EOF */
+				p = resume;
+				line = resume_line;
+				if (ann_line || q >= end)
+					continue;	/* indentation is taken at the next real line;
+								 * trailing dedents are handled at EOF */
 				if (col > indent_stack[indent_sp])
 				{
 					/*
@@ -564,21 +592,63 @@ plx_is_param(Ctx *cx, const char *name, int len)
 	return false;
 }
 
+/*
+ * Locals are kept in declaration order (cx->locals, which DECLARE emission
+ * walks) and indexed in cx->lhash. A linear scan made a body with many
+ * distinct variables quadratic: 40,000 assignments took most of a minute.
+ *
+ * The key is the name as PostgreSQL itself reads an unquoted identifier:
+ * down-cased and truncated to NAMEDATALEN - 1 bytes (downcase_truncate_
+ * identifier). Two names that plpgsql would treat as one variable therefore
+ * share an entry, any name can be indexed (an over-long one no longer forces a
+ * fallback scan), and case folding matches the server's for every encoding.
+ */
+typedef struct
+{
+	char		key[NAMEDATALEN];
+	PlxLocal2  *l;
+} PlxLocalEnt;
+
+static void
+plx_local_key(const char *name, int len, char *key)
+{
+	char	   *k = downcase_truncate_identifier(name, len, false);
+
+	memset(key, 0, NAMEDATALEN);
+	strlcpy(key, k, NAMEDATALEN);
+	pfree(k);
+}
+
+void
+plx_locals_reset(Ctx *cx)
+{
+	cx->locals = cx->ltail = NULL;
+	if (cx->lhash)
+		hash_destroy(cx->lhash);
+	cx->lhash = NULL;
+}
+
 PlxLocal2 *
 plx_local_find(Ctx *cx, const char *name, int len)
 {
-	PlxLocal2  *l;
+	char		key[NAMEDATALEN];
+	PlxLocalEnt *e;
 
-	for (l = cx->locals; l; l = l->next)
-		if ((int) strlen(l->name) == len && pg_strncasecmp(l->name, name, len) == 0)
-			return l;
-	return NULL;
+	CHECK_FOR_INTERRUPTS();
+	if (!cx->lhash)
+		return NULL;
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+	return e ? e->l : NULL;
 }
 
 PlxLocal2 *
 plx_local_add(Ctx *cx, const char *name, int len)
 {
 	PlxLocal2  *l = palloc0(sizeof(PlxLocal2));
+	char		key[NAMEDATALEN];
+	bool		found;
+	PlxLocalEnt *e;
 
 	l->name = pnstrdup(name, len);
 	if (cx->ltail)
@@ -586,6 +656,26 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	else
 		cx->locals = l;
 	cx->ltail = l;
+
+	if (!cx->lhash)
+	{
+		HASHCTL		ctl;
+
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = sizeof(PlxLocalEnt);
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->lhash = hash_create("plx locals", 64, &ctl,
+								HASH_ELEM | HASH_CONTEXT);	/* string keys */
+#endif
+	}
+	plx_local_key(name, len, key);
+	e = hash_search(cx->lhash, key, HASH_ENTER, &found);
+	if (!found)
+		e->l = l;				/* keep the first declaration */
 	return l;
 }
 
@@ -843,6 +933,19 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			s++;
 			continue;
 		}
+		/*
+		 * A backslash that reaches here is literal content (a raw string, or
+		 * a lone trailing backslash). Escape it and force the E'' form: left
+		 * bare inside an E'' literal it would escape the closing quote and
+		 * let the next literal's text run on as code.
+		 */
+		if (s[0] == '\\')
+		{
+			appendStringInfoString(&lit, "\\\\");
+			need_e = true;
+			s++;
+			continue;
+		}
 		appendStringInfoChar(&lit, *s);
 		s++;
 	}
@@ -992,6 +1095,12 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				a = plx_rewrite_expr(cx, s + q + 1, c - q - 1, false);
 				b = plx_rewrite_expr(cx, s + c + 1, len - c - 1, false);
 				r = psprintf("CASE WHEN %s THEN %s ELSE %s END", cond, a, b);
+				/* free the parts: a chain of ternaries nests one level per
+				 * '?', and keeping every level's copy of the rest of the chain
+				 * made peak memory depth * length */
+				pfree(cond);
+				pfree(a);
+				pfree(b);
 				return r;
 			}
 		}
@@ -1064,7 +1173,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != c)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -1090,7 +1199,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 			while (j < len && s[j] != q)
 			{
-				if (s[j] == '\\')
+				if (s[j] == '\\' && j + 1 < len)
 					j++;
 				j++;
 			}
@@ -1471,6 +1580,15 @@ plx_span_text(Ctx *cx, int a, int b)
 {
 	const char *st, *en;
 
+	/*
+	 * Type-annotation tokens carry no source span (s == NULL), so trim them
+	 * off both ends; a span that began on one used to compute its length
+	 * from a NULL pointer and crash the backend in pnstrdup.
+	 */
+	while (a < b && cx->t[a].s == NULL)
+		a++;
+	while (b > a && cx->t[b - 1].s == NULL)
+		b--;
 	if (b <= a)
 		return pstrdup("");
 	st = cx->t[a].s;
@@ -1510,6 +1628,68 @@ plx_indent(StringInfo o, int n)
 
 	for (i = 0; i < n; i++)
 		appendStringInfoString(o, "  ");
+}
+
+/*
+ * Enter a finally/ensure body. The lowering below emits that body twice (once
+ * per exit path), so a finally nested inside a finally doubles per level: a
+ * few hundred bytes of source could otherwise demand gigabytes of output. The
+ * caller decrements cx->ensuredepth after parsing the body.
+ */
+void
+plx_ensure_enter(Ctx *cx, int line)
+{
+	if (++cx->ensuredepth > PLX_MAX_ENSURE_DEPTH)
+		plx_err(cx, line, "finally/ensure blocks nested too deeply inside one another");
+}
+
+/*
+ * Emit a try/rescue[/finally] statement (shared by every front end):
+ *
+ *   BEGIN                          -- only when there is a finally body
+ *     BEGIN body EXCEPTION arms END;
+ *   EXCEPTION WHEN OTHERS THEN
+ *     finally; RAISE;
+ *   END;
+ *   finally;                       -- normal path, outside the handler
+ *
+ * The normal-path copy runs after the protected block rather than inside it,
+ * so an error raised by the finally body itself is not caught and does not
+ * run the finally body a second time.
+ */
+void
+plx_emit_try(StringInfo o, int ind, const char *body, int nrescue,
+			 const char *arms, const char *ensure_body)
+{
+	int			in = ensure_body ? ind + 1 : ind;
+
+	if (ensure_body)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "BEGIN\n");
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "BEGIN\n");
+	appendStringInfoString(o, body);
+	if (nrescue)
+	{
+		plx_indent(o, in);
+		appendStringInfoString(o, "EXCEPTION\n");
+		appendStringInfoString(o, arms);
+	}
+	plx_indent(o, in);
+	appendStringInfoString(o, "END;\n");
+	if (ensure_body)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
+		appendStringInfoString(o, ensure_body);
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "RAISE;\n");
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+		appendStringInfoString(o, ensure_body);
+	}
 }
 
 /* ---------------------------------------------------------------- leaves */
@@ -2143,6 +2323,9 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			{
 				Tok		   *pn = &cx->t[as[0]];
 
+				/* an f-string's prefix would be unquoted as part of the name */
+				if (pn->fstr)
+					plx_err(cx, t0->line, "call needs a plain string procedure name, not an f-string");
 				appendBinaryStringInfo(o, pn->s + 1, pn->len - 2);	/* unquote */
 			}
 			else
@@ -2633,6 +2816,162 @@ djb2(const char *s)
 	return h;
 }
 
+static bool
+sql_ident_char(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '$' || IS_HIGHBIT_SET(c);
+}
+
+/*
+ * Rewrite every standard string literal in the generated plpgsql that contains
+ * a backslash as an escape string: 'C:\' becomes E'C:\\'.
+ *
+ * plpgsql reads a function body with the caller's standard_conforming_strings,
+ * which any role may set. With it off, a backslash in an ordinary '...'
+ * literal is an escape, so a literal ending in one swallows its closing quote
+ * and the following text runs as code; a SECURITY DEFINER function's
+ * behaviour would then depend on its caller. An E'...' literal reads the same
+ * either way, and with the setting on (the default) the rewritten literal has
+ * exactly the value of the original. Doing this once over the finished body
+ * covers every dialect's literal emitters, and SQL the author passed through.
+ *
+ * A small SQL lexer: skips comments (nested block comments too), quoted
+ * identifiers, dollar-quoted strings, E'' strings (already safe) and U&''
+ * strings (where a backslash introduces a Unicode escape).
+ */
+static char *
+escape_backslash_literals(const char *s)
+{
+	StringInfoData o;
+	const char *p = s;
+
+	if (!strchr(s, '\\'))
+		return (char *) s;
+	initStringInfo(&o);
+	while (*p)
+	{
+		const char *q;
+
+		if (p[0] == '-' && p[1] == '-')
+		{
+			q = strchr(p, '\n');
+			q = q ? q + 1 : p + strlen(p);
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '/' && p[1] == '*')
+		{
+			int			depth = 1;
+
+			q = p + 2;
+			while (*q && depth > 0)
+			{
+				if (q[0] == '/' && q[1] == '*')
+				{
+					depth++;
+					q += 2;
+				}
+				else if (q[0] == '*' && q[1] == '/')
+				{
+					depth--;
+					q += 2;
+				}
+				else
+					q++;
+			}
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '"')
+		{
+			q = p + 1;
+			while (*q && !(q[0] == '"' && q[1] != '"'))
+				q += (q[0] == '"') ? 2 : 1;
+			if (*q)
+				q++;
+			appendBinaryStringInfo(&o, p, q - p);
+			p = q;
+			continue;
+		}
+		if (p[0] == '$' && (p == s || !sql_ident_char(p[-1])))
+		{
+			/* $tag$ ... $tag$; the tag cannot start with a digit ($1 is a param) */
+			const char *t = p + 1;
+
+			if (*t != '$' && ((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') ||
+							  *t == '_' || IS_HIGHBIT_SET(*t)))
+				while (sql_ident_char(*t) && *t != '$')
+					t++;
+			if (*t == '$')
+			{
+				int			taglen = (int) (t - p) + 1;
+				char	   *tag = pnstrdup(p, taglen);
+				const char *end = strstr(t + 1, tag);
+
+				q = end ? end + taglen : p + strlen(p);
+				appendBinaryStringInfo(&o, p, q - p);
+				p = q;
+				pfree(tag);
+				continue;
+			}
+		}
+		if (p[0] == '\'')
+		{
+			bool		estr = p > s && (p[-1] == 'E' || p[-1] == 'e') &&
+				(p - 1 == s || !sql_ident_char(p[-2]));
+			bool		ustr = p - 1 > s && p[-1] == '&' &&
+				(p[-2] == 'U' || p[-2] == 'u') &&
+				(p - 2 == s || !sql_ident_char(p[-3]));
+			/* B'..', X'..', N'..' and the like: leave other prefixes alone */
+			bool		prefixed = !estr && !ustr && p > s && sql_ident_char(p[-1]);
+			bool		has_bs = false;
+
+			q = p + 1;
+			while (*q)
+			{
+				if (estr && q[0] == '\\' && q[1])
+					q += 2;
+				else if (q[0] == '\'' && q[1] == '\'')
+					q += 2;
+				else if (q[0] == '\'')
+					break;
+				else
+				{
+					if (q[0] == '\\')
+						has_bs = true;
+					q++;
+				}
+			}
+			if (has_bs && !estr && !ustr && !prefixed)
+			{
+				const char *c;
+
+				appendStringInfoString(&o, "E'");
+				for (c = p + 1; c < q; c++)
+				{
+					if (*c == '\\')
+						appendStringInfoChar(&o, '\\');
+					appendStringInfoChar(&o, *c);
+				}
+			}
+			else
+				appendBinaryStringInfo(&o, p, q - p);
+			if (*q)
+			{
+				appendStringInfoChar(&o, '\'');
+				q++;
+			}
+			p = q;
+			continue;
+		}
+		appendStringInfoChar(&o, *p++);
+	}
+	return o.data;
+}
+
 char *
 plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 			  MemoryContext scratch)
@@ -2692,5 +3031,5 @@ plx_transpile(const char *body, const PlxFuncMeta *meta, const PlxSurface *surf,
 	}
 	appendStringInfo(&asm_, "/*plx-orig:b64$%s$plx-orig*/\n", b64_encode_body(body));
 
-	return asm_.data;
+	return escape_backslash_literals(asm_.data);
 }

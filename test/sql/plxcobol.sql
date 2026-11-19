@@ -376,3 +376,16 @@ PROCEDURE DIVISION.
 $$;
 SELECT cob_donote();
 SELECT msg FROM cob_log;
+
+-- hostile subscript nesting raises a clean error instead of overflowing the stack
+DO $d$ BEGIN
+  EXECUTE 'CREATE FUNCTION cob_deep() RETURNS int LANGUAGE plxcobol AS $b$
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
+01 WS-X PIC 9(9).
+PROCEDURE DIVISION.
+    COMPUTE WS-X = ' || repeat('WS-ARR(', 2000) || '1' || repeat(')', 2000) || '
+    GOBACK.
+$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;

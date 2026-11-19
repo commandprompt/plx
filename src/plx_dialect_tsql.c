@@ -679,7 +679,7 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 
 /* emit tokens [a,b) as a plpgsql expression */
 static void
-tq_emit_range(Tq *tq, int a, int b, StringInfo out)
+tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 {
 	int			i = a;
 
@@ -780,6 +780,21 @@ tq_emit_range(Tq *tq, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/*
+ * Recursion guard for the expression emitter. Nested calls, subscripts and
+ * literals recurse through here once per level; without check_stack_depth()
+ * hostile nesting overflows the C stack and crashes the backend (SIGSEGV).
+ */
+static void
+tq_emit_range(Tq *tq, int a, int b, StringInfo out)
+{
+	check_stack_depth();
+	if (++tq->cx->depth > PLX_MAX_DEPTH)
+		tq_err(tq, "expression nested too deeply");
+	tq_emit_range_inner(tq, a, b, out);
+	tq->cx->depth--;
 }
 
 /* end of an expression/raw statement: first depth-0 ; EOF END or ELSE */
@@ -1519,7 +1534,7 @@ plx_tsql_parse_body(Ctx *cx)
 		tq.pos = save;
 		cx->out.len = 0;
 		cx->out.data[0] = '\0';
-		cx->locals = cx->ltail = NULL;
+		plx_locals_reset(cx);
 	}
 	while (tq_cur(&tq)->kind != TQ_EOF)
 	{

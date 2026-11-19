@@ -442,8 +442,10 @@ cob_is_array(Cb *cb, const char *name)
  * noise word, figurative constants, ** -> ^, data-name mapping, and array
  * subscripts (WS-ARR(I) -> ws_arr[i]).
  */
+static void cob_emit_range(Cb *cb, int a, int b, StringInfo out);
+
 static void
-cob_emit_range(Cb *cb, int a, int b, StringInfo out)
+cob_emit_range_inner(Cb *cb, int a, int b, StringInfo out)
 {
 	CbTok	   *t = cb->t;
 	int			i = a;
@@ -619,6 +621,21 @@ cob_emit_range(Cb *cb, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/*
+ * Recursion guard for the expression emitter. Nested calls, subscripts and
+ * literals recurse through here once per level; without check_stack_depth()
+ * hostile nesting overflows the C stack and crashes the backend (SIGSEGV).
+ */
+static void
+cob_emit_range(Cb *cb, int a, int b, StringInfo out)
+{
+	check_stack_depth();
+	if (++cb->cx->depth > PLX_MAX_DEPTH)
+		cob_err(cb, "expression nested too deeply");
+	cob_emit_range_inner(cb, a, b, out);
+	cb->cx->depth--;
 }
 
 /* true if the current token stops a value scan */
