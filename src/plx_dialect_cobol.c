@@ -1410,11 +1410,30 @@ cob_if(Cb *cb, int ind)
 	appendStringInfoString(&cb->cx->out, "END IF;\n");
 }
 
+/*
+ * A plpgsql CASE needs at least one WHEN arm. When an EVALUATE has none of its
+ * own (only WHEN OTHER, or WHENs stacked directly before it), emit an arm that
+ * never matches. In the simple form the subject is compared with NULL, which
+ * is never true.
+ */
+static void
+cob_evaluate_noarm(Cb *cb, int ind, bool searched, int narms)
+{
+	if (narms > 0)
+		return;
+	plx_indent(&cb->cx->out, ind + 1);
+	appendStringInfoString(&cb->cx->out, searched ? "WHEN false THEN\n"
+						   : "WHEN NULL THEN\n");
+	plx_indent(&cb->cx->out, ind + 2);
+	appendStringInfoString(&cb->cx->out, "NULL;\n");
+}
+
 static void
 cob_evaluate(Cb *cb, int ind)
 {
 	bool		searched;
 	bool		has_other = false;
+	int			narms = 0;
 
 	cb->pos++;								/* EVALUATE */
 	searched = cob_ci(cob_cur(cb), "TRUE");
@@ -1441,6 +1460,7 @@ cob_evaluate(Cb *cb, int ind)
 		if (cob_ci(&cb->t[cb->pos + 1], "OTHER"))
 		{
 			cb->pos += 2;
+			cob_evaluate_noarm(cb, ind, searched, narms);
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfoString(&cb->cx->out, "ELSE\n");
 			cob_block(cb, ind + 2);
@@ -1492,6 +1512,7 @@ cob_evaluate(Cb *cb, int ind)
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfo(&cb->cx->out, "WHEN %s THEN\n", vals.data);
 			cob_block(cb, ind + 2);
+			narms++;
 		}
 	}
 	cob_expect(cb, "END-EVALUATE");
@@ -1499,6 +1520,7 @@ cob_evaluate(Cb *cb, int ind)
 	 * CASE with no match raises case_not_found */
 	if (!has_other)
 	{
+		cob_evaluate_noarm(cb, ind, searched, narms);
 		plx_indent(&cb->cx->out, ind + 1);
 		appendStringInfoString(&cb->cx->out, "ELSE\n");
 		plx_indent(&cb->cx->out, ind + 2);

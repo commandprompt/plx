@@ -369,3 +369,50 @@ PROCEDURE DIVISION.
     DISPLAY "table=" WS-B.
 $$;
 NOTICE:  table={5,6}
+-- A37 review: a WHEN stacked before WHEN OTHER that is the only other arm still runs
+CREATE FUNCTION fc_r2_only(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE N
+        WHEN 2
+        WHEN OTHER
+            MOVE "other" TO WS-R
+    END-EVALUATE
+    GOBACK RETURNING WS-R.
+$$;
+SELECT fc_r2_only(2) AS expect_other, fc_r2_only(5) AS other5;
+ expect_other | other5 
+--------------+--------
+ other        | other
+(1 row)
+
+CREATE FUNCTION fc_r2_only_searched(n int) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE TRUE
+        WHEN N = 2
+        WHEN OTHER
+            MOVE "other" TO WS-R
+    END-EVALUATE
+    GOBACK RETURNING WS-R.
+$$;
+SELECT fc_r2_only_searched(2) AS expect_other, fc_r2_only_searched(5) AS other5;
+ expect_other | other5 
+--------------+--------
+ other        | other
+(1 row)
+
+-- A37 review: an EVALUATE with only WHEN OTHER runs its statements
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-R PIC X(10) VALUE "none".
+PROCEDURE DIVISION.
+    EVALUATE 3
+        WHEN OTHER
+            MOVE "other" TO WS-R
+    END-EVALUATE
+    DISPLAY "r=" WS-R.
+$$;
+NOTICE:  r=other
