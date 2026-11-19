@@ -245,3 +245,13 @@ CREATE FUNCTION fx44_fold() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CONVERT(varchar(10), @o) || '/' || @s;
 $$;
 SELECT fx44_fold();
+-- A48: nested balanced calls whose argument lists have no comma transpile in linear time
+SET statement_timeout = '5s';
+SET check_function_bodies = off;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_iif() RETURNS void LANGUAGE plxtsql AS $plx$DECLARE @x int = 1; SET @x = ' || repeat('IIF(', 160000) || '1' || repeat(')', 160000) || ';$plx$'; END $d$;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_conv() RETURNS void LANGUAGE plxtsql AS $plx$DECLARE @x int = 1; SET @x = ' || repeat('CONVERT(', 160000) || '1' || repeat(')', 160000) || ';$plx$'; END $d$;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_cidx() RETURNS void LANGUAGE plxtsql AS $plx$DECLARE @x int = 1; SET @x = ' || repeat('CHARINDEX(', 160000) || '1' || repeat(')', 160000) || ';$plx$'; END $d$;
+-- N-plsql-quadratic-paren: nested balanced RAISE_APPLICATION_ERROR( with no comma transpiles in linear time
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad3() RETURNS void LANGUAGE plxplsql AS $plx$BEGIN ' || repeat('RAISE_APPLICATION_ERROR(', 160000) || '1' || repeat(')', 160000) || '; END;$plx$'; END $d$;
+RESET check_function_bodies;
+RESET statement_timeout;

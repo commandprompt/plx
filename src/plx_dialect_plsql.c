@@ -55,6 +55,8 @@ typedef struct
 	PlTok	   *t;
 	int			nt;
 	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
+	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
+	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
 } Pl;
 
 static bool
@@ -241,7 +243,10 @@ pl_word_map(PlTok *tk)
 /*
  * Pair every '(' with its ')' once, after lexing. A forward scan from each
  * DBMS_OUTPUT.PUT_LINE( or RAISE_APPLICATION_ERROR( made unbalanced input cost
- * O(n^2): every call rescanned to the end of the body.
+ * O(n^2): every call rescanned to the end of the body. The same pass records
+ * the first two top-level commas inside each '(', so RAISE_APPLICATION_ERROR
+ * needs no scan of its argument list: nested calls with no comma failed one by
+ * one and rescanned each range.
  */
 static void
 pl_pair_parens(Pl *pl)
@@ -251,14 +256,27 @@ pl_pair_parens(Pl *pl)
 				i;
 
 	pl->match = palloc(sizeof(int) * (pl->nt + 1));
+	pl->comma1 = palloc(sizeof(int) * (pl->nt + 1));
+	pl->comma2 = palloc(sizeof(int) * (pl->nt + 1));
 	for (i = 0; i < pl->nt; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
 		pl->match[i] = -1;
+		pl->comma1[i] = -1;
+		pl->comma2[i] = -1;
 		if (pl_punct(&pl->t[i], '('))
 			stack[sp++] = i;
 		else if (pl_punct(&pl->t[i], ')') && sp > 0)
 			pl->match[stack[--sp]] = i;
+		else if (pl_punct(&pl->t[i], ',') && sp > 0)
+		{
+			int			top = stack[sp - 1];
+
+			if (pl->comma1[top] < 0)
+				pl->comma1[top] = i;
+			else if (pl->comma2[top] < 0)
+				pl->comma2[top] = i;
+		}
 	}
 	pfree(stack);
 }
@@ -450,41 +468,13 @@ plx_plsql_parse_body(Ctx *cx)
 				pl_punct(&pl.t[i + 1], '('))
 			{
 				int			close = pl_match_paren(&pl, i + 1);
-				int			comma = -1,
-							depth = 0,
-							k;
+				int			comma = pl.comma1[i + 1];
 
-				for (k = i + 2; close > 0 && k < close; k++)
-				{
-					if (pl_punct(&pl.t[k], '('))
-						depth++;
-					else if (pl_punct(&pl.t[k], ')'))
-						depth--;
-					else if (depth == 0 && pl_punct(&pl.t[k], ','))
-					{
-						comma = k;
-						break;
-					}
-				}
 				if (close > 0 && comma > 0)
 				{
-					int			mend = close;
-					int			d2 = 0,
-								k2;
-
 					/* message runs to the next top-level comma or the ')' */
-					for (k2 = comma + 1; k2 < close; k2++)
-					{
-						if (pl_punct(&pl.t[k2], '('))
-							d2++;
-						else if (pl_punct(&pl.t[k2], ')'))
-							d2--;
-						else if (d2 == 0 && pl_punct(&pl.t[k2], ','))
-						{
-							mend = k2;
-							break;
-						}
-					}
+					int			mend = pl.comma2[i + 1] > 0 ? pl.comma2[i + 1] : close;
+
 					appendStringInfoString(out, "RAISE EXCEPTION '%', (");
 					pl_emit_raw(&pl, comma + 1, mend, out);
 					appendStringInfoChar(out, ')');

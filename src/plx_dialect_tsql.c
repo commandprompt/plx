@@ -65,6 +65,8 @@ typedef struct
 	int			nt, pos;
 	int			nsel;			/* hidden SELECT-assignment loop records */
 	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
+	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
+	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
 } Tq;
 
 static void tq_stmt(Tq *tq, int ind);
@@ -564,7 +566,10 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 /*
  * Pair every '(' with its ')' once, after lexing. A forward scan from each
  * '(' (the old tq_match_lp) made unbalanced input such as f(f(f(... cost
- * O(n^2): every call name rescanned to the end of the range.
+ * O(n^2): every call name rescanned to the end of the range. The same pass
+ * records the first two top-level commas inside each '(', so CONVERT, IIF and
+ * CHARINDEX need no scan of their argument list either: nested calls such as
+ * IIF(IIF(IIF(...))) with no comma failed one by one and rescanned each range.
  */
 static void
 tq_pair_parens(Tq *tq)
@@ -574,14 +579,27 @@ tq_pair_parens(Tq *tq)
 				i;
 
 	tq->match = palloc(sizeof(int) * (tq->nt + 1));
+	tq->comma1 = palloc(sizeof(int) * (tq->nt + 1));
+	tq->comma2 = palloc(sizeof(int) * (tq->nt + 1));
 	for (i = 0; i < tq->nt; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
 		tq->match[i] = -1;
+		tq->comma1[i] = -1;
+		tq->comma2[i] = -1;
 		if (tq->t[i].kind == TQ_LP)
 			stack[sp++] = i;
 		else if (tq->t[i].kind == TQ_RP && sp > 0)
 			tq->match[stack[--sp]] = i;
+		else if (tq->t[i].kind == TQ_COMMA && sp > 0)
+		{
+			int			top = stack[sp - 1];
+
+			if (tq->comma1[top] < 0)
+				tq->comma1[top] = i;
+			else if (tq->comma2[top] < 0)
+				tq->comma2[top] = i;
+		}
 	}
 	pfree(stack);
 }
@@ -614,26 +632,10 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 	if (tq_ci(tk, "CONVERT"))
 	{
 		int			c1 = lp + 1,
-					depth = 0,
-					comma = -1,
-					comma2 = -1,
-					j;
+					comma = tq->comma1[lp],
+					comma2 = tq->comma2[lp];
 		StringInfoData ty;
 
-		for (j = lp + 1; j < close; j++)
-		{
-			if (tq->t[j].kind == TQ_LP)
-				depth++;
-			else if (tq->t[j].kind == TQ_RP)
-				depth--;
-			else if (tq->t[j].kind == TQ_COMMA && depth == 0)
-			{
-				if (comma < 0)
-					comma = j;
-				else if (comma2 < 0)
-					comma2 = j;
-			}
-		}
 		if (comma < 0)
 			return false;
 		initStringInfo(&ty);
@@ -649,25 +651,9 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 	/* IIF(cond, a, b) -> CASE WHEN cond THEN a ELSE b END */
 	if (tq_ci(tk, "IIF"))
 	{
-		int			depth = 0,
-					c1 = -1,
-					c2 = -1,
-					j;
+		int			c1 = tq->comma1[lp],
+					c2 = tq->comma2[lp];
 
-		for (j = lp + 1; j < close; j++)
-		{
-			if (tq->t[j].kind == TQ_LP)
-				depth++;
-			else if (tq->t[j].kind == TQ_RP)
-				depth--;
-			else if (tq->t[j].kind == TQ_COMMA && depth == 0)
-			{
-				if (c1 < 0)
-					c1 = j;
-				else if (c2 < 0)
-					c2 = j;
-			}
-		}
 		if (c1 < 0 || c2 < 0)
 			return false;
 		tq_sp(out);
@@ -723,19 +709,8 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 				/* CHARINDEX(sub, str) -> strpos(str, sub): swap the two args */
 				if (pg_strcasecmp(r[k].tsql, "charindex") == 0)
 				{
-					int			depth = 0,
-								comma = -1,
-								j;
+					int			comma = tq->comma1[lp];
 
-					for (j = lp + 1; j < close; j++)
-					{
-						if (tq->t[j].kind == TQ_LP)
-							depth++;
-						else if (tq->t[j].kind == TQ_RP)
-							depth--;
-						else if (tq->t[j].kind == TQ_COMMA && depth == 0 && comma < 0)
-							comma = j;
-					}
 					if (comma < 0)
 						return false;
 					tq_sp(out);
