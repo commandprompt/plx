@@ -190,8 +190,10 @@ with NULL distinguished from the empty string, and a case that raises must
 raise the same SQLSTATE.
 
 Some divergences are intended, and a case records them in a `documented` entry
-naming the dialects, the calls, and the reason. Those are reported separately
-rather than failing. The check also fails when a recorded divergence stops
+naming the dialects, the calls, the reason, and the exact result the dialect
+gives instead. Those are reported separately rather than failing. Only the
+recorded result is exempt: if the dialect starts to give any other wrong
+result, the check fails. The check also fails when a recorded divergence stops
 happening, so a limitation cannot quietly outlive the documentation that
 describes it. Where a case cannot cover a dialect, the run prints the gap
 instead of passing over it.

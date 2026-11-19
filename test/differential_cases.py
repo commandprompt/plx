@@ -4,6 +4,11 @@ Each entry holds one small program written as a plpgsql reference plus one
 body per dialect. Keep the dialect bodies idiomatic for their language but
 semantically identical to the reference, and keep one behaviour per program
 so that a divergence points at a single cause.
+
+A case may list known divergences under "documented". Each entry names the
+dialects and calls it covers, the reason, and the exact result it documents
+under "outcome": one result for every call, or a dict from call to result.
+Only that result is exempt; any other divergence still fails the check.
 """
 
 # dialect language name -> short tag used in generated function names
@@ -401,6 +406,8 @@ END;
                 "calls": ["NULL, 3", "'bob', NULL"],
                 "reason": "the plx_strbuild accumulator appends a NULL as "
                           "nothing by design (doc/LIMITATIONS.md)",
+                "outcome": {"NULL, 3": "user  has 3 items",
+                            "'bob', NULL": "user bob has  items"},
             },
         ],
     },
@@ -1013,12 +1020,31 @@ return s.upper()
         },
         "documented": [
             {
-                "dialects": ["plxruby", "plxphp", "plxjs", "plxts",
-                             "plxpython3"],
+                # s.upcase reads as a column reference to a table s.
+                "dialects": ["plxruby"],
                 "calls": ["'hello'", "''", "NULL"],
                 "reason": "only plxgo maps standard-library calls; elsewhere a "
                           "method or library call is passed through to SQL and "
                           "must name a real function (doc/LIMITATIONS.md)",
+                "outcome": "ERROR 42P01",
+            },
+            {
+                # strtoupper($s) names a function that does not exist.
+                "dialects": ["plxphp"],
+                "calls": ["'hello'", "''", "NULL"],
+                "reason": "only plxgo maps standard-library calls; elsewhere a "
+                          "method or library call is passed through to SQL and "
+                          "must name a real function (doc/LIMITATIONS.md)",
+                "outcome": "ERROR 42883",
+            },
+            {
+                # s.upper() reads as function upper in a schema s.
+                "dialects": ["plxjs", "plxts", "plxpython3"],
+                "calls": ["'hello'", "''", "NULL"],
+                "reason": "only plxgo maps standard-library calls; elsewhere a "
+                          "method or library call is passed through to SQL and "
+                          "must name a real function (doc/LIMITATIONS.md)",
+                "outcome": "ERROR 3F000",
             },
         ],
     },

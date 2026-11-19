@@ -13,6 +13,11 @@ value or raises, and both outcomes are compared: values by their text form
 (NULL is distinguished from the empty string), errors by SQLSTATE, so that a
 dialect is required to fail the same way the reference fails.
 
+A case may document a known divergence for some dialects and calls. Each such
+entry records the exact outcome it documents ("outcome"), and only that
+outcome is exempt: a dialect that diverges in any other way is still reported
+as unexplained.
+
 Run it with `make differentialcheck`, which points PLX_PSQL at the psql
 belonging to PG_CONFIG. It needs the extension installed and a running server,
 the same preconditions as installcheck.
@@ -125,7 +130,96 @@ def probe_all(created_ok):
     return results
 
 
+def find_exemption(known, dialect, call):
+    """Return the documented-divergence entry covering (dialect, call), or None."""
+    for entry in known:
+        if dialect in entry["dialects"] and call in entry["calls"]:
+            return entry
+    return None
+
+
+def documented_outcome(entry, call):
+    """The exact result a documented divergence records for one call.
+
+    An entry's "outcome" is either one result for every call it lists, or a
+    dict from call to result.
+    """
+    outcome = entry["outcome"]
+    if isinstance(outcome, dict):
+        return outcome[call]
+    return outcome
+
+
+def classify(got, expected, entry, call):
+    """Classify one dialect result against the reference result.
+
+    Returns "match", "stale", "documented" or "unexplained". A documented
+    divergence exempts only the exact outcome it records: any other result
+    that differs from the reference is unexplained.
+    """
+    agrees = got == expected
+    if agrees and entry is None:
+        return "match"
+    if agrees:
+        return "stale"
+    if entry is not None and got == documented_outcome(entry, call):
+        return "documented"
+    return "unexplained"
+
+
+def check_exemptions(cases):
+    """Every documented divergence must record its outcome for every call."""
+    problems = []
+    for case in cases:
+        for entry in case.get("documented", []):
+            if "outcome" not in entry:
+                problems.append("%s: documented entry for %s has no outcome"
+                                % (case["name"], ", ".join(entry["dialects"])))
+                continue
+            if isinstance(entry["outcome"], dict):
+                for call in entry["calls"]:
+                    if call not in entry["outcome"]:
+                        problems.append("%s: documented entry for %s has no "
+                                        "outcome for call (%s)"
+                                        % (case["name"],
+                                           ", ".join(entry["dialects"]), call))
+    return problems
+
+
+def selftest():
+    """Check the comparison logic on made-up results. Returns a list of failures."""
+    failures = []
+    entry = {"dialects": ["plxruby"], "calls": ["1"], "reason": "r",
+             "outcome": "ERROR 42883"}
+    checks = [
+        # (got, expected, entry, want)
+        ("5", "5", None, "match"),
+        ("6", "5", None, "unexplained"),
+        ("5", "5", entry, "stale"),
+        ("ERROR 42883", "5", entry, "documented"),
+        # A documented divergence exempts only the outcome it documents.
+        ("wrong", "5", entry, "unexplained"),
+        ("ERROR 42P01", "5", entry, "unexplained"),
+    ]
+    per_call = dict(entry, outcome={"1": "x"})
+    checks += [("x", "5", per_call, "documented"),
+               ("y", "5", per_call, "unexplained")]
+    for got, expected, ent, want in checks:
+        verdict = classify(got, expected, ent, "1")
+        if verdict != want:
+            failures.append("classify(%r, %r, %s) gave %s, want %s"
+                            % (got, expected, "exemption" if ent else "None",
+                               verdict, want))
+    return failures
+
+
 def main():
+    failures = selftest() + check_exemptions(CASES)
+    if failures:
+        sys.stderr.write("differential.py self-test failed:\n  %s\n"
+                         % "\n  ".join(failures))
+        return 2
+
     _, err, rc = psql(PROBE + SETUP, stop_on_error=True)
     if rc != 0:
         sys.stderr.write("setup failed:\n%s\n" % err)
@@ -156,21 +250,18 @@ def main():
                 if tag not in row:
                     continue
                 ncmp += 1
-                reason = None
-                for entry in known:
-                    if dialect in entry["dialects"] and call in entry["calls"]:
-                        reason = entry["reason"]
-                        break
-                agrees = row[tag] == expected
-                if agrees and reason is None:
+                entry = find_exemption(known, dialect, call)
+                verdict = classify(row[tag], expected, entry, call)
+                if verdict == "match":
                     nmatch += 1
-                elif agrees and reason is not None:
-                    stale.append((case["name"], dialect, call, reason))
-                elif reason is not None:
-                    documented.append((case["name"], dialect, call, reason))
+                elif verdict == "stale":
+                    stale.append((case["name"], dialect, call, entry["reason"]))
+                elif verdict == "documented":
+                    documented.append((case["name"], dialect, call,
+                                       entry["reason"]))
                 else:
                     mismatches.append((case["name"], dialect, call,
-                                       expected, row[tag]))
+                                       expected, row[tag], entry))
 
     print("plx differential test")
     print("  cases                : %d" % len(CASES))
@@ -198,9 +289,11 @@ def main():
 
     if mismatches:
         print("\nunexplained divergences from the plpgsql reference:")
-        for name, dialect, call, expected, got in mismatches:
+        for name, dialect, call, expected, got, entry in mismatches:
             print("  %s(%s) %s" % (name, call, dialect))
             print("      reference: %s" % expected)
+            if entry is not None:
+                print("      documented: %s" % documented_outcome(entry, call))
             print("      dialect  : %s" % got)
 
     if stale:
