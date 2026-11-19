@@ -111,23 +111,36 @@ def split_probe_output(out):
     return out.rstrip("\n").split("\n")
 
 
+def run_probes(exprs, run=None):
+    """Probe each SQL expression in one psql call.
+
+    Returns (results, problem). results holds one probe result per
+    expression, in order. When the number of results is wrong, results is
+    None and problem says why. probe_all() and probe_selftest() both use
+    this, and the self-test passes a stand-in for psql() as run.
+    """
+    out, err, _ = (run or psql)("".join(
+        "SELECT plxdiff_probe($plxq$%s$plxq$);\n" % e for e in exprs))
+    lines = split_probe_output(out)
+    if len(lines) != len(exprs):
+        return None, ("%d results for %d probes\n%s"
+                      % (len(lines), len(exprs), err))
+    return lines, None
+
+
 def probe_selftest():
     """Check the probe encoding against the server. Returns a list of failures.
 
-    This uses the same psql() call and split_probe_output() as probe_all(),
-    so it covers the real path.
+    This uses run_probes(), the same path as probe_all().
     """
     failures = []
     exprs = []
     for a, b in PROBE_PAIRS:
         exprs += [a, b]
     exprs += [e for e, _ in PROBE_EXACT]
-    out, err, _ = psql("".join("SELECT plxdiff_probe($plxq$%s$plxq$);\n" % e
-                               for e in exprs))
-    lines = split_probe_output(out)
-    if len(lines) != len(exprs):
-        return ["probe self-test: %d results for %d probes\n%s"
-                % (len(lines), len(exprs), err)]
+    lines, problem = run_probes(exprs)
+    if lines is None:
+        return ["probe self-test: " + problem]
     got = dict(zip(exprs, lines))
     for a, b in PROBE_PAIRS:
         if got[a] == got[b]:
@@ -137,13 +150,6 @@ def probe_selftest():
         if got[e] != want:
             failures.append("probe self-test: %s probes as %r, want %r"
                             % (e, got[e], want))
-    # Pure Python, so it does not depend on the server encoding: only a
-    # newline may end a probe, not U+2028 or U+0085.
-    sample = '"a b"\n"c\x85d"\n"e"\n'
-    want = ['"a b"', '"c\x85d"', '"e"']
-    if split_probe_output(sample) != want:
-        failures.append("probe self-test: split_probe_output(%r) gave %r, "
-                        "want %r" % (sample, split_probe_output(sample), want))
     return failures
 
 
@@ -172,7 +178,7 @@ def create_variants():
 
 def probe_all(created_ok):
     """Call every created variant with every argument list. Returns nested dict."""
-    selects = []
+    exprs = []
     keys = []
     for case in CASES:
         tags = ["ref"] + [DIALECTS[d] for d in case["bodies"]]
@@ -182,14 +188,12 @@ def probe_all(created_ok):
             for call in case["calls"]:
                 expr = "%s(%s)" % (fname(case, tag), call)
                 keys.append((case["name"], tag, call))
-                selects.append("SELECT plxdiff_probe($plxq$%s$plxq$)" % expr)
-    if not selects:
+                exprs.append(expr)
+    if not exprs:
         return {}
-    out, err, _ = psql("\n".join(s + ";" for s in selects))
-    lines = split_probe_output(out)
-    if len(lines) != len(keys):
-        sys.stderr.write("probe count mismatch: %d results for %d probes\n%s\n"
-                         % (len(lines), len(keys), err))
+    lines, problem = run_probes(exprs)
+    if lines is None:
+        sys.stderr.write("probe count mismatch: %s\n" % problem)
         sys.exit(2)
     results = {}
     for (name, tag, call), value in zip(keys, lines):
@@ -272,6 +276,23 @@ def compare(cases, results):
                     mismatches.append((case["name"], dialect, call,
                                        expected, row[tag], entry))
     return ncmp, nmatch, mismatches, documented, stale
+
+
+def probe_split_selftest():
+    """Check run_probes() splits psql output at newlines only.
+
+    str.splitlines() also breaks at U+0085, U+2028 and U+2029, which to_json
+    leaves unescaped. A stand-in for psql() returns such values, so this
+    does not need a server or a UTF-8 database. Returns a list of failures.
+    """
+    out = '"a\u2028b"\n"c\x85d"\n"e\u2029f"\n'
+    lines, problem = run_probes(["1", "2", "3"],
+                                run=lambda sql: (out, "", 0))
+    want = ['"a\u2028b"', '"c\x85d"', '"e\u2029f"']
+    if lines != want:
+        return ["run_probes() split %r into %r, want %r (%s)"
+                % (out, lines, want, problem)]
+    return []
 
 
 def check_exemptions(cases):
@@ -359,7 +380,7 @@ def selftest():
 
 
 def main():
-    failures = selftest() + check_exemptions(CASES)
+    failures = selftest() + probe_split_selftest() + check_exemptions(CASES)
     if failures:
         sys.stderr.write("differential.py self-test failed:\n  %s\n"
                          % "\n  ".join(failures))
