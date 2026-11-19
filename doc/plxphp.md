@@ -76,8 +76,12 @@ else { $grade = "F"; }
 ### switch
 
 `switch` lowers to plpgsql `CASE`. Stacked labels become a value list. Each arm
-must end with `break` or a terminating statement (`return`/`throw`); genuine
-fall-through is rejected.
+must end with `break` or another statement that leaves the arm (`return`,
+`throw`, `break N`, `continue N` with N of 2 or more, or `break` with a loop
+label); genuine fall-through is rejected.
+A `break` inside an `if` or `try` within an arm leaves the `switch`, as it
+does in the source language. A `break` inside a loop within an arm leaves only
+that loop.
 
 ```sql
 switch ($n) {
@@ -99,7 +103,44 @@ for ($i = 1; $i <= $n; $i++) {
 while ($n > 0) { $n = $n - 1; }
 ```
 
+A counting `for` becomes a plpgsql integer `FOR`. That loop works out its
+bounds once and keeps its own copy of the loop variable. So plx accepts a `for`
+only when the result is the same:
+
+- The condition compares the loop variable with a single value (`$i < $n` or
+  `$i <= $n`).
+- The step changes the loop variable (`$i++` or `$i += K`).
+- The body does not assign the loop variable, or any variable in the bound or
+  the step.
+- The code after the loop does not read the loop variable before it assigns
+  it again. A later `for ($i = ...)` assigns it.
+- When the `for` is inside another loop, that loop does not read the loop
+  variable on its next pass before the `for` runs again: not in its condition,
+  and not in its body before the `for`.
+
+`CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
+
 `continue` and `break` map to `CONTINUE` and `EXIT`.
+
+`break N` and `continue N` leave or continue the Nth enclosing loop or
+`switch`, counting from the innermost, as in PHP:
+
+```sql
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    if ($j == 1) { break 2; }    // leaves both loops
+  }
+}
+```
+
+`CREATE FUNCTION` rejects a level of 0 and a level greater than the number of
+enclosing loops and switches. It also rejects a `continue N` that lands on a
+`switch`; write `break N` instead.
+
+PHP treats a `switch` as a loop for `continue`. So a `continue` or
+`continue 1` in a `switch` arm, and not in a loop within that arm, acts as
+`break`, not as a `continue` of the enclosing loop. `CREATE FUNCTION` rejects it. Write `break`
+to leave the `switch`, or `continue 2` to continue the loop.
 
 ### Loop labels
 
@@ -196,6 +237,11 @@ $$;
 throw new Exception("negative: {$v}");
 ```
 
+`throw` takes a constructor call, such as `new Exception(message)`, and raises its first
+argument as the error message. `CREATE FUNCTION` rejects any other thrown
+expression, such as `throw msg;` or `throw a + b(c);`. To throw a computed
+message, build it inside the call.
+
 The call form `raise("notice", "message")` emits a `RAISE` at the named level
 (`notice`, `warning`, `info`, `log`, `debug`, `exception`).
 
@@ -211,9 +257,20 @@ try {
 }
 ```
 
-`catch (\Exception $e)` maps to `WHEN OTHERS`. To catch a specific condition,
-name it with the `PG::` spelling, for example `catch (PG::UniqueViolation $e)`,
-which maps to `unique_violation`.
+`catch (\Exception $e)` maps to `WHEN OTHERS`, and so do `\Throwable` and
+`\Error`. To catch a specific condition, write `PG::` and then the plpgsql
+condition name in CamelCase. For example, `catch (PG::UniqueViolation $e)` maps
+to `unique_violation`, and `catch (PG::SerializationFailure $e)` maps to
+`serialization_failure`. `DivisionByZeroError` maps to `division_by_zero`. To
+catch several conditions in one handler, join the classes with `|`, as in
+`catch (PG::UniqueViolation | PG::CheckViolation $e)`. The variable is
+optional, as in PHP 8: `catch (PG::SerializationFailure)` maps the class the
+same way.
+
+`CREATE FUNCTION` rejects any other class name, such as `TypeError`, with
+`unsupported exception class`. plpgsql checks a `PG::` condition name the first
+time the function runs. An unknown name, such as `PG::NoSuchCondition`, then
+fails with `unrecognized exception condition "no_such_condition"`.
 Accessors: `$e->message` to `SQLERRM`, `$e->sqlstate` to `SQLSTATE`, and
 `$e->detail`, `$e->hint`, `$e->constraint`, `$e->column`, `$e->table`,
 `$e->schema`, `$e->datatype` to the matching `GET STACKED DIAGNOSTICS` fields.
@@ -327,8 +384,8 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 Rejected at `CREATE FUNCTION` time with a line number:
 
 - Function or class definitions, namespaces, `use`, includes.
-- Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and
-  `for (...; $v += K)` are supported.
+- A `for` that is not a counting loop. Only `for ($v = LO; $v < HI; $v++)` and
+  `for (...; $v += K)` are supported, under the rules in [Loops](#loops).
 - `switch` fall-through (end each case with `break` or `return`).
 
 Not translated:

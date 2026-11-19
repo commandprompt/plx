@@ -75,8 +75,12 @@ else { grade = "F"; }
 ### switch
 
 `switch` lowers to plpgsql `CASE`. Stacked labels become a value list. Each arm
-must end with `break` or a terminating statement (`return`/`throw`); genuine
-fall-through is rejected.
+must end with `break` or another statement that leaves the arm (`return`,
+`throw`, `continue`, or `break` with a loop label); genuine fall-through is
+rejected.
+A `break` inside an `if` or `try` within an arm leaves the `switch`, as it
+does in the source language. A `break` inside a loop within an arm leaves only
+that loop.
 
 ```sql
 switch (n) {
@@ -97,6 +101,24 @@ for (let i = 1; i <= n; i++) {
 
 while (n > 0) { n = n - 1; }
 ```
+
+A counting `for` becomes a plpgsql integer `FOR`. That loop works out its
+bounds once and keeps its own copy of the loop variable. So plx accepts a `for`
+only when the result is the same:
+
+- The condition compares the loop variable with a single value (`i < n` or
+  `i <= n`).
+- The step changes the loop variable (`i++` or `i += K`).
+- The body does not assign the loop variable, or any variable in the bound or
+  the step.
+- In a loop without `let` or `const`, the code after the loop does not read
+  the loop variable before it assigns it again. `var` does not count as
+  `let`: a `var` variable keeps its value after the loop.
+- In a loop without `let` or `const` that is inside another loop, the outer
+  loop does not read the loop variable on its next pass before the `for` runs
+  again: not in its condition, and not in its body before the `for`.
+
+`CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
 
 `continue` and `break` map to `CONTINUE` and `EXIT`.
 
@@ -192,6 +214,11 @@ $$;
 ```sql
 throw new Error(`negative: ${v}`);
 ```
+
+`throw` takes a constructor call, such as `new Error(message)`, and raises its first
+argument as the error message. `CREATE FUNCTION` rejects any other thrown
+expression, such as `throw msg;` or `throw a + b(c);`. To throw a computed
+message, build it inside the call.
 
 The call form `raise("notice", "message")` emits a `RAISE` at the named level
 (`notice`, `warning`, `info`, `log`, `debug`, `exception`).
@@ -323,6 +350,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 
 - Function definitions, classes, `import`.
 - `for...in`.
+- A `for` that is not a counting loop (see [Loops](#loops)).
 - `switch` fall-through (end each case with `break` or `return`).
 
 Not translated:

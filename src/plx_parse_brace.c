@@ -29,6 +29,187 @@ static void parse_brace_block(Ctx *cx, int ind);
 static void parse_switch_brace(Ctx *cx, int ind);
 static void paren_group(Ctx *cx, int *a, int *b);
 
+/*
+ * The loops and switches being parsed, innermost first. A break nested in a
+ * switch arm (in an if or try, not inside a loop opened in the arm) leaves
+ * the switch, and PHP's break N / continue N count both kinds. A construct
+ * gets a plpgsql label only when such an exit needs one; the label is
+ * inserted at the construct's start offset when the construct closes, so code
+ * without these exits is emitted as before. plx_brace_parse_body clears the
+ * stack, so an error raised mid-parse leaves nothing behind.
+ */
+typedef struct BraceBrk
+{
+	Ctx		   *cx;
+	bool		is_switch;
+	bool		user_label;		/* label came from the source (name: for) */
+	int			loopdepth;		/* cx->loopdepth inside the construct */
+	int			fin_id;			/* try-with-finally frame of the construct */
+	int			start;			/* cx->out offset of the construct */
+	int			body_tok;		/* token index of a loop body's '{'; -1 for a switch */
+	char	   *label;			/* plpgsql label, or NULL while none is needed */
+	struct BraceBrk *outer;
+} BraceBrk;
+
+static BraceBrk *cur_brk = NULL;
+static char *pending_label = NULL;	/* source label for the next loop */
+
+static void
+brk_begin(Ctx *cx, BraceBrk *b, bool is_switch, int start)
+{
+	b->cx = cx;
+	b->is_switch = is_switch;
+	b->loopdepth = cx->loopdepth + (is_switch ? 0 : 1);
+	b->fin_id = cx->fin ? cx->fin->id : 0;
+	b->start = start;
+	b->body_tok = is_switch ? -1 : cx->pos;
+	b->label = NULL;
+	b->user_label = false;
+	if (!is_switch && pending_label)
+	{
+		b->label = pending_label;
+		b->user_label = true;
+	}
+	pending_label = NULL;
+	b->outer = cur_brk;
+	cur_brk = b;
+}
+
+/* the label an exit to b uses, registered so plx_emit_exit routes it
+ * through any finally between the exit and b */
+static const char *
+brk_label(Ctx *cx, BraceBrk *b)
+{
+	PlxLabel   *l = palloc(sizeof(PlxLabel));
+
+	if (!b->label)
+		b->label = psprintf("__plx_%s_%d", b->is_switch ? "sw" : "lp", ++cx->subq);
+	l->name = b->label;
+	l->fin_id = b->fin_id;
+	l->next = cx->labels;
+	cx->labels = l;
+	return b->label;
+}
+
+/*
+ * Take the entries for label name, added after mark, off cx->labels when the
+ * construct with that label closes. Other entries stay: break N registers
+ * the label of an outer loop from inside this construct, and a finally that
+ * closes later must still find it to run the outer finally bodies.
+ */
+static void
+labels_drop(Ctx *cx, PlxLabel *mark, const char *name)
+{
+	PlxLabel  **pp = &cx->labels;
+
+	while (*pp && *pp != mark)
+	{
+		if (name && pg_strcasecmp((*pp)->name, name) == 0)
+			*pp = (*pp)->next;
+		else
+			pp = &(*pp)->next;
+	}
+}
+
+static void
+brk_end(Ctx *cx, BraceBrk *b, int ind)
+{
+	StringInfo	o = &cx->out;
+	StringInfoData w;
+
+	cur_brk = b->outer;
+	if (!b->label || b->user_label)
+		return;
+	/* a switch becomes <<l>> BEGIN CASE ... END CASE; END; a loop <<l>> LOOP */
+	initStringInfo(&w);
+	appendBinaryStringInfo(&w, o->data, b->start);
+	plx_indent(&w, ind);
+	appendStringInfo(&w, "<<%s>>\n", b->label);
+	if (b->is_switch)
+	{
+		plx_indent(&w, ind);
+		appendStringInfoString(&w, "BEGIN\n");
+	}
+	appendBinaryStringInfo(&w, o->data + b->start, o->len - b->start);
+	if (b->is_switch)
+	{
+		plx_indent(&w, ind);
+		appendStringInfoString(&w, "END;\n");
+	}
+	pfree(o->data);
+	*o = w;
+}
+
+/* the body and END LOOP of a loop whose header starts at offset start */
+static void
+brace_loop_body(Ctx *cx, int ind, int start)
+{
+	BraceBrk	b;
+
+	brk_begin(cx, &b, false, start);
+	cx->loopdepth++;
+	parse_brace_block(cx, ind + 1);
+	cx->loopdepth--;
+	plx_indent(&cx->out, ind);
+	appendStringInfoString(&cx->out, "END LOOP;\n");
+	brk_end(cx, &b, ind);
+}
+
+/*
+ * PHP treats a switch as a loop for continue, so continue (or continue N)
+ * whose target is a switch runs as break. plx rejects it rather than guess
+ * which one the author meant.
+ */
+#define PHP_CONTINUE_SWITCH_MSG \
+	"continue inside a switch runs as break in PHP; write break, or continue 2 to continue the loop"
+
+/*
+ * break / continue with a number (a+1 is the T_INT). PHP counts the
+ * enclosing loops and switches.
+ */
+static void
+emit_leveled_exit(Ctx *cx, int a, int b, int ind)
+{
+	Tok		   *kw = &cx->t[a], *num = &cx->t[a + 1];
+	bool		is_break = (kw->kw == KW_BREAK);
+	const char *word = is_break ? "break" : "continue";
+	BraceBrk   *t;
+	int			n = 0, have = 0, i;
+
+	if (cx->surf->var_sigil != '$')
+		plx_err(cx, kw->line, "%s takes a loop label, not a number", word);
+	if (b != a + 2)
+		plx_err(cx, kw->line, "%s N must be followed by ';'", word);
+	for (i = 0; i < num->len; i++)
+	{
+		if (num->s[i] < '0' || num->s[i] > '9' || n > 1000)
+			plx_err(cx, kw->line, "%s level must be a small positive integer", word);
+		n = n * 10 + (num->s[i] - '0');
+	}
+	if (n < 1)
+		plx_err(cx, kw->line, "%s %d is not allowed; the level must be at least 1", word, n);
+	for (t = cur_brk; t && t->cx == cx; t = t->outer)
+		have++;
+	if (n > have)
+		plx_err(cx, kw->line, "%s %d needs %d enclosing loops or switches, but there are %d",
+				word, n, n, have);
+	for (t = cur_brk, i = 1; i < n; i++)
+		t = t->outer;
+	if (n == 1 && !t->is_switch)
+	{
+		/* the innermost loop: a plain EXIT / CONTINUE, as for a bare one */
+		plx_emit_exit(cx, &cx->out, ind,
+					  is_break ? PLX_EXIT_BREAK : PLX_EXIT_CONTINUE, NULL, NULL, NULL);
+		return;
+	}
+	if (n == 1 && !is_break)
+		plx_err(cx, kw->line, PHP_CONTINUE_SWITCH_MSG);
+	if (t->is_switch && !is_break)
+		plx_err(cx, kw->line, "continue %d targets a switch; write break %d", n, n);
+	plx_emit_exit(cx, &cx->out, ind, is_break ? PLX_EXIT_BREAK : PLX_EXIT_CONTINUE,
+				  brk_label(cx, t), NULL, NULL);
+}
+
 static void
 parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
 {
@@ -149,15 +330,14 @@ parse_while_brace(Ctx *cx, int ind)
 	StringInfo	o = &cx->out;
 	int			ca, cb;
 
+	int			start;
+
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
+	start = o->len;
 	plx_indent(o, ind);
 	appendStringInfo(o, "WHILE %s LOOP\n", plx_rw_range(cx, ca, cb, true));
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
 }
 
 /* emit `FOR <var> IN <query(...)> LOOP <body> END LOOP;` for a query receiver */
@@ -167,6 +347,7 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 	StringInfo	o = &cx->out;
 	int			sa[16], se[16], after, n;
 	int			savedpos = cx->pos;
+	int			start;
 
 	/* array receiver (not query(...)) -> FOREACH v IN ARRAY expr LOOP */
 	if (!(cx->t[ra].kind == T_IDENT && plx_name_eq(&cx->t[ra], "query") &&
@@ -181,19 +362,18 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 		if (!lv || !lv->typ)
 			plx_err(cx, var->line,
 					"foreach over an array requires the loop variable to be annotated with its element type before the loop");
+		start = o->len;
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
 						 var->len, var->s, arrx[0] == '[' ? "ARRAY" : "", arrx);
-		cx->loopdepth++;
-		parse_brace_block(cx, ind + 1);
-		cx->loopdepth--;
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END LOOP;\n");
+		brace_loop_body(cx, ind, start);
 		return;
 	}
 	cx->pos = ra;
 	n = plx_parse_args(cx, ra, sa, se, 16, &after);
 	cx->pos = savedpos;
+	if (n < 1)					/* sa[0]/se[0] are unset when n == 0 */
+		plx_err(cx, cx->t[ra].line, "query requires a SQL argument");
 	if (!plx_is_param(cx, var->s, var->len))
 	{
 		PlxLocal2  *l = plx_local_find(cx, var->s, var->len);
@@ -202,6 +382,7 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 			l = plx_local_add(cx, var->s, var->len);
 		l->is_record = true;
 	}
+	start = o->len;
 	plx_indent(o, ind);
 	{
 		char	   *sqlv, *binds;
@@ -215,11 +396,253 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 			appendStringInfo(o, "FOR %.*s IN EXECUTE %s LOOP\n",
 							 var->len, var->s, sqlv);
 	}
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
+}
+
+/* ---- counting-for checks (see parse_for_brace) ---- */
+
+static bool
+same_ident(Tok *a, Tok *b)
+{
+	return a->kind == T_IDENT && b->kind == T_IDENT && a->len == b->len &&
+		strncmp(a->s, b->s, a->len) == 0;
+}
+
+/* an operator that compares, as opposed to one that assigns */
+static bool
+op_is_comparison(Tok *t)
+{
+	static const char *const cmp[] = {"==", "===", "!=", "!==", "<=", ">=", "<=>", NULL};
+	int			i;
+
+	for (i = 0; cmp[i]; i++)
+		if (plx_tok_is(t, cmp[i]))
+			return true;
+	return false;
+}
+
+/* = += .= =- ... (any operator holding '=' that is not a comparison) */
+static bool
+op_assigns(Tok *t)
+{
+	return t->kind == T_OP && memchr(t->s, '=', t->len) && !op_is_comparison(t);
+}
+
+static bool
+op_incdec(Tok *t)
+{
+	return t->kind == T_OP && t->len >= 2 &&
+		(strncmp(t->s, "++", 2) == 0 || strncmp(t->s, "--", 2) == 0);
+}
+
+static bool
+op_ends_incdec(Tok *t)
+{
+	return t->kind == T_OP && t->len >= 2 &&
+		(strncmp(t->s + t->len - 2, "++", 2) == 0 ||
+		 strncmp(t->s + t->len - 2, "--", 2) == 0);
+}
+
+/*
+ * Does [a, b) hold, outside parentheses and brackets, anything that makes it
+ * more than one value: a comparison, a logical operator, an assignment, an
+ * increment, a ternary or a comma?
+ */
+static bool
+range_not_single_value(Ctx *cx, int a, int b)
+{
+	int			i, depth = 0;
+
+	for (i = a; i < b; i++)
+	{
+		Tok		   *t = &cx->t[i];
+
+		if (t->kind == T_LPAREN || t->kind == T_LBRACKET)
+			depth++;
+		else if (t->kind == T_RPAREN || t->kind == T_RBRACKET)
+			depth--;
+		else if (depth > 0)
+			continue;
+		else if (t->kind == T_COMMA || t->kind == T_PIPE)
+			return true;
+		else if (t->kind == T_KW &&
+				 (t->kw == KW_AND || t->kw == KW_OR || t->kw == KW_NOT))
+			return true;
+		else if (t->kind == T_OP &&
+				 (op_is_comparison(t) || op_assigns(t) || op_incdec(t) ||
+				  plx_tok_is(t, "<") || plx_tok_is(t, ">") ||
+				  plx_tok_is(t, "&&") || plx_tok_is(t, "||") ||
+				  plx_tok_is(t, "?") || plx_tok_is(t, ":") || plx_tok_is(t, "??") ||
+				  plx_tok_is(t, "!")))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Does [a, b) assign the variable named by tok i? Counted: name = ..,
+ * name op= .., name++, ++name, and PHP's append name[] = ... An element
+ * assignment name[k] = .. does not change the variable's length or bound.
+ */
+static bool
+range_assigns(Ctx *cx, int a, int b, Tok *name)
+{
+	int			i;
+
+	for (i = a; i < b; i++)
+	{
+		Tok		   *n;
+
+		if (!same_ident(&cx->t[i], name))
+			continue;
+		if (i > a && op_ends_incdec(&cx->t[i - 1]))
+			return true;
+		n = &cx->t[i + 1];
+		if (op_assigns(n) || op_incdec(n))
+			return true;
+		if (n->kind == T_LBRACKET && cx->t[i + 2].kind == T_RBRACKET &&
+			op_assigns(&cx->t[i + 3]))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Is the variable read after the loop that ends before token from? A read
+ * counts unless an assignment at the loop's own block level (a plain
+ * "v = ..", a later "for (v = ..", or "as v") comes first. Conservative: a
+ * read anywhere after the loop counts.
+ */
+static bool
+read_after_loop(Ctx *cx, int from, Tok *v)
+{
+	int			i, depth = 0;
+
+	for (i = from; cx->t[i].kind != T_EOF; i++)
+	{
+		Tok		   *t = &cx->t[i];
+
+		if (t->kind == T_LBRACE)
+			depth++;
+		else if (t->kind == T_RBRACE)
+			depth = depth > 0 ? depth - 1 : 0;
+		if (!same_ident(t, v))
+			continue;
+		if (depth == 0 && i > 0)
+		{
+			Tok		   *pv = &cx->t[i - 1];
+
+			if (pv->kind == T_KW && pv->kw == KW_AS)
+				return false;
+			if (plx_tok_is(&cx->t[i + 1], "=") &&
+				(pv->kind == T_SEMI || pv->kind == T_NEWLINE ||
+				 pv->kind == T_LBRACE || pv->kind == T_RBRACE ||
+				 (pv->kind == T_LPAREN && i > 1 && cx->t[i - 2].kind == T_KW &&
+				  cx->t[i - 2].kw == KW_FOR)))
+				return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+/* the index of the token that closes the bracket opened at token i */
+static int
+match_close(Ctx *cx, int i, TokKind open, TokKind close)
+{
+	int			depth = 0;
+
+	for (; cx->t[i].kind != T_EOF; i++)
+	{
+		if (cx->t[i].kind == open)
+			depth++;
+		else if (cx->t[i].kind == close && --depth == 0)
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Is the variable read in [from, to), the part of an enclosing loop's body
+ * that runs again before the for at to? A read counts unless an assignment
+ * at the body's own block level comes first. A counting for over the same
+ * variable nested deeper is skipped: it reads its own copy.
+ */
+static bool
+read_before_for(Ctx *cx, int from, int to, Tok *v)
+{
+	int			i, depth = 0;
+
+	for (i = from; i < to; i++)
+	{
+		Tok		   *t = &cx->t[i];
+		Tok		   *pv;
+		bool		nested_for;
+
+		if (t->kind == T_LBRACE)
+			depth++;
+		else if (t->kind == T_RBRACE)
+			depth = depth > 0 ? depth - 1 : 0;
+		if (!same_ident(t, v))
+			continue;
+		pv = &cx->t[i - 1];
+		nested_for = (pv->kind == T_LPAREN && i > from + 1 &&
+					  cx->t[i - 2].kind == T_KW && cx->t[i - 2].kw == KW_FOR &&
+					  plx_tok_is(&cx->t[i + 1], "="));
+		if (nested_for && depth > 0)
+		{
+			int			rp = match_close(cx, i - 1, T_LPAREN, T_RPAREN);
+			int			rb = (rp > 0 && cx->t[rp + 1].kind == T_LBRACE)
+				? match_close(cx, rp + 1, T_LBRACE, T_RBRACE) : -1;
+
+			if (rb < 0 || rb >= to)
+				return true;
+			i = rb;
+			continue;
+		}
+		if (depth == 0 &&
+			(nested_for || (pv->kind == T_KW && pv->kw == KW_AS) ||
+			 (plx_tok_is(&cx->t[i + 1], "=") &&
+			  (pv->kind == T_SEMI || pv->kind == T_NEWLINE ||
+			   pv->kind == T_LBRACE || pv->kind == T_RBRACE))))
+			return false;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Does a loop around the for at token for_tok read the variable on its next
+ * pass, before the for assigns it again: in the loop header, or in the body
+ * before the for? Each enclosing loop is checked on its own, because an
+ * assignment in an outer body does not run before an inner loop repeats.
+ */
+static bool
+read_by_enclosing_loop(Ctx *cx, int for_tok, Tok *v)
+{
+	BraceBrk   *b;
+
+	for (b = cur_brk; b && b->cx == cx; b = b->outer)
+	{
+		int			i, lp, depth = 0;
+
+		if (b->is_switch || b->body_tok < 1 || cx->t[b->body_tok - 1].kind != T_RPAREN)
+			continue;
+		/* the header: from the '(' that matches the ')' before the body */
+		for (lp = b->body_tok - 1; lp > 0; lp--)
+		{
+			if (cx->t[lp].kind == T_RPAREN)
+				depth++;
+			else if (cx->t[lp].kind == T_LPAREN && --depth == 0)
+				break;
+		}
+		for (i = lp; i < b->body_tok; i++)
+			if (same_ident(&cx->t[i], v))
+				return true;
+		if (read_before_for(cx, b->body_tok + 1, for_tok, v))
+			return true;
+	}
+	return false;
 }
 
 /* C-style counting for, or JS `for (v of query(...))` */
@@ -230,12 +653,22 @@ parse_for_brace(Ctx *cx, int ind)
 	int			ca, cb;
 	int			s1 = -1, s2 = -1, of_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
+	int			start;
+	int			for_tok = cx->pos;
+	bool		has_let = false;
 
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
-	/* strip a leading let/const/var declaration keyword */
+	/*
+	 * strip a leading let/const/var declaration keyword; let and const scope
+	 * the variable to the loop, but var is function-scoped, so the value after
+	 * the loop still matters
+	 */
 	if (cx->t[ca].kind == T_KW && cx->t[ca].kw == KW_LET)
+	{
+		has_let = !plx_name_eq(&cx->t[ca], "var");
 		ca++;
+	}
 	/* scan for top-level ';' (C-for) and KW_OF (for-of) */
 	for (i = ca; i < cb; i++)
 	{
@@ -287,6 +720,50 @@ parse_for_brace(Ctx *cx, int ind)
 		else
 			plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
 		plx_check_loop_var(cx, cx->t[ia].s, cx->t[ia].len);
+
+		/*
+		 * plpgsql's integer FOR evaluates LO, HI and K once, keeps its own
+		 * copy of the variable, and drops it when the loop ends. Lower only
+		 * a loop where that gives the source language's result.
+		 */
+		{
+			Tok		   *v = &cx->t[ia];
+			int			ba, be, bdepth = 0;
+
+			if (!same_ident(&cx->t[cca], v))
+				plx_err(cx, line, "for-loop condition must test the loop variable \"%s\"; use a while loop for other conditions", var);
+			if (!same_ident(&cx->t[xa], v))
+				plx_err(cx, line, "for-loop step must change the loop variable \"%s\"", var);
+			if (step ? range_not_single_value(cx, xa + 2, xb) : xb != xa + 2)
+				plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
+			if (range_not_single_value(cx, cca + 2, ccb))
+				plx_err(cx, line, "for-loop bound must be a single value, not a condition; use a while loop");
+			if (range_not_single_value(cx, ia + 2, ib))
+				plx_err(cx, line, "for-loop init must be 'v = LO'");
+			/* the body: from '{' to its matching '}' */
+			ba = cx->pos;
+			if (cx->t[ba].kind != T_LBRACE)
+				plx_err(cx, line, "expected '{'");
+			for (be = ba; cx->t[be].kind != T_EOF; be++)
+			{
+				if (cx->t[be].kind == T_LBRACE)
+					bdepth++;
+				else if (cx->t[be].kind == T_RBRACE && --bdepth == 0)
+					break;
+			}
+			if (range_assigns(cx, ba, be, v))
+				plx_err(cx, line, "the for-loop body assigns the loop variable \"%s\"; use a while loop", var);
+			for (i = cca + 2; i < xb; i++)
+				if (cx->t[i].kind == T_IDENT && (i < ccb || i >= xa + 2) &&
+					range_assigns(cx, ba, be, &cx->t[i]))
+					plx_err(cx, line, "the for-loop body assigns \"%.*s\", which the loop bound or step uses; a counting for evaluates them once, so use a while loop",
+							cx->t[i].len, cx->t[i].s);
+			if (!has_let && cx->t[be].kind == T_RBRACE && read_after_loop(cx, be + 1, v))
+				plx_err(cx, line, "the loop variable \"%s\" is read after the for loop, but a counting for does not keep its final value; use a while loop", var);
+			if (!has_let && read_by_enclosing_loop(cx, for_tok, v))
+				plx_err(cx, line, "the loop variable \"%s\" is read again by an enclosing loop, but a counting for does not keep its final value; use a while loop", var);
+		}
+		start = o->len;
 		plx_indent(o, ind);
 		if (lt)
 			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n", var, lo, hi,
@@ -295,11 +772,7 @@ parse_for_brace(Ctx *cx, int ind)
 			appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", var, lo, hi,
 							 step ? " BY " : "", step ? step : "");
 	}
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
 }
 
 /* foreach (query(...) as row) { ... } -> FOR row IN <sql> LOOP */
@@ -335,6 +808,64 @@ parse_foreach_brace(Ctx *cx, int ind)
 	brace_query_loop(cx, &cx->t[rv], ca, as_at, ind);
 }
 
+/*
+ * The plpgsql condition for one catch class, the tokens [a, b).
+ *   Exception, Throwable, Error (an optional leading \)  -> OTHERS
+ *   a class plx_exc_class_to_condition knows, or DivisionByZeroError
+ *   PG::CamelCase -> camel_case; plpgsql rejects an unknown condition name
+ *     when it compiles the function
+ * Any other class is an error: catching every error in its place would hide
+ * the errors the handler was not written for.
+ */
+static const char *
+catch_class_condition(Ctx *cx, int a, int b, int line)
+{
+	StringInfoData cls;
+	const char *p, *c;
+	int			i;
+
+	initStringInfo(&cls);
+	for (i = a; i < b; i++)
+		if (cx->t[i].s)
+			appendBinaryStringInfo(&cls, cx->t[i].s, cx->t[i].len);
+	p = cls.data;
+	while (*p == '\\')
+		p++;
+	if (*p == '\0')
+		plx_err(cx, line, "catch requires an exception class before '|'");
+	if (strcmp(p, "Exception") == 0 || strcmp(p, "Throwable") == 0 ||
+		strcmp(p, "Error") == 0)
+		return "OTHERS";
+	if (strcmp(p, "DivisionByZeroError") == 0)
+		return "division_by_zero";
+	c = plx_exc_class_to_condition(p, (int) strlen(p));
+	if (c)
+		return c;
+	if (strncmp(p, "PG::", 4) == 0 && p[4] >= 'A' && p[4] <= 'Z')
+	{
+		StringInfoData cond;
+		const char *q;
+
+		initStringInfo(&cond);
+		for (q = p + 4; *q; q++)
+		{
+			if (*q >= 'A' && *q <= 'Z')
+			{
+				if (q > p + 4)
+					appendStringInfoChar(&cond, '_');
+				appendStringInfoChar(&cond, (char) (*q - 'A' + 'a'));
+			}
+			else if ((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9'))
+				appendStringInfoChar(&cond, *q);
+			else
+				break;
+		}
+		if (*q == '\0')
+			return cond.data;
+	}
+	plx_err(cx, line, "unsupported exception class \"%s\"", p);
+}
+
 /* try { } catch (Class $e) { } [catch...] [finally { }] */
 static void
 parse_try_brace(Ctx *cx, int ind)
@@ -362,7 +893,7 @@ parse_try_brace(Ctx *cx, int ind)
 	plx_skip_seps(cx);
 	while (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_RESCUE)	/* catch */
 	{
-		int			ca, cb, i, ev_a = -1;
+		int			ca, cb, i, ev_a = -1, class_end;
 		const char *cond = "OTHERS";
 		const char *save_ev = cx->exc_var;
 		int			save_evl = cx->exc_varlen;
@@ -371,24 +902,47 @@ parse_try_brace(Ctx *cx, int ind)
 
 		cx->pos++;
 		paren_group(cx, &ca, &cb);
-		/* catch (\Class $e): last IDENT is $e; the class tokens precede it */
+		/* TypeScript catch (e: unknown): drop the type annotation, so the
+		 * variable, not the type name, binds the exception */
+		for (i = ca; i < cb; i++)
+			if (plx_tok_is(&cx->t[i], ":"))
+			{
+				cb = i;
+				break;
+			}
+		/*
+		 * catch (\Class $e): last IDENT is $e; the class tokens precede it.
+		 * PHP 8 allows catch (Class) with no variable, so in PHP only an
+		 * identifier written with the $ sigil is the variable.
+		 */
 		for (i = cb - 1; i >= ca; i--)
 			if (cx->t[i].kind == T_IDENT)
 			{
-				ev_a = i;
+				if (cx->surf->var_sigil == 0 || cx->t[i].s[-1] == cx->surf->var_sigil)
+					ev_a = i;
 				break;
 			}
-		if (ev_a > ca)
+		class_end = ev_a >= 0 ? ev_a : (cx->surf->var_sigil ? cb : ca);
+		if (class_end > ca)
 		{
-			char	   *cls = plx_span_text(cx, ca, ev_a);
-			const char *c;
+			/* catch (A | B $e) -> WHEN a OR b; a catch-all member wins */
+			StringInfoData cl;
+			int			s = ca;
+			bool		all = false;
 
-			/* strip leading backslash/namespace for a bare class name */
-			while (*cls == '\\' || *cls == ' ')
-				cls++;
-			c = plx_exc_class_to_condition(cls, (int) strlen(cls));
-			if (c)
-				cond = c;		/* else OTHERS (e.g. \Exception) */
+			initStringInfo(&cl);
+			for (i = ca; i <= class_end; i++)
+				if (i == class_end || cx->t[i].kind == T_PIPE)
+				{
+					const char *c = catch_class_condition(cx, s, i, cx->t[ca].line);
+
+					if (strcmp(c, "OTHERS") == 0)
+						all = true;
+					appendStringInfo(&cl, "%s%s", cl.len ? " OR " : "", c);
+					s = i + 1;
+				}
+			if (!all)
+				cond = cl.data;
 		}
 		if (ev_a >= 0)
 		{
@@ -451,8 +1005,18 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 			call = i - 1;		/* the class-name token precedes '(' */
 			break;
 		}
-	if (call < 0)
+	/*
+	 * Only [new] Class(args) is supported: before the '(' a class name
+	 * (identifiers and PHP namespace backslashes), and nothing after the
+	 * ')'. Any other expression would lose everything but the first call's
+	 * first argument.
+	 */
+	if (call < p || cx->t[call].kind != T_IDENT)
 		plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
+	for (i = p; i < call; i++)
+		if (cx->t[i].kind != T_IDENT &&
+			!(cx->t[i].len == 1 && cx->t[i].s && cx->t[i].s[0] == '\\'))
+			plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
 	{
 		int			sa[16], se[16], after, n;
 		int			savedpos = cx->pos;
@@ -460,6 +1024,11 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 		cx->pos = call;
 		n = plx_parse_args(cx, call, sa, se, 16, &after);
 		cx->pos = savedpos;
+		/* with no ';' the statement runs on to the '}', past line breaks */
+		while (after < b && cx->t[after].kind == T_NEWLINE)
+			after++;
+		if (after != b)
+			plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
 		plx_indent(&cx->out, ind);
 		if (n >= 1)
 		{
@@ -484,6 +1053,9 @@ parse_switch_brace(Ctx *cx, int ind)
 	int			ca, cb;
 	int			when_count = 0;		/* plpgsql CASE needs >= 1 WHEN, ELSE last */
 	bool		seen_default = false;
+	int			start = o->len;
+	BraceBrk	sw;
+	PlxLabel   *mark = cx->labels;
 
 	cx->pos++;					/* switch */
 	paren_group(cx, &ca, &cb);
@@ -492,6 +1064,7 @@ parse_switch_brace(Ctx *cx, int ind)
 	if (cx->t[cx->pos].kind != T_LBRACE)
 		plx_err(cx, line, "switch requires a '{' block");
 	cx->pos++;
+	brk_begin(cx, &sw, true, start);
 
 	for (;;)
 	{
@@ -574,7 +1147,10 @@ parse_switch_brace(Ctx *cx, int ind)
 
 				plx_skip_seps(cx);
 				st = &cx->t[cx->pos];
-				if (st->kind == T_KW && st->kw == KW_BREAK)
+				/* a bare break ends the arm; break with a label is a statement */
+				if (st->kind == T_KW && st->kw == KW_BREAK &&
+					cx->t[cx->pos + 1].kind != T_IDENT &&
+					cx->t[cx->pos + 1].kind != T_INT)
 				{
 					cx->pos++;
 					plx_skip_seps(cx);
@@ -592,7 +1168,9 @@ parse_switch_brace(Ctx *cx, int ind)
 				}
 				if (st->kind == T_EOF)
 					plx_err(cx, line, "unterminated switch block");
-				terminated = (st->kind == T_KW && (st->kw == KW_RETURN || st->kw == KW_RAISE));
+				terminated = (st->kind == T_KW &&
+							  (st->kw == KW_RETURN || st->kw == KW_RAISE ||
+							   st->kw == KW_BREAK || st->kw == KW_NEXT));
 				parse_brace_stmt(cx, ind + 2, false);
 			}
 		}
@@ -611,6 +1189,8 @@ parse_switch_brace(Ctx *cx, int ind)
 	}
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
+	labels_drop(cx, mark, sw.label);
+	brk_end(cx, &sw, ind);
 }
 
 static void
@@ -628,15 +1208,18 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
 	{
 		PlxLabel   *mark = cx->labels;
+		char	   *label = pnstrdup(tk->s, tk->len);
 
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
 		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;			/* consume name and ':' */
+		pending_label = label;
 		/* the label is in scope only inside its loop: a later loop may
 		 * reuse the name, and a break must not resolve to a closed one */
 		parse_brace_stmt_inner(cx, ind, toplevel);
-		cx->labels = mark;
+		pending_label = NULL;
+		labels_drop(cx, mark, label);
 		return;
 	}
 	if (tk->kind == T_KW)
@@ -675,6 +1258,22 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 
 		if (tk->kind == T_KW && tk->kw == KW_RAISE)	/* throw */
 			emit_php_throw(cx, a, b, ind);
+		else if (tk->kind == T_KW && (tk->kw == KW_BREAK || tk->kw == KW_NEXT) &&
+				 cx->t[a + 1].kind == T_INT)
+			emit_leveled_exit(cx, a, b, ind);
+		else if (tk->kind == T_KW && tk->kw == KW_NEXT && b == a + 1 &&
+				 cx->surf->var_sigil == '$' &&
+				 cur_brk && cur_brk->cx == cx && cur_brk->is_switch &&
+				 cur_brk->loopdepth == cx->loopdepth)
+			plx_err(cx, tk->line, PHP_CONTINUE_SWITCH_MSG);
+		else if (tk->kind == T_KW && tk->kw == KW_BREAK && b == a + 1 &&
+				 cur_brk && cur_brk->cx == cx && cur_brk->is_switch &&
+				 cur_brk->loopdepth == cx->loopdepth)
+		{
+			/* the innermost breakable construct is a switch: leave it */
+			plx_emit_exit(cx, &cx->out, ind, PLX_EXIT_BREAK, brk_label(cx, cur_brk),
+						  NULL, NULL);
+		}
 		else
 			plx_emit_core(cx, a, b, ind, toplevel);
 		cx->pos = (cx->t[b].kind == T_SEMI) ? b + 1 : b;
@@ -1079,6 +1678,8 @@ plx_brace_parse_body(Ctx *cx)
 	 * still embedded via the unchanged body). */
 	if (cx->surf->ts_types)
 		cx->body = ts_preprocess(cx->body);
+	cur_brk = NULL;
+	pending_label = NULL;
 	plx_lex(cx);
 	parse_brace_program(cx);
 }

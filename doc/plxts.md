@@ -58,6 +58,9 @@ plpgsql, so its annotation is dropped. Only a colon that follows a
 `let`/`const`/`var` declaration is treated as an annotation; a ternary
 (`c ? a : b`) or label colon is left alone.
 
+A `catch` variable can carry an annotation too, as in `catch (e: unknown)`.
+plx drops the type, and `e` works as in plxjs (`e.message`, `e.sqlstate`).
+
 ## Everything else
 
 All other constructs are exactly as in plxjs. For example, iterating a query:
