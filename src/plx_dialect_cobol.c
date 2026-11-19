@@ -1345,43 +1345,6 @@ cob_evaluate(Cb *cb, int ind)
 	appendStringInfoString(&cb->cx->out, "END CASE;\n");
 }
 
-/*
- * True if the UNTIL condition starting at `from` (the token after the control
- * variable's comparison operator) is a *simple* "var op bound", i.e. the bound
- * runs to the loop body with no logical connector or second comparison. A
- * compound UNTIL (v > n AND done = 1) must use the general WHILE, not the
- * integer-FOR fast path (which would otherwise fold the connector into the FOR
- * bound and emit wrong output).
- */
-static bool
-cob_until_simple(Cb *cb, int from)
-{
-	int			i,
-				depth = 0;
-
-	for (i = from; i < cb->nt; i++)
-	{
-		CbTok	   *t = &cb->t[i];
-
-		if (t->kind == CB_LP)
-			depth++;
-		else if (t->kind == CB_RP)
-			depth--;
-		else if (t->kind == CB_PERIOD || t->kind == CB_EOF)
-			break;
-		else if (depth == 0 && (cob_is_verb(t) || cob_ci(t, "END-PERFORM")))
-			break;					/* the loop body / terminator begins here */
-		else if (depth == 0 &&
-				 (cob_ci(t, "AND") || cob_ci(t, "OR") || cob_ci(t, "NOT") ||
-				  cob_ci(t, "EQUAL") || cob_ci(t, "EQUALS") ||
-				  cob_ci(t, "GREATER") || cob_ci(t, "LESS") ||
-				  (t->kind == CB_OP && t->len == 1 &&
-				   (t->s[0] == '<' || t->s[0] == '=' || t->s[0] == '>'))))
-			return false;			/* a connector or second comparison */
-	}
-	return true;
-}
-
 static void cob_perform_inner(Cb *cb, int ind);
 
 /*
@@ -1442,46 +1405,17 @@ cob_perform_inner(Cb *cb, int ind)
 		cob_expect(cb, "UNTIL");
 
 		/*
-		 * Fast path: PERFORM VARYING v FROM a BY 1 UNTIL v > b (or >= b) is an
-		 * integer FOR loop, which plpgsql runs faster than a WHILE with a manual
-		 * increment. Requires BY 1 and a condition "<var> > b" / "<var> >= b".
+		 * PERFORM VARYING -> WHILE with a manual step, for every step and
+		 * condition. A plpgsql integer FOR is not equivalent: its loop variable
+		 * is a new int4 that hides the data item, so the item would keep its
+		 * old value after the loop, a MOVE to it or to the bound in the body
+		 * would not affect the iteration, and a PIC 9(18) count would overflow.
+		 * The control variable needs a declaration; one that has none (as an
+		 * integer FOR allowed) is declared as an integer.
 		 */
-		{
-			char	   *bytrim = by.data;
-			CbTok	   *c0 = cob_cur(cb);
-			/* c1 only valid when c0 is not EOF (EOF is the last token) */
-			CbTok	   *c1 = (c0->kind != CB_EOF) ? &cb->t[cb->pos + 1] : c0;
-			bool		gt = (c1->kind == CB_OP && c1->len == 1 && c1->s[0] == '>');
-			bool		ge = (c1->kind == CB_OP && c1->len == 2 &&
-							  c1->s[0] == '>' && c1->s[1] == '=');
-
-			while (*bytrim == ' ')
-				bytrim++;
-			if (strcmp(bytrim, "1") == 0 && c0->kind == CB_WORD && (gt || ge) &&
-				strcmp(cob_map(c0->s, c0->len), var) == 0 &&
-				cob_until_simple(cb, cb->pos + 2))
-			{
-				StringInfoData bound;
-
-				cb->pos += 2;			/* control variable and the operator */
-				initStringInfo(&bound);
-				cob_value(cb, &bound, NULL, 0);
-				plx_indent(&cb->cx->out, ind);
-				if (gt)
-					appendStringInfo(&cb->cx->out, "FOR %s IN (%s )..(%s ) LOOP\n",
-									 var, from.data, bound.data);
-				else
-					appendStringInfo(&cb->cx->out, "FOR %s IN (%s )..((%s ) - 1) LOOP\n",
-									 var, from.data, bound.data);
-				cob_block(cb, ind + 1);
-				cob_expect(cb, "END-PERFORM");
-				plx_indent(&cb->cx->out, ind);
-				appendStringInfoString(&cb->cx->out, "END LOOP;\n");
-				return;
-			}
-		}
-
-		/* general PERFORM VARYING -> WHILE with a manual step */
+		if (!strchr(var, '.') && !plx_is_param(cb->cx, var, strlen(var)) &&
+			!plx_local_find(cb->cx, var, strlen(var)))
+			plx_local_add(cb->cx, var, strlen(var))->typ = pstrdup("integer");
 		initStringInfo(&c);
 		cob_value(cb, &c, NULL, 0);
 		plx_indent(&cb->cx->out, ind);

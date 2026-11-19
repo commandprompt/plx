@@ -157,6 +157,11 @@ PERFORM N TIMES
 END-PERFORM
 ```
 
+`PERFORM VARYING` tests `UNTIL` before each iteration and changes the control
+variable itself, as COBOL does. After the loop the variable holds the first
+value that satisfied `UNTIL`, or its value at `EXIT PERFORM`. A `MOVE` to the
+variable or to the bound inside the body affects the next test.
+
 `EXIT PERFORM` leaves the loop. `EXIT PERFORM CYCLE` ends the current
 iteration; in a `PERFORM VARYING` the step and the `UNTIL` test then run as
 usual. `CONTINUE` is a no-op.
