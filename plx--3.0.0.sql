@@ -38,6 +38,12 @@ CREATE FUNCTION plx_sb_append(plx_strbuild, text) RETURNS plx_strbuild
 	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE
 	SUPPORT plx_sb_append_support;
 
+-- The same C function declared STRICT: a NULL operand gives NULL, as || does.
+-- The append operators of every dialect except plxcobol call this one.
+CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
+	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE STRICT
+	SUPPORT plx_sb_append_support;
+
 -- plx_strbuild is implicitly usable as text (so it works in RETURN, string
 -- functions, and concatenation). text becomes a builder only in assignment
 -- context, which avoids operator ambiguity such as `builder || text`.

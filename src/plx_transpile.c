@@ -3384,8 +3384,12 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 	 *   Ruby  s << x     (when s is a string)
 	 *   PHP   $s .= x
 	 *   JS/Py s += x     (when s is a string)
-	 * become  s := plx_sb_append(s, (x));  with s declared plx_strbuild, whose
-	 * append is amortized O(1). A numeric += is left alone.
+	 * become  s := plx_sb_append_strict(s, (x));  with s declared plx_strbuild,
+	 * whose append is amortized O(1). A numeric += is left alone. The strict
+	 * append gives NULL when s or x is NULL, as s || x does. When the append is
+	 * the first use of s (PHP .= on a variable never assigned), s starts as ''
+	 * rather than NULL: in PHP an undefined variable is null, which .= treats
+	 * as "".
 	 */
 	if (t0->kind == T_IDENT && !plx_is_param(cx, t0->s, t0->len))
 	{
@@ -3411,7 +3415,10 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			if (app_rhs >= rb)
 				plx_err(cx, t0->line, "append requires a value on the right-hand side");
 			if (!l)
+			{
 				l = plx_local_add(cx, t0->s, t0->len);
+				l->init = pstrdup("''");
+			}
 			if (l->is_const)
 				plx_err(cx, t0->line, "cannot append to a constant");
 			l->typ = plx_ext_object("plx_strbuild");
@@ -3420,7 +3427,7 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			plx_indent(o, ind);
 			/* cast the appended value to text (int, numeric, etc. render) */
 			appendStringInfo(o, "%.*s := %s(%.*s, (%s)::text);\n",
-							 t0->len, t0->s, plx_ext_object("plx_sb_append"),
+							 t0->len, t0->s, plx_ext_object("plx_sb_append_strict"),
 							 t0->len, t0->s, r);
 			return;
 		}

@@ -68,6 +68,114 @@ CREATE TABLE a4_sb2(v plx_strbuild);
 COPY a4_sb2 FROM :'a4_file' (FORMAT binary);
 SELECT v FROM a4_sb2 ORDER BY v;
 
+-- A3: appending a NULL makes the string NULL, as || does (except plxcobol)
+CREATE FUNCTION a3_rb(x text) RETURNS text LANGUAGE plxruby AS $$
+s = "a" #:: text
+s << x
+s << "b"
+return s
+$$;
+CREATE FUNCTION a3_rb_nullacc(x text) RETURNS text LANGUAGE plxruby AS $$
+s = x #:: text
+s << "b"
+return s
+$$;
+CREATE FUNCTION a3_rb_coalesce(x text) RETURNS text LANGUAGE plxruby AS $$
+s = "a" #:: text
+s << coalesce(x, '')
+s << "b"
+return s
+$$;
+SELECT a3_rb(NULL) IS NULL AS rb_null, a3_rb('X') AS rb,
+       a3_rb_nullacc(NULL) IS NULL AS rb_nullacc_null, a3_rb_nullacc('X') AS rb_nullacc,
+       a3_rb_coalesce(NULL) AS rb_coalesce;
+CREATE FUNCTION a3_php(x text) RETURNS text LANGUAGE plxphp AS $$
+$s = "a" /*:: text */;
+$s .= $x;
+$s .= "b";
+return $s;
+$$;
+-- with interpolation, the whole string becomes NULL, not just one segment
+CREATE FUNCTION a3_php_seg(x text) RETURNS text LANGUAGE plxphp AS $$
+$s = "" /*:: text */;
+$s .= "1:{$x} ";
+$s .= "2:b ";
+return $s;
+$$;
+-- a variable whose first use is .= starts as an empty string, as in PHP
+CREATE FUNCTION a3_php_undecl(x text) RETURNS text LANGUAGE plxphp AS $$
+$s .= "a";
+$s .= $x;
+return $s;
+$$;
+CREATE FUNCTION a3_php_loop(n int) RETURNS text LANGUAGE plxphp AS $$
+for ($i = 0; $i < $n; $i++) {
+  $s .= "x";
+}
+return $s;
+$$;
+SELECT a3_php(NULL) IS NULL AS php_null, a3_php('X') AS php,
+       a3_php_seg(NULL) IS NULL AS seg_null, a3_php_seg('a') AS seg,
+       a3_php_undecl(NULL) IS NULL AS undecl_null, a3_php_undecl('X') AS undecl,
+       a3_php_loop(3) AS php_loop;
+CREATE FUNCTION a3_js(x text) RETURNS text LANGUAGE plxjs AS $$
+let s = "a" /*:: text */;
+s += x;
+s += "b";
+return s;
+$$;
+CREATE FUNCTION a3_ts(x text) RETURNS text LANGUAGE plxts AS $$
+let s: string = "a";
+s += x;
+s += "b";
+return s;
+$$;
+CREATE FUNCTION a3_py(x text) RETURNS text LANGUAGE plxpython3 AS $$
+s = "a" #:: text
+s += x
+s += "b"
+return s
+$$;
+CREATE FUNCTION a3_py_nullacc(x text) RETURNS text LANGUAGE plxpython3 AS $$
+s = x #:: text
+s += "b"
+return s
+$$;
+SELECT a3_js(NULL) IS NULL AS js_null, a3_js('X') AS js,
+       a3_ts(NULL) IS NULL AS ts_null, a3_ts('X') AS ts,
+       a3_py(NULL) IS NULL AS py_null, a3_py('X') AS py,
+       a3_py_nullacc(NULL) IS NULL AS py_nullacc_null, a3_py_nullacc('X') AS py_nullacc;
+-- plxcobol STRING-APPEND still treats a NULL as nothing to append
+CREATE FUNCTION a3_cob(x text) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-S PIC X(1) VALUE "a".
+PROCEDURE DIVISION.
+    STRING-APPEND X TO WS-S
+    STRING-APPEND "b" TO WS-S
+    GOBACK RETURNING WS-S.
+$$;
+SELECT a3_cob(NULL) AS cob_null, a3_cob('X') AS cob;
+-- the generated code calls the strict append, except in plxcobol
+SELECT proname, prosrc LIKE '%plx_sb_append_strict(%' AS strict_append,
+       prosrc LIKE '%plx_sb_append(%' AS plain_append,
+       prosrc LIKE '%plx_strbuild := '''';%' AS starts_empty
+FROM pg_proc WHERE proname IN ('a3_rb', 'a3_cob', 'a3_php_undecl')
+ORDER BY proname;
+-- the strict append itself
+SELECT plx_sb_append_strict('a'::text::plx_strbuild, NULL)::text IS NULL AS null_suffix,
+       plx_sb_append_strict(NULL, 'b')::text IS NULL AS null_builder,
+       plx_sb_append_strict('a'::text::plx_strbuild, 'b')::text AS both;
+-- a message built with appends and then raised shows <NULL> if a part was NULL
+CREATE FUNCTION a3_rb_raise(x text) RETURNS text LANGUAGE plxruby AS $$
+s = "bad: " #:: text
+s << x
+raise s
+$$;
+\set VERBOSITY terse
+SELECT a3_rb_raise(NULL);
+SELECT a3_rb_raise('X');
+\set VERBOSITY default
+
 -- A4: ALTER EXTENSION plx UPDATE from 2.0.0 gives the same objects as
 -- CREATE EXTENSION, and a plx_strbuild column made under 2.0.0 gets the
 -- collation. This drops and re-creates the extension, so it stays last.

@@ -162,7 +162,11 @@ plx_sb_send(PG_FUNCTION_ARGS)
  * plx_sb_append(sb, suffix): append suffix's bytes to sb. If sb is a read-write
  * expanded object, mutate in place and return the same object; otherwise build
  * a new expanded object from the flat value. Not strict: a NULL builder starts
- * empty and a NULL suffix appends nothing.
+ * empty and a NULL suffix appends nothing. plxcobol's STRING-APPEND calls it.
+ *
+ * plx_sb_append_strict is a STRICT SQL declaration of this same C function,
+ * so PostgreSQL returns NULL without calling it when either argument is NULL,
+ * as || does. Every dialect except plxcobol calls plx_sb_append_strict.
  */
 Datum
 plx_sb_append(PG_FUNCTION_ARGS)

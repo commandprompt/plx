@@ -54,3 +54,11 @@ WHERE a.atttypid = t.oid AND a.attcollation = 0 AND t.typcollation = 100
        OR (t.typtype = 'd'
            AND t.typbasetype IN ('plx_strbuild'::pg_catalog.regtype,
                                  'plx_strbuild[]'::pg_catalog.regtype)));
+
+/*
+ * The append operators of every dialect except plxcobol now call a STRICT
+ * declaration of plx_sb_append, so a NULL operand gives NULL, as || does.
+ */
+CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
+	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE STRICT
+	SUPPORT plx_sb_append_support;
