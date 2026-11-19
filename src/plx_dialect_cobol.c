@@ -53,6 +53,9 @@ typedef struct
 	Ctx		   *cx;
 	CbTok	   *t;
 	int			nt, pos;
+	/* the VARYING step of the innermost PERFORM, or NULL when the innermost
+	 * PERFORM has none; EXIT PERFORM CYCLE runs it before CONTINUE */
+	const char *cycle_step;
 } Cb;
 
 /* case-insensitive: is token tk exactly the reserved word w? */
@@ -1379,8 +1382,25 @@ cob_until_simple(Cb *cb, int from)
 	return true;
 }
 
+static void cob_perform_inner(Cb *cb, int ind);
+
+/*
+ * PERFORM. Each form is one plpgsql loop, and EXIT PERFORM CYCLE (CONTINUE)
+ * applies to the innermost one, so the VARYING step that CYCLE must run is
+ * saved and restored around each PERFORM.
+ */
 static void
 cob_perform(Cb *cb, int ind)
+{
+	const char *saved = cb->cycle_step;
+
+	cb->cycle_step = NULL;
+	cob_perform_inner(cb, ind);
+	cb->cycle_step = saved;
+}
+
+static void
+cob_perform_inner(Cb *cb, int ind)
 {
 	cb->pos++;								/* PERFORM */
 
@@ -1468,9 +1488,11 @@ cob_perform(Cb *cb, int ind)
 		appendStringInfo(&cb->cx->out, "%s := (%s );\n", var, from.data);
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfo(&cb->cx->out, "WHILE NOT (%s ) LOOP\n", c.data);
+		/* the step ends the body; EXIT PERFORM CYCLE must run it too */
+		cb->cycle_step = psprintf("%s := %s + (%s );\n", var, var, by.data);
 		cob_block(cb, ind + 1);
 		plx_indent(&cb->cx->out, ind + 1);
-		appendStringInfo(&cb->cx->out, "%s := %s + (%s );\n", var, var, by.data);
+		appendStringInfoString(&cb->cx->out, cb->cycle_step);
 		cob_expect(cb, "END-PERFORM");
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "END LOOP;\n");
@@ -1716,14 +1738,21 @@ cob_exit(Cb *cb, int ind)
 	if (!cob_ci(cob_cur(cb), "PERFORM"))
 		cob_err(cb, "only EXIT PERFORM [CYCLE] is supported");
 	cb->pos++;
-	plx_indent(&cb->cx->out, ind);
 	if (cob_ci(cob_cur(cb), "CYCLE"))
 	{
 		cb->pos++;
+		/* CYCLE ends the iteration, and a VARYING loop then runs its step */
+		if (cb->cycle_step)
+		{
+			plx_indent(&cb->cx->out, ind);
+			appendStringInfoString(&cb->cx->out, cb->cycle_step);
+		}
+		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "CONTINUE;\n");
+		return;
 	}
-	else
-		appendStringInfoString(&cb->cx->out, "EXIT;\n");
+	plx_indent(&cb->cx->out, ind);
+	appendStringInfoString(&cb->cx->out, "EXIT;\n");
 }
 
 static void

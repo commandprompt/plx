@@ -1,2 +1,44 @@
 -- Regression tests for bugs found by the 2026-11-19 audit (fix_cobol).
 -- Each case names its audit finding (A<n>).
+-- A failing case must not hang the suite.
+SET statement_timeout = '10s';
+-- A35: EXIT PERFORM CYCLE in a general PERFORM VARYING still runs the step
+CREATE FUNCTION fc_a35_cycle() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(9) VALUE 0.
+01 WS-S PIC 9(9) VALUE 0.
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 2 UNTIL WS-I > 9
+        IF WS-I = 5
+            EXIT PERFORM CYCLE
+        END-IF
+        ADD WS-I TO WS-S
+    END-PERFORM
+    GOBACK RETURNING WS-S.
+$$;
+SELECT fc_a35_cycle() AS expect_20;
+ expect_20 
+-----------
+        20
+(1 row)
+
+-- A35: CYCLE in an inner PERFORM must not run the outer loop's step
+CREATE FUNCTION fc_a35_inner() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(9) VALUE 0.
+01 WS-N PIC 9(9) VALUE 0.
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-I FROM 1 BY 2 UNTIL WS-I > 5
+        PERFORM 2 TIMES
+            ADD 1 TO WS-N
+            EXIT PERFORM CYCLE
+        END-PERFORM
+    END-PERFORM
+    GOBACK RETURNING WS-N * 100 + WS-I.
+$$;
+SELECT fc_a35_inner() AS expect_607;
+ expect_607 
+------------
+        607
+(1 row)
+

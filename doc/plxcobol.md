@@ -157,8 +157,9 @@ PERFORM N TIMES
 END-PERFORM
 ```
 
-`EXIT PERFORM` leaves the loop and `EXIT PERFORM CYCLE` starts the next
-iteration. `CONTINUE` is a no-op.
+`EXIT PERFORM` leaves the loop. `EXIT PERFORM CYCLE` ends the current
+iteration; in a `PERFORM VARYING` the step and the `UNTIL` test then run as
+usual. `CONTINUE` is a no-op.
 
 ## Working with data
 
