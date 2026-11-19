@@ -748,3 +748,38 @@ SELECT fg34_field(1) AS go_3;
     3
 (1 row)
 
+-- a function name is not a variable, so the name of a call is not checked
+-- against the locals and parameters.  Before the fix both bodies were
+-- rejected.
+CREATE FUNCTION fg34_total(n int) RETURNS int LANGUAGE sql AS $$ SELECT n * 10 $$;
+CREATE FUNCTION fg34_call(n int) RETURNS int LANGUAGE plxgo AS $$ var fg34_total int = Fg34_Total(n)
+return fg34_total + 1 $$;
+SELECT fg34_call(2) AS go_21;
+ go_21 
+-------
+    21
+(1 row)
+
+CREATE FUNCTION fg34_helper(n int) RETURNS int LANGUAGE sql AS $$ SELECT n + 1 $$;
+CREATE FUNCTION fg34_callp(FG34_HELPER int) RETURNS int LANGUAGE plxgo AS $$ return fg34_helper(FG34_HELPER) $$;
+SELECT fg34_callp(2) AS go_3;
+ go_3 
+------
+    3
+(1 row)
+
+-- the arguments of a call are still checked
+CREATE FUNCTION fg34_callarg(i int) RETURNS int LANGUAGE plxgo AS $$ var x int = i
+return abs(X) $$;
+ERROR:  plxgo: identifiers "x" and "X" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+-- the type in var x T and in []T{...} is not a variable
+CREATE FUNCTION fg34_type(INT64 bigint) RETURNS bigint LANGUAGE plxgo AS $$ var x int64 = INT64
+a := []int64{x, 2}
+return a[0] $$;
+SELECT fg34_type(4) AS go_4;
+ go_4 
+------
+    4
+(1 row)
+

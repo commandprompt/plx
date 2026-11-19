@@ -1734,7 +1734,9 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 				i++;
 				continue;
 			}
-			if (i == 0 || g->t[i - 1].kind != GO_DOT)
+			/* a field name after a dot and a function name before ( are not variables */
+			if ((i == 0 || g->t[i - 1].kind != GO_DOT) &&
+				(i + 1 >= b || g->t[i + 1].kind != GO_LP))
 				go_check_name(g, tk->s, tk->len);
 			go_sp(out);
 			appendBinaryStringInfo(out, tk->s, tk->len);
