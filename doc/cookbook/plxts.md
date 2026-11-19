@@ -1,6 +1,6 @@
 # TypeScript cookbook
 
-Practical recipes for the plxts dialect (plxjs plus type annotations). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxts chapter](plxts.md) for the full language reference.
+Practical recipes for the plxts dialect (plxjs plus type annotations). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxts chapter](../plxts.md) for the full language reference.
 
 ## Scalar function with branching
 

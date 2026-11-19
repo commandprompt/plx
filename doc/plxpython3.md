@@ -94,7 +94,7 @@ while n > 0:
 ```sql
 outer: for i in range(n):
     for j in range(n):
-        if i + j >= limit:
+        if i + j >= lim:
             break outer
 ```
 
@@ -157,7 +157,8 @@ close_cursor(c)
 
 ```sql
 rc = row_count()   # GET DIAGNOSTICS rc = ROW_COUNT
-found()            # the FOUND variable
+if found():        # the FOUND variable
+    return rc
 ```
 
 ### Set-returning functions
@@ -267,29 +268,43 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   a comparison involving NULL is unknown. Use `is None` / `is not None` (which
   become `IS NULL` / `IS NOT NULL`) to test for NULL. A positive `if`/`while`
   condition treats NULL as false.
-- Integer division follows SQL rules, not Python's `/` (float) and `//` (floor).
-  Division and modulo truncate toward zero: `-7 // 2` is `-4` in Python but the
-  SQL result here is `-3`, and `-7 % 2` is `1` in Python but `-1` here.
+- Integer division follows SQL rules, not Python's. `/` on integers truncates
+  toward zero (`-7 / 2` is `-3`, where Python gives `-3.5`), and `%` takes the
+  sign of the dividend (`-7 % 2` is `-1`, where Python gives `1`). Floor
+  division `//` is not supported: it is passed through and fails when the
+  function runs with `operator does not exist: integer // integer`.
 - Interpolating a NULL in an f-string propagates it, so the whole string is
   NULL. It is neither the Python string `"None"` nor an empty string. In a
-  message being built for `raise` the value falls back to an empty string
-  instead, so one NULL cannot swallow the message.
+  `raise` message, including the `raise("level", ...)` call form, the value
+  falls back to an empty string instead, so one NULL cannot swallow the
+  message. An `assert` message gets no fallback: a NULL there replaces your
+  message with plpgsql's generic `assertion failed`.
 - Comparisons use SQL type resolution. `1 == "1"` compares an integer to a string
   literal, which SQL coerces and treats as equal; in Python it is false.
 - Python truthiness is not emulated. A condition must be a boolean expression. A
-  non-boolean condition is an error reported by plpgsql when the function runs.
+  non-boolean condition is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
 - Locals are function-scoped, matching Python function scope.
 
 ## Not supported
 
 Rejected at `CREATE FUNCTION` time with a line number:
 
-- `def`, `class`, `lambda`, decorators, comprehensions, generators.
-- `import`, modules, and the Python standard library.
-- Tuples, lists, dicts, and sets as general values.
+- `def`, `class` (reported as `def is not supported`), decorators, `yield`.
+- `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.
-- Per-block local scope (locals are function-scoped by design).
+
+Not translated:
+
+- `lambda`, comprehensions, generator expressions, and tuple, list, dict, and
+  set literals. Unannotated, they fail at `CREATE FUNCTION` time
+  (`cannot infer a PostgreSQL type`); annotated, they pass through and fail when
+  the function runs.
+- The Python standard library: a call passes through and must name a
+  PostgreSQL function.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

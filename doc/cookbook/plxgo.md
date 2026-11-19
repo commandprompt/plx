@@ -1,6 +1,6 @@
 # Go cookbook
 
-Practical recipes for the plxgo dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxgo chapter](plxgo.md) for the full language reference.
+Practical recipes for the plxgo dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxgo chapter](../plxgo.md) for the full language reference.
 
 ## Scalar function with branching
 

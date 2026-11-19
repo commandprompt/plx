@@ -106,7 +106,7 @@ while ($n > 0) { $n = $n - 1; }
 ```sql
 outer: for ($i = 1; $i <= $n; $i++) {
   for ($j = 1; $j <= $n; $j++) {
-    if ($i + $j >= $limit) { break outer; }
+    if ($i + $j >= $lim) { break outer; }
   }
 }
 ```
@@ -174,7 +174,7 @@ close_cursor($c);
 
 ```sql
 $rc = row_count();   // GET DIAGNOSTICS $rc = ROW_COUNT
-found()              // the FOUND variable
+if (found()) { return $rc; }   // the FOUND variable
 ```
 
 ### Set-returning functions
@@ -239,7 +239,10 @@ assert($n > 0, "must be positive");
 - Concatenation: `$a . $b` maps to `$a || $b`.
 - Comparison: `==`, `===`, `!=`, `!==` map to `=` and `<>`. `$x == null` becomes
   `$x IS NULL`.
-- Boolean: `&&`, `||`, `!` map to `AND`, `OR`, `NOT`.
+- Boolean: `&&` and `!` map to `AND` and `NOT`. `||` maps to `OR` only in an
+  `if`/`while` condition or a ternary test. Elsewhere (assignments, `return`)
+  it passes through as SQL `||` (string concatenation), so write `OR` there:
+  `$ok = $a OR $b /*:: boolean */;`.
 - Ternary: `$c ? $a : $b` becomes `CASE WHEN $c THEN $a ELSE $b END`.
 - `null` becomes `NULL`.
 
@@ -291,12 +294,17 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   `==` and `!=` and use SQL type resolution. `"1" === 1` is false in PHP but
   compares as equal here. Compare like-typed values.
 - Interpolating a NULL propagates it, so the whole string becomes NULL rather
-  than rendering the value as an empty string. In a message being built for
-  `throw` the value falls back to an empty string instead, so one NULL cannot
-  swallow the message.
+  than rendering the value as an empty string. In a `throw` or `raise` message,
+  including the `raise("level", ...)` call form, the value falls back to an
+  empty string instead, so one NULL cannot swallow the message. An `assert`
+  message gets no fallback: a NULL there replaces your message with plpgsql's
+  generic `assertion failed`.
 - Integer division and modulo follow SQL (truncate toward zero).
 - PHP truthiness is not emulated. A condition must be a boolean expression. A
-  non-boolean condition is an error reported by plpgsql when the function runs.
+  non-boolean condition is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
 - Locals are function-scoped, matching PHP function scope.
 
 ## Not supported
@@ -304,13 +312,18 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 Rejected at `CREATE FUNCTION` time with a line number:
 
 - Function or class definitions, namespaces, `use`, includes.
-- Closures and anonymous functions.
-- Array and object literals as general values.
 - Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and
   `for (...; $v += K)` are supported.
-- `foreach` over an array key/value pair (only value iteration).
 - `switch` fall-through (end each case with `break` or `return`).
-- Per-block local `DECLARE` (locals are function-scoped by design).
+
+Not translated:
+
+- Closures, anonymous functions, and array and object literals as general
+  values. An unannotated assignment of one fails at `CREATE FUNCTION` time
+  (`cannot infer a PostgreSQL type`); an annotated one passes through and fails
+  when the function runs.
+- `foreach ($a as $k => $v)`: the key is ignored; only value iteration is
+  supported.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

@@ -1,6 +1,6 @@
 # JavaScript cookbook
 
-Practical recipes for the plxjs dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxjs chapter](plxjs.md) for the full language reference.
+Practical recipes for the plxjs dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxjs chapter](../plxjs.md) for the full language reference.
 
 ## Scalar function with branching
 

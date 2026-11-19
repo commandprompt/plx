@@ -33,8 +33,8 @@ infers it from the first value when it is an integer, numeric, text, or boolean
 literal. Otherwise annotate the variable with `#:: type`.
 
 ```sql
-n = 42            -- inferred integer
-label = "count"   -- inferred text
+n = 42            # inferred integer
+label = "count"   # inferred text
 amount #:: numeric
 amount = principal * rate
 ```
@@ -166,7 +166,7 @@ one row.
 ```sql
 perform("UPDATE counters SET n = n + 1 WHERE id = #{cid}")
 execute("INSERT INTO t(msg) VALUES ($1)", note)
-return_query("SELECT id FROM vip ORDER BY id")   -- in a set-returning function
+return_query("SELECT id FROM vip ORDER BY id")   # in a set-returning function
 ```
 
 `perform` runs a literal statement. `execute` runs dynamic SQL with optional bind
@@ -189,8 +189,10 @@ close_cursor(c)
 ### Diagnostics
 
 ```sql
-rc = row_count()   -- GET DIAGNOSTICS rc = ROW_COUNT
-found?             -- the FOUND variable
+rc = row_count()   # GET DIAGNOSTICS rc = ROW_COUNT
+if found?          # the FOUND variable
+  return rc
+end
 ```
 
 ### Set-returning functions
@@ -211,8 +213,8 @@ $$;
 ### Raising
 
 ```sql
-raise "bad value"                                -- EXCEPTION
-raise notice: "processed #{n} rows"              -- NOTICE
+raise "bad value"                                # EXCEPTION
+raise notice: "processed #{n} rows"              # NOTICE
 raise exception: "negative: #{v}", errcode: "22023"
 ```
 
@@ -259,7 +261,10 @@ assert(n > 0, "must be positive")
 - Interpolation: `"total is #{amount}"` becomes `'total is ' || (amount)::text`.
   Single-quoted strings do not interpolate.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x == nil` becomes `x IS NULL`.
-- Boolean: `&&`, `||`, `!`, and `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
+- Boolean: `&&`, `!`, `and`, `or`, and `not` map to `AND`, `NOT`, `AND`, `OR`,
+  and `NOT`. `||` maps to `OR` only in a condition (`if`, `unless`, `while`,
+  `until`, or a ternary test); elsewhere it passes through as SQL `||`
+  (string concatenation), so write `or` there.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
 - Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
   `::double precision`. `nil` becomes `NULL`.
@@ -312,7 +317,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Interpolating a NULL propagates it, so `"x=#{v}"` is NULL when `v` is NULL,
   rather than the `'x='` that Ruby's `nil.to_s` would give. In a message being
   built for `raise` the value falls back to an empty string instead, so one
-  NULL cannot swallow the message.
+  NULL cannot swallow the message. The fallback covers the message text only:
+  a NULL interpolated into a `detail:` or `hint:` option makes the `raise`
+  fail with `RAISE statement option cannot be null`, and a NULL in an `assert`
+  message replaces it with `assertion failed`. Wrap such values in
+  `coalesce(x, '')`.
 - Comparisons use SQL type resolution, not Ruby's. `1 == "1"` compares an integer
   to a string literal, which SQL coerces and treats as equal; in Ruby it is
   false. Compare like-typed values.
@@ -320,8 +329,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   and `-7 % 2` is `-1`, where Ruby gives `-4` and `1`.
 - Locals are function-scoped, matching Ruby method scope.
 - Ruby truthiness is not emulated. A condition must be a boolean expression;
-  write `x != 0` or `!x.nil?` rather than a bare `x`. A non-boolean condition is
-  an error reported by plpgsql when the function runs, not at CREATE time.
+  write `x != 0` or `x != nil` rather than a bare `x`. A non-boolean condition
+  is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
 
 ## Not supported
 
@@ -330,7 +342,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Method or class definitions (`def`, classes, modules), gems.
 - Blocks and lambdas beyond the recognized `.each` forms.
 - Hash and array literals as general values.
-- `||=`, `&&=`, and `and`/`or` in value position.
+- `||=` and `&&=`.
 - `redo`, `retry`.
 - Predicate/bang methods (`x.zero?`, `arr.empty?`, `s.strip!`): the trailing
   `?`/`!` is not a SQL operator. Use the SQL form (`x = 0`,

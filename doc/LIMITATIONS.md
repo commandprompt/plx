@@ -16,13 +16,19 @@ which dialect it was written in.
 These follow from running as plpgsql and are not specific to any one dialect.
 
 - **Trusted sandbox.** A plx function does what a plpgsql function can do and no
-  more: no filesystem access, no network access, no arbitrary native code. All
-  SQL runs with the privileges of the calling role. This is the point of the
+  more: no filesystem access, no network access, no arbitrary native code. SQL
+  runs with the privileges of the calling role, or of the function owner for a
+  `SECURITY DEFINER` function, exactly as in plpgsql. This is the point of the
   design, and the reason plx is a trusted language while the native PL/Ruby or
-  PL/PHP are not.
-- **No transaction control.** A function runs inside the caller's transaction, so
-  `COMMIT`, `ROLLBACK`, `BEGIN TRANSACTION`, and savepoint management are not
-  available. This is a plpgsql function boundary, not a plx choice.
+  PL/PHP are not. Because plx is a syntax layer over plpgsql, USAGE on a plx
+  language is equivalent to USAGE on plpgsql; see
+  [Trust and security](USERGUIDE.md#trust-and-security).
+- **Transaction control only in procedures.** A function runs inside the
+  caller's transaction, so `COMMIT` and `ROLLBACK` raise `invalid transaction
+  termination` there. In a `CREATE PROCEDURE` invoked with `CALL` (outside an
+  explicit transaction block), `commit()`/`rollback()` (COBOL `COMMIT`/`ROLLBACK`,
+  PL/SQL `COMMIT;`) work as in plpgsql. plxtsql and plxgo do not support
+  transaction control. Savepoint management is not available in any dialect.
 - **The signature is SQL.** The parameter and return types in `CREATE FUNCTION`
   are parsed by PostgreSQL before plx sees the body, so they must be PostgreSQL
   type names (`integer`, `numeric`, `text`, `timestamp`, ...). Dialect type names
@@ -36,16 +42,26 @@ These follow from running as plpgsql and are not specific to any one dialect.
   so a comparison involving NULL is unknown rather than false, and `==`/`===`
   become `=`. Integer division and modulo truncate toward zero. Conditions must
   be boolean expressions; source-language "truthiness" (a bare value used as a
-  condition) is not emulated. Interpolating a NULL propagates it: the value is
-  concatenated as-is, so the whole string becomes NULL the way SQL `||` does.
-  Two exceptions. A message being built for `RAISE` keeps each interpolated
-  value as an empty string, so one NULL cannot swallow the message. And
-  `plxcobol`'s `STRING-APPEND` does not propagate, because it builds its string
-  through the `plx_strbuild` accumulator, whose append treats a NULL as nothing
-  to append by design.
+  condition) is not emulated. A non-boolean condition is not rejected at
+  `CREATE FUNCTION` time. When the function runs, plpgsql coerces it through
+  its text form: a value whose text is a boolean literal (`0`, `1`, `t`, `yes`,
+  `off`, ...) is silently accepted, and anything else raises `invalid input
+  syntax for type boolean`. Always write an explicit comparison.
+  Interpolating a NULL propagates it: the value is concatenated as-is, so the
+  whole string becomes NULL the way SQL `||` does. Two exceptions. A message
+  being built for `RAISE` keeps each interpolated value as an empty string, so
+  one NULL cannot swallow the message. And `plxcobol`'s `STRING-APPEND` does not
+  propagate, because it builds its string through the `plx_strbuild`
+  accumulator, whose append treats a NULL as nothing to append by design.
+- **The message fallback covers the message text only.** An interpolated NULL
+  in a `RAISE` option such as `detail:` or `hint:` makes the `RAISE` itself fail
+  with `RAISE statement option cannot be null`, which hides the error you meant
+  to raise. A NULL in an `assert` message replaces your message with plpgsql's
+  generic `assertion failed`. Wrap such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
-  (Ruby/PHP/Python/JS/TS), `||`, or `CONCAT(...)`.
+  (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL, T-SQL), or
+  `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is dropped.
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type
@@ -56,17 +72,27 @@ These follow from running as plpgsql and are not specific to any one dialect.
   amortized-O(1) building. The in-place path relies on a PostgreSQL 18 planner
   hook; on 13 through 17 the result is correct but the append is O(n^2), the same
   as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
+- **The string builder must be on the search path.** Functions that use the
+  append operators reference the extension's `plx_strbuild` type and
+  `plx_sb_append` function unqualified, so the extension's schema must be on the
+  function's `search_path` at run time, including any `SET search_path` clause
+  on the function. Otherwise the function is created but fails when called with
+  `type "plx_strbuild" does not exist`. Because the lookup goes through the
+  path, a `SECURITY DEFINER` function should pin it; see
+  [Trust and security](USERGUIDE.md#trust-and-security).
 - **Runtime errors point at the generated plpgsql.** plpgsql requires all
   declarations at the top, so line numbers in a runtime error refer to the
   transpiled body, not your dialect source. `plx_source()` recovers the embedded
   original, and the mapping is usually close. See [DEBUGGING.md](DEBUGGING.md).
 - **A depth cap guards pathological input.** Deeply nested expressions or
-  statements (hundreds of levels) are rejected at `CREATE FUNCTION` time rather
-  than risking a stack overflow.
-- **What is always reachable.** Every plpgsql statement type is expressible from
-  every dialect (assignment, `IF`/`CASE`, all loops, `RETURN`/set-returning,
-  cursors, dynamic SQL, `RAISE`, exception handling, triggers, `GET
-  DIAGNOSTICS`). See [PARITY.md](PARITY.md) for the construct-by-construct matrix.
+  statements (hundreds of levels) are rejected at `CREATE FUNCTION` time with a
+  `nested too deeply` error rather than risking a stack overflow.
+- **What is always reachable.** Every plpgsql statement type (assignment,
+  `IF`/`CASE`, all loops, `RETURN`/set-returning, cursors, dynamic SQL, `RAISE`,
+  exception handling, triggers, `GET DIAGNOSTICS`) is expressible from every
+  dialect, except that plxtsql has no cursors or transaction control and plxgo
+  has no transaction control. See
+  [PARITY.md](PARITY.md) for the construct-by-construct matrix.
 
 A dialect gives you its syntax over SQL semantics, not its standard library.
 With the exception of the `fmt`/`strings`/`math`/`strconv` subset plxgo maps, a
@@ -78,14 +104,17 @@ library call you would reach for out of habit.
 
 ## What each dialect does not support
 
-The per-dialect chapter is authoritative; this is a quick reference.
+The per-dialect chapter is authoritative; this is a quick reference. Some
+items are rejected at `CREATE FUNCTION` time; others (closures, literals of
+unsupported types, library calls) are not translated, so they pass through and
+fail when the function runs.
 
 ### plxruby ([chapter](plxruby.md))
 
 - Method, class, and module definitions (`def`, `class`, `module`); gems.
 - Blocks and lambdas beyond the recognized `.each` forms.
 - Hash and array literals as general values.
-- `||=`, `&&=`, and `and`/`or` in value position.
+- `||=` and `&&=`.
 - `redo`, `retry`.
 - Predicate and bang methods (`x.zero?`, `arr.empty?`, `s.strip!`); use the SQL
   form (`x = 0`, `cardinality(arr) = 0`).
@@ -95,20 +124,24 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - Function, class, and namespace definitions; `use`, includes, closures.
 - Array and object literals as general values.
 - Non-counting `for`; only `for ($v = LO; $v < HI; $v++)` and `+= K` steps.
-- `foreach` over a key/value pair (value iteration only).
+- `foreach` over a key/value pair: the key is ignored (value iteration only).
 - `switch` fall-through (end each case with `break` or `return`).
 
 ### plxjs ([chapter](plxjs.md))
 
 - Function, arrow-function, and class definitions; `import`.
 - Object and array literals as general values.
-- `for...in`, and `for...of` over anything other than `query(...)` or an array.
+- `for...in`. `for...of` treats anything other than `query(...)` as an array,
+  so a non-array fails when the function runs.
+- Block scoping: `let`/`const` in an inner block assign the function-scoped
+  variable of the same name.
 - `switch` fall-through.
 
 ### plxts ([chapter](plxts.md))
 
 - Everything plxjs rejects, plus type declarations (`interface`, `type`, `enum`),
-  generics beyond `T[]`, and type-only imports.
+  and type-only imports. Generic annotations (`Array<T>`) and nested arrays
+  (`number[][]`) are not mapped; use `T[]` or a SQL type name.
 - Multiple annotated declarators in one statement (`let a: number = 1, b = 2;`);
   use one declaration per statement.
 - Annotations are not type-checked; they only set the plpgsql declaration type.
@@ -119,6 +152,7 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - `import`, modules, and the Python standard library.
 - Tuples, lists, dicts, and sets as general values.
 - `match`/`case`, and the conditional expression `a if c else b`.
+- Floor division `//`; `/` on integers truncates toward zero.
 
 ### plxgo ([chapter](plxgo.md))
 
@@ -127,7 +161,9 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - `map`, `chan`, `struct`, and `interface` types; declare data with SQL types or
   slices.
 - `switch` `fallthrough`.
-- `+` for string concatenation (use `||` or build a slice and `array_to_string`).
+- `+` for string concatenation. `||` is logical OR in plxgo; use
+  `fmt.Sprintf("%s%s", a, b)` or build a slice and `array_to_string`.
+- `for i := range s` over a slice; use `for _, v := range s` or a counting loop.
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.
 - `fmt.Sprintf` renders every operand in its SQL text form. A `-` flag and a
@@ -146,8 +182,12 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - Group items (subordinate entries under an `01`) in `WORKING-STORAGE`; declare
   elementary items, or use a `TYPE` clause for a composite type.
 - Fixed-format source (column areas); use free format.
-- Report Writer, screen sections, object orientation, and the standard COBOL
-  intrinsic function library (use SQL functions in expressions).
+- Report Writer, screen sections, and object orientation. The standard COBOL
+  intrinsic function library is not translated (a `FUNCTION name(...)` call
+  passes through and fails when the function runs); use SQL functions in
+  expressions.
+- The `||` operator and `::` casts inside `COMPUTE` and conditions; use
+  `CONCAT(...)` and `CAST(x AS type)`.
 
 ### plxplsql ([chapter](plxplsql.md))
 
@@ -161,6 +201,10 @@ The per-dialect chapter is authoritative; this is a quick reference.
 - Oracle spellings inside a `DBMS_OUTPUT.PUT_LINE`/`RAISE_APPLICATION_ERROR`
   argument, schema-qualified `seq.NEXTVAL`, nested-`DECLARE` type names, and
   parameterized cursors.
+- Oracle exception names other than `NO_DATA_FOUND` and `TOO_MANY_ROWS`; use the
+  PostgreSQL condition name (`division_by_zero` for `ZERO_DIVIDE`,
+  `unique_violation` for `DUP_VAL_ON_INDEX`).
+- `c%NOTFOUND`/`c%FOUND` cursor attributes; use `NOT FOUND`/`FOUND`.
 
 ### plxtsql ([chapter](plxtsql.md))
 
@@ -178,5 +222,6 @@ Because every dialect compiles to the same plpgsql, you can write the awkward
 part of a function in whichever dialect expresses it best, or drop to a SQL
 statement inside any dialect (all of them pass SQL text through to `query`,
 `execute`, `RETURN QUERY`, and the like). A construct a dialect rejects is
-reported at `CREATE FUNCTION` time with a source line, so gaps surface
-immediately rather than at run time.
+reported at `CREATE FUNCTION` time with a source line, so those gaps surface
+immediately. Library calls and expressions passed through to SQL are not
+checked until the function runs.

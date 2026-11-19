@@ -60,7 +60,7 @@ Everything not listed here is emitted verbatim (it is already valid plpgsql).
 | `PLS_INTEGER`, `BINARY_INTEGER`, `SIMPLE_INTEGER` | `integer` |
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | `real` / `double precision` |
 | `CLOB`, `NCLOB`, `LONG` | `text` |
-| `BLOB`, `RAW` | `bytea` |
+| `BLOB`, `RAW` | `bytea` (`RAW(n)` becomes the invalid `bytea(n)`, so declare `RAW` without a length) |
 
 ### Statements and functions
 
@@ -86,7 +86,7 @@ CURSOR c IS SELECT v FROM t ORDER BY v;
 OPEN c;
 LOOP
   FETCH c INTO r;
-  EXIT WHEN NOT FOUND;   -- or c%NOTFOUND, see notes
+  EXIT WHEN NOT FOUND;   -- c%NOTFOUND is not translated; use NOT FOUND
   ...
 END LOOP;
 CLOSE c;
@@ -110,9 +110,11 @@ EXCEPTION
     RETURN -1;
 ```
 
-Condition names such as `NO_DATA_FOUND`, `TOO_MANY_ROWS`, `DUP_VAL_ON_INDEX`,
-and `ZERO_DIVIDE` are recognized by plpgsql as well; where a name differs, use
-the SQLSTATE condition name.
+The condition names `NO_DATA_FOUND` and `TOO_MANY_ROWS` are recognized by
+plpgsql as well. Other Oracle names are not translated: use the PostgreSQL
+condition name (`division_by_zero` for `ZERO_DIVIDE`, `unique_violation` for
+`DUP_VAL_ON_INDEX`). An unrecognized name fails when the function is first
+called with `unrecognized exception condition`.
 
 ## Dynamic SQL
 
@@ -139,7 +141,8 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 
 ## Not supported
 
-Rejected or unchanged (and therefore likely to error) at `CREATE FUNCTION` time:
+Not translated. These pass through unchanged, so `CREATE FUNCTION` succeeds and
+the function fails with a plpgsql error when it is first called:
 
 - Packages (`CREATE PACKAGE`), package-qualified calls other than the
   `DBMS_OUTPUT` forms above, and the wider `DBMS_*` / `UTL_*` library.
