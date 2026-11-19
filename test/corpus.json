@@ -277,7 +277,7 @@
       "ruby_create": "CREATE FUNCTION e_case(x int) RETURNS text LANGUAGE plxruby AS $$\ncase x\nwhen 1\n  return 'one'\nelse\n  return 'other'\nend\n$$;",
       "expected_plpgsql_body": "BEGIN\n  CASE x\n  WHEN 1 THEN RETURN 'one';\n  ELSE RETURN 'other';\n  END CASE;\nEND;",
       "test_sql": "SELECT e_case(1) AS r;",
-      "expected_output": " r  \n-----\n one\n(1 row)"
+      "expected_output": "  r  \n-----\n one\n(1 row)"
     },
     {
       "id": "reject-nested-def",

@@ -6,11 +6,21 @@ dialect and watches for backend crashes (lost connection) or hangs (transpiler
 infinite loop / non-interruptible). A clean run means every input either
 transpiled or raised a normal error, and the server stayed up.
 
-Run in the container: PGHOST=/tmp python3 test/fuzz.py [iterations]
-"""
-import os, random, subprocess, sys
+A statement the server cancels at statement_timeout counts as a hang, and an
+out-of-memory error counts as a finding too. Before it starts, the fuzzer
+checks that every plx language exists in the target database, because a body
+in a missing language raises an ordinary error and would test nothing.
 
-PSQL = "/usr/local/pgsql/bin/psql"
+Usage: python3 test/fuzz.py [iterations]
+       python3 test/fuzz.py --selftest   (check the classifier only, no server)
+
+The usual libpq variables (PGHOST, PGPORT, PGDATABASE) choose the server and
+database. PLX_PSQL names the psql binary; the default is the first psql on PATH.
+"""
+import os, random, re, shutil, subprocess, sys
+
+# PLX_PSQL names the psql to use; otherwise the first psql on PATH.
+PSQL = os.environ.get("PLX_PSQL") or shutil.which("psql") or "/usr/local/pgsql/bin/psql"
 ENV = dict(os.environ, PGHOST=os.environ.get("PGHOST", "/tmp"), PGUSER="postgres")
 DIALECTS = ["plxruby", "plxphp", "plxjs", "plxpython3", "plxcobol", "plxplsql",
             "plxts", "plxtsql", "plxgo"]
@@ -232,6 +242,71 @@ def server_up():
     except Exception:
         return False
 
+# psql prefixes a server error with "psql:<file>:<line>: " when it reads a
+# script, and prints it bare when it reads standard input. Match either, and
+# only at the start of a line, so a fuzz body echoed inside an error message
+# cannot fake a finding.
+_ERR = r"^(?:psql:[^\n]*: )?ERROR:  "
+# Nothing else cancels the fuzzer's statements, so either cancel message means
+# the statement ran into statement_timeout. PostgreSQL reports a timeout that
+# fires very early as "user request".
+_TIMEOUT = re.compile(_ERR + r"canceling statement due to "
+                      r"(?:statement timeout|user request)$", re.M)
+_OOM = re.compile(_ERR + r"out of memory$", re.M)
+_NOLANG = re.compile(_ERR + r'language "[^"\n]*" does not exist$', re.M)
+
+def classify(out):
+    """Classify what psql printed for one CREATE FUNCTION.
+
+    CRASH: the backend died. HANG: the server cancelled the statement at
+    statement_timeout, so the transpiler ran for too long. RESOURCE: the
+    transpiler ran out of memory. SETUP: the language does not exist, so
+    nothing was transpiled. Any other output, including an ordinary error,
+    is "ok".
+    """
+    if "closed the connection" in out or "terminating connection" in out or \
+       "server process" in out or "Perhaps out of memory" in out:
+        return "CRASH"
+    if _TIMEOUT.search(out):
+        return "HANG"
+    if _OOM.search(out):
+        return "RESOURCE"
+    if _NOLANG.search(out):
+        return "SETUP"
+    return "ok"
+
+SELFTEST = [
+    # (psql output, expected classification)
+    ("CREATE FUNCTION\n", "ok"),
+    ("ERROR:  plxruby: unexpected token\nDETAIL:  at plxruby source line 1\n", "ok"),
+    ("ERROR:  stack depth limit exceeded\n", "ok"),
+    ("server closed the connection unexpectedly\n", "CRASH"),
+    # The server cancelled the transpile at statement_timeout: a hang.
+    ("ERROR:  canceling statement due to statement timeout\n", "HANG"),
+    ("ERROR:  out of memory\nDETAIL:  Failed on request of size 8192.\n", "RESOURCE"),
+    ("psql:<stdin>:1: ERROR:  canceling statement due to statement timeout\n", "HANG"),
+    ("ERROR:  canceling statement due to user request\n", "HANG"),
+    # A transpile error that merely quotes the text is not a finding: not
+    # when the quote ends the message (the $ anchor), and not when it is
+    # somewhere other than the start of a line (the ^ anchor).
+    ("ERROR:  plxruby: unexpected 'ERROR:  out of memory'\n", "ok"),
+    ("ERROR:  plxruby: unexpected ERROR:  out of memory\n", "ok"),
+    ("ERROR:  plxjs: bad x ERROR:  canceling statement due to statement "
+     "timeout\n", "ok"),
+    ('ERROR:  plxphp: near ERROR:  language "plxruby" does not exist\n', "ok"),
+    # Nothing was transpiled at all: the run tests nothing.
+    ('ERROR:  language "plxruby" does not exist\n', "SETUP"),
+]
+
+def selftest():
+    """Check classify() on known outputs. Returns a list of failures."""
+    failures = []
+    for out, want in SELFTEST:
+        got = classify(out)
+        if got != want:
+            failures.append("classify(%r) gave %s, want %s" % (out, got, want))
+    return failures
+
 def run_one(dialect, body):
     sql = ("SET statement_timeout='4s'; DROP FUNCTION IF EXISTS fz(); "
            "CREATE FUNCTION fz() RETURNS text LANGUAGE %s AS %s;" % (dialect, quote(body)))
@@ -240,11 +315,7 @@ def run_one(dialect, body):
                            env=ENV, input=sql, capture_output=True, text=True, timeout=12)
     except subprocess.TimeoutExpired:
         return "HANG"
-    out = p.stdout + p.stderr
-    if "closed the connection" in out or "terminating connection" in out or \
-       "server process" in out or "Perhaps out of memory" in out:
-        return "CRASH"
-    return "ok"
+    return classify(p.stdout + p.stderr)
 
 def check(dialect, body, cases):
     r = run_one(dialect, body)
@@ -256,7 +327,31 @@ def check(dialect, body, cases):
                     break
                 import time; time.sleep(1)
 
+def languages_present():
+    """Return the plx dialects missing from the target database."""
+    p = subprocess.run([PSQL, "-U", "postgres", "-X", "-tA", "-c",
+                        "SELECT lanname FROM pg_language"],
+                       env=ENV, capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        sys.exit("fuzz.py: cannot query the server:\n" + p.stderr)
+    have = set(p.stdout.split())
+    return [d for d in DIALECTS if d not in have]
+
 def main():
+    if sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        sys.exit(0)
+    failures = selftest()
+    for f in failures:
+        print("self-test FAILED: " + f)
+    if failures or sys.argv[1:] == ["--selftest"]:
+        sys.exit(1 if failures else 0)
+    missing = languages_present()
+    if missing:
+        sys.exit("fuzz.py: these languages do not exist in the target database, "
+                 "so the fuzzer would test nothing: %s\n"
+                 "Run CREATE EXTENSION plx there, or set PGDATABASE."
+                 % " ".join(missing))
     iters = int(sys.argv[1]) if len(sys.argv) > 1 else 2500
     bad = []
     print("pathological cases (%d)..." % len(pathological()))
@@ -271,11 +366,12 @@ def main():
             print("  %d/%d, up=%s, findings=%d" % (k + 1, iters, server_up(), len(bad)))
     print("\n=== fuzz complete. server up: %s ===" % server_up())
     if not bad:
-        print("no crashes or hangs.")
+        print("no crashes, hangs, or resource findings.")
         sys.exit(0)
     print("%d finding(s):" % len(bad))
     for kind, d, snippet in bad[:40]:
         print("  [%s] %s : %r" % (kind, d, snippet))
     sys.exit(1)
 
-main()
+if __name__ == "__main__":
+    main()

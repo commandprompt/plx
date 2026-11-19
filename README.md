@@ -266,6 +266,11 @@ bench/                      benchmark harness and results
 
 ## Tests
 
+Caution: `test/run_corpus.py` drops and re-creates the plx extension in its
+database, which drops every plx function there. Point it at a test database.
+It and `test/fuzz.py` use the first `psql` on `PATH` (or `PLX_PSQL`) and the
+usual libpq variables (`PGHOST`, `PGPORT`, `PGDATABASE`).
+
 ```
 make installcheck            # pg_regress suite
 make differentialcheck       # each dialect against a plpgsql reference
@@ -279,6 +284,11 @@ a running server; run `differentialcheck` after `installcheck`, which creates
 the `contrib_regression` database it uses. The expected output is in
 `test/expected/`. CI runs installcheck, differentialcheck, and metacheck on
 PostgreSQL 13 through 18.
+
+The fuzzer needs a database where plx is installed. After installcheck, run it
+with `PGDATABASE=contrib_regression`. It stops with an error when the plx
+languages are missing, and it reports a crash, a statement cancelled at its
+timeout, or an out-of-memory error as a finding.
 
 ## License
 

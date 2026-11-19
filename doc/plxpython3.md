@@ -292,7 +292,7 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 
 Rejected at `CREATE FUNCTION` time with a line number:
 
-- `def`, `class` (reported as `def is not supported`), decorators, `yield`.
+- `def`, `class`, decorators, `yield`.
 - `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.

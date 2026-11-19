@@ -76,7 +76,7 @@ plx_rewrite_expr(Ctx *cx, const char *s, int len, bool boolctx)
 	check_stack_depth();
 	CHECK_FOR_INTERRUPTS();
 	if (++cx->depth > PLX_MAX_DEPTH)
-		plx_err(cx, 0, "expression nested too deeply");
+		plx_err(cx, cx->t[cx->pos].line, "expression nested too deeply");
 	r = rewrite_expr_inner(cx, s, len, boolctx);
 	cx->depth--;
 	return r;
@@ -1467,7 +1467,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				 * in the generated function body.
 				 */
 				if (ovf)
-					plx_err(cx, 0, "integer literal out of range: %.*s",
+					plx_err(cx, cx->t[cx->pos].line,
+							"integer literal out of range: %.*s",
 							i - start, s + start);
 				/* no digits (malformed): leave the source text untouched */
 				if (ndig == 0)

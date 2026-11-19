@@ -365,3 +365,44 @@ v = "b";
 let c = `got ${v}` /*:: text const */;
 return c;
 $$;
+
+-- A54: an overflowing hex literal reports the source line of the statement
+-- that holds it, and a Python class statement is reported as class, not def
+CREATE FUNCTION e_a54_js_hex_line() RETURNS numeric LANGUAGE plxjs AS $$
+let a = 1;
+let b = 2;
+return 0xFFFFFFFFFFFFFFFFFF;
+$$;
+CREATE FUNCTION e_a54_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+class C:
+    pass
+return 1
+$$;
+
+-- A54 review: an expression nested too deeply reports the line of its
+-- statement, not line 0
+DO $outer$
+DECLARE body text; d text;
+BEGIN
+	body := 'let x = 1;' || E'\n' || 'return ' || repeat('a ? 1 : ', 600) || '2;';
+	EXECUTE format('CREATE FUNCTION e_a54_js_deepexpr(a bool) RETURNS int LANGUAGE plxjs AS %L', body);
+	RAISE WARNING 'unexpected: creation succeeded';
+EXCEPTION WHEN OTHERS THEN
+	GET STACKED DIAGNOSTICS d = PG_EXCEPTION_DETAIL;
+	RAISE WARNING '% (%)', SQLERRM, d;
+END $outer$;
+
+-- A54 review: when a statement spans lines, the overflow error reports the
+-- line where the statement starts (3), not the line of the literal (4); a
+-- Python lambda is reported as lambda, not def
+CREATE FUNCTION e_a54_js_hex_multiline(a numeric) RETURNS numeric LANGUAGE plxjs AS $$
+let x = 1;
+return a +
+  0xFFFFFFFFFFFFFFFFFF;
+$$;
+CREATE FUNCTION e_a54_py_lambda() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+lambda y: y
+return 1
+$$;
