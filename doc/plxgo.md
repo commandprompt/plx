@@ -121,6 +121,7 @@ $$;
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
 | `nil` | `NULL` |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded) |
+| `0755`, `0o755`, `0x1F`, `0b101`, `1_000` | decimal integer (`493`, `493`, `31`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |

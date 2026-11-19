@@ -2923,9 +2923,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				continue;
 			}
 			/*
-			 * A leading zero (0755): octal in Ruby, PHP, JS and Go, a syntax
-			 * error in Python 3 and TypeScript, and decimal in COBOL, T-SQL and
-			 * PL/SQL. SQL reads 0755 as decimal, so convert it, reject it, or
+			 * A leading zero (0755): octal in Ruby, PHP and JS, a syntax error
+			 * in Python 3 and TypeScript, and decimal in COBOL, T-SQL and
+			 * PL/SQL. (plxgo has its own emitter: see go_emit_num.) SQL reads 0755 as decimal, so convert it, reject it, or
 			 * leave it. A fraction or exponent (00.5, 01e3) keeps it decimal.
 			 */
 			if (s[i] == '0' && !names_fold_case(cx) && leading_zero_int(s, len, i))

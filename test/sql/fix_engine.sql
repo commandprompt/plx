@@ -113,6 +113,17 @@ CREATE FUNCTION fe_a6_bad_rb() RETURNS int LANGUAGE plxruby AS $$
 return 0789
 $$;
 
+-- A6: Go integer literals keep their base: 0755 and 0o755 are octal
+CREATE FUNCTION fe_a6_go() RETURNS text LANGUAGE plxgo AS $$
+a := 0755
+var b int = 0o17 + 0x1F + 0b101 + 1_000
+var c float64 = 00.5 + 0.5
+return fmt.Sprintf("%d %d %v", a, b, c)
+$$;
+SELECT fe_a6_go();
+CREATE FUNCTION fe_a6_go_bad() RETURNS int LANGUAGE plxgo AS $$
+return 0789
+$$;
 -- A7: ^ is bitwise XOR in Ruby, PHP, JS, TS and Python, not SQL exponent
 CREATE FUNCTION fe_a7_xor_rb(a int, b int) RETURNS int LANGUAGE plxruby AS $$
 return a ^ b

@@ -246,7 +246,7 @@ go_lex(Go *g, const char *body)
 			const char *st = p;
 
 			while (p < end && (GODIGIT(*p) || *p == '.' || *p == '_' ||
-							   *p == 'x' || *p == 'X' ||
+							   *p == 'x' || *p == 'X' || *p == 'o' || *p == 'O' ||
 							   ((*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) ||
 							   (( *p == '+' || *p == '-') && (p[-1] == 'e' || p[-1] == 'E'))))
 				p++;
@@ -358,6 +358,71 @@ go_lex(Go *g, const char *body)
 #undef GOPUSH
 #undef GOALPHA
 #undef GODIGIT
+}
+
+/*
+ * Emit a Go number. An integer literal in another base (0755 and 0o755 are
+ * octal, 0x1F hex, 0b101 binary) or with '_' separators becomes a decimal
+ * literal: SQL reads 0755 as 755, and plpgsql accepts the other forms only
+ * from PostgreSQL 16. A float (a '.' or an exponent) keeps its digits, minus
+ * the separators; a leading zero does not make it octal.
+ */
+static void
+go_emit_num(Go *g, GoTok *tk, StringInfo out)
+{
+	const char *s = tk->s;
+	int			len = tk->len, i, base = 10, start = 0;
+	uint64		val = 0;
+	bool		isfloat = false;
+
+	if (len > 1 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		base = 16, start = 2;
+	else if (len > 1 && s[0] == '0' && (s[1] == 'o' || s[1] == 'O'))
+		base = 8, start = 2;
+	else if (len > 1 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+		base = 2, start = 2;
+	else
+	{
+		for (i = 0; i < len; i++)
+			if (s[i] == '.' || s[i] == 'e' || s[i] == 'E')
+				isfloat = true;
+		if (!isfloat && len > 1 && s[0] == '0')
+			base = 8, start = 1;
+	}
+	if (base == 16)
+		for (i = start; i < len; i++)
+			if (s[i] == '.' || s[i] == 'p' || s[i] == 'P')
+			{
+				appendBinaryStringInfo(out, s, len);	/* hex float: as written */
+				return;
+			}
+	if (base == 10)
+	{
+		for (i = 0; i < len; i++)
+			if (s[i] != '_')
+				appendStringInfoChar(out, s[i]);
+		return;
+	}
+	for (i = start; i < len; i++)
+	{
+		int			d;
+
+		if (s[i] == '_')
+			continue;
+		d = (s[i] >= '0' && s[i] <= '9') ? s[i] - '0' :
+			(s[i] >= 'a' && s[i] <= 'f') ? s[i] - 'a' + 10 :
+			(s[i] >= 'A' && s[i] <= 'F') ? s[i] - 'A' + 10 : 99;
+		if (d >= base)
+			plx_err(g->cx, tk->line, "invalid digit in %s literal: %.*s",
+					base == 8 ? "octal" : base == 2 ? "binary" : "hexadecimal",
+					len, s);
+		if (val > (PG_UINT64_MAX - d) / base)
+			plx_err(g->cx, tk->line, "integer literal out of range: %.*s", len, s);
+		val = val * base + d;
+	}
+	if (len == start)
+		plx_err(g->cx, tk->line, "malformed number: %.*s", len, s);
+	appendStringInfo(out, UINT64_FORMAT, val);
 }
 
 /* emit a Go string/rune literal as a SQL string literal */
@@ -1050,7 +1115,7 @@ go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 		if (tk->kind == GO_NUM)
 		{
 			go_sp(out);
-			appendBinaryStringInfo(out, tk->s, tk->len);
+			go_emit_num(g, tk, out);
 			i++;
 			continue;
 		}
