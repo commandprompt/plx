@@ -77,7 +77,8 @@ else { $grade = "F"; }
 
 `switch` lowers to plpgsql `CASE`. Stacked labels become a value list. Each arm
 must end with `break` or another statement that leaves the arm (`return`,
-`throw` or `continue`); genuine fall-through is rejected.
+`throw`, `continue`, `break N`, or `break` with a loop label); genuine
+fall-through is rejected.
 A `break` inside an `if` or `try` within an arm leaves the `switch`, as it
 does in the source language. A `break` inside a loop within an arm leaves only
 that loop.
@@ -103,6 +104,21 @@ while ($n > 0) { $n = $n - 1; }
 ```
 
 `continue` and `break` map to `CONTINUE` and `EXIT`.
+
+`break N` and `continue N` leave or continue the Nth enclosing loop or
+`switch`, counting from the innermost, as in PHP:
+
+```sql
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    if ($j == 1) { break 2; }    // leaves both loops
+  }
+}
+```
+
+`CREATE FUNCTION` rejects a level of 0 and a level greater than the number of
+enclosing loops and switches. It also rejects a `continue N` that lands on a
+`switch`; write `break N` instead.
 
 ### Loop labels
 

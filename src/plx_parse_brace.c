@@ -30,21 +30,162 @@ static void parse_switch_brace(Ctx *cx, int ind);
 static void paren_group(Ctx *cx, int *a, int *b);
 
 /*
- * The innermost switch being parsed. A break nested inside one of its arms
- * (in an if or try, not inside a loop opened in the arm) leaves the switch.
- * parse_switch_brace saves and restores it around each switch, and
- * plx_brace_parse_body clears it, so an error raised mid-switch leaves
- * nothing behind for the next parse.
+ * The loops and switches being parsed, innermost first. A break nested in a
+ * switch arm (in an if or try, not inside a loop opened in the arm) leaves
+ * the switch, and PHP's break N / continue N count both kinds. A construct
+ * gets a plpgsql label only when such an exit needs one; the label is
+ * inserted at the construct's start offset when the construct closes, so code
+ * without these exits is emitted as before. plx_brace_parse_body clears the
+ * stack, so an error raised mid-parse leaves nothing behind.
  */
-typedef struct BraceSwitch
+typedef struct BraceBrk
 {
 	Ctx		   *cx;
-	int			loopdepth;		/* cx->loopdepth at the switch */
-	int			fin_id;			/* try-with-finally frame of the switch */
-	char	   *label;			/* block label, set by the first nested break */
-} BraceSwitch;
+	bool		is_switch;
+	bool		user_label;		/* label came from the source (name: for) */
+	int			loopdepth;		/* cx->loopdepth inside the construct */
+	int			fin_id;			/* try-with-finally frame of the construct */
+	int			start;			/* cx->out offset of the construct */
+	char	   *label;			/* plpgsql label, or NULL while none is needed */
+	struct BraceBrk *outer;
+} BraceBrk;
 
-static BraceSwitch *cur_switch = NULL;
+static BraceBrk *cur_brk = NULL;
+static char *pending_label = NULL;	/* source label for the next loop */
+
+static void
+brk_begin(Ctx *cx, BraceBrk *b, bool is_switch, int start)
+{
+	b->cx = cx;
+	b->is_switch = is_switch;
+	b->loopdepth = cx->loopdepth + (is_switch ? 0 : 1);
+	b->fin_id = cx->fin ? cx->fin->id : 0;
+	b->start = start;
+	b->label = NULL;
+	b->user_label = false;
+	if (!is_switch && pending_label)
+	{
+		b->label = pending_label;
+		b->user_label = true;
+	}
+	pending_label = NULL;
+	b->outer = cur_brk;
+	cur_brk = b;
+}
+
+/* the label an exit to b uses, registered so plx_emit_exit routes it
+ * through any finally between the exit and b */
+static const char *
+brk_label(Ctx *cx, BraceBrk *b)
+{
+	PlxLabel   *l = palloc(sizeof(PlxLabel));
+
+	if (!b->label)
+		b->label = psprintf("__plx_%s_%d", b->is_switch ? "sw" : "lp", ++cx->subq);
+	l->name = b->label;
+	l->fin_id = b->fin_id;
+	l->next = cx->labels;
+	cx->labels = l;
+	return b->label;
+}
+
+static void
+brk_end(Ctx *cx, BraceBrk *b, int ind)
+{
+	StringInfo	o = &cx->out;
+	StringInfoData w;
+
+	cur_brk = b->outer;
+	if (!b->label || b->user_label)
+		return;
+	/* a switch becomes <<l>> BEGIN CASE ... END CASE; END; a loop <<l>> LOOP */
+	initStringInfo(&w);
+	appendBinaryStringInfo(&w, o->data, b->start);
+	plx_indent(&w, ind);
+	appendStringInfo(&w, "<<%s>>\n", b->label);
+	if (b->is_switch)
+	{
+		plx_indent(&w, ind);
+		appendStringInfoString(&w, "BEGIN\n");
+	}
+	appendBinaryStringInfo(&w, o->data + b->start, o->len - b->start);
+	if (b->is_switch)
+	{
+		plx_indent(&w, ind);
+		appendStringInfoString(&w, "END;\n");
+	}
+	pfree(o->data);
+	*o = w;
+}
+
+/* the body and END LOOP of a loop whose header starts at offset start */
+static void
+brace_loop_body(Ctx *cx, int ind, int start)
+{
+	BraceBrk	b;
+
+	brk_begin(cx, &b, false, start);
+	cx->loopdepth++;
+	parse_brace_block(cx, ind + 1);
+	cx->loopdepth--;
+	plx_indent(&cx->out, ind);
+	appendStringInfoString(&cx->out, "END LOOP;\n");
+	brk_end(cx, &b, ind);
+}
+
+/*
+ * break / continue with a number (a+1 is the T_INT). PHP counts the
+ * enclosing loops and switches; continue that lands on a switch means break
+ * in PHP, so it is rejected rather than guessed.
+ */
+static void
+emit_leveled_exit(Ctx *cx, int a, int b, int ind)
+{
+	Tok		   *kw = &cx->t[a], *num = &cx->t[a + 1];
+	bool		is_break = (kw->kw == KW_BREAK);
+	const char *word = is_break ? "break" : "continue";
+	BraceBrk   *t;
+	int			n = 0, have = 0, i;
+
+	if (cx->surf->var_sigil != '$')
+		plx_err(cx, kw->line, "%s takes a loop label, not a number", word);
+	if (b != a + 2)
+		plx_err(cx, kw->line, "%s N must be followed by ';'", word);
+	for (i = 0; i < num->len; i++)
+	{
+		if (num->s[i] < '0' || num->s[i] > '9' || n > 1000)
+			plx_err(cx, kw->line, "%s level must be a small positive integer", word);
+		n = n * 10 + (num->s[i] - '0');
+	}
+	if (n < 1)
+		plx_err(cx, kw->line, "%s %d is not allowed; the level must be at least 1", word, n);
+	for (t = cur_brk; t && t->cx == cx; t = t->outer)
+		have++;
+	if (n > have)
+		plx_err(cx, kw->line, "%s %d needs %d enclosing loops or switches, but there are %d",
+				word, n, n, have);
+	for (t = cur_brk, i = 1; i < n; i++)
+		t = t->outer;
+	if (n == 1 && !t->is_switch)
+	{
+		/* the innermost loop: a plain EXIT / CONTINUE, as for a bare one */
+		plx_emit_exit(cx, &cx->out, ind,
+					  is_break ? PLX_EXIT_BREAK : PLX_EXIT_CONTINUE, NULL, NULL, NULL);
+		return;
+	}
+	if (n == 1 && !is_break)
+	{
+		/* continue 1 in a switch: the enclosing loop, as for a bare continue */
+		if (cx->loopdepth == 0)
+			plx_err(cx, kw->line, "continue outside a loop");
+		plx_emit_exit(cx, &cx->out, ind, PLX_EXIT_CONTINUE, NULL, NULL, NULL);
+		return;
+	}
+	if (t->is_switch && !is_break)
+		plx_err(cx, kw->line, "continue %d targets a switch; write break %d", n, n);
+	plx_emit_exit(cx, &cx->out, ind, is_break ? PLX_EXIT_BREAK : PLX_EXIT_CONTINUE,
+				  brk_label(cx, t), NULL, NULL);
+}
 
 static void
 parse_brace_stmt(Ctx *cx, int ind, bool toplevel)
@@ -166,15 +307,14 @@ parse_while_brace(Ctx *cx, int ind)
 	StringInfo	o = &cx->out;
 	int			ca, cb;
 
+	int			start;
+
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
+	start = o->len;
 	plx_indent(o, ind);
 	appendStringInfo(o, "WHILE %s LOOP\n", plx_rw_range(cx, ca, cb, true));
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
 }
 
 /* emit `FOR <var> IN <query(...)> LOOP <body> END LOOP;` for a query receiver */
@@ -184,6 +324,7 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 	StringInfo	o = &cx->out;
 	int			sa[16], se[16], after, n;
 	int			savedpos = cx->pos;
+	int			start;
 
 	/* array receiver (not query(...)) -> FOREACH v IN ARRAY expr LOOP */
 	if (!(cx->t[ra].kind == T_IDENT && plx_name_eq(&cx->t[ra], "query") &&
@@ -198,14 +339,11 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 		if (!lv || !lv->typ)
 			plx_err(cx, var->line,
 					"foreach over an array requires the loop variable to be annotated with its element type before the loop");
+		start = o->len;
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
 						 var->len, var->s, arrx[0] == '[' ? "ARRAY" : "", arrx);
-		cx->loopdepth++;
-		parse_brace_block(cx, ind + 1);
-		cx->loopdepth--;
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END LOOP;\n");
+		brace_loop_body(cx, ind, start);
 		return;
 	}
 	cx->pos = ra;
@@ -221,6 +359,7 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 			l = plx_local_add(cx, var->s, var->len);
 		l->is_record = true;
 	}
+	start = o->len;
 	plx_indent(o, ind);
 	{
 		char	   *sqlv, *binds;
@@ -234,11 +373,7 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 			appendStringInfo(o, "FOR %.*s IN EXECUTE %s LOOP\n",
 							 var->len, var->s, sqlv);
 	}
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
 }
 
 /* C-style counting for, or JS `for (v of query(...))` */
@@ -249,6 +384,7 @@ parse_for_brace(Ctx *cx, int ind)
 	int			ca, cb;
 	int			s1 = -1, s2 = -1, of_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
+	int			start;
 
 	cx->pos++;
 	paren_group(cx, &ca, &cb);
@@ -305,6 +441,7 @@ parse_for_brace(Ctx *cx, int ind)
 			step = plx_rw_range(cx, xa + 2, xb, false);
 		else
 			plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
+		start = o->len;
 		plx_indent(o, ind);
 		if (lt)
 			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n", var, lo, hi,
@@ -313,11 +450,7 @@ parse_for_brace(Ctx *cx, int ind)
 			appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", var, lo, hi,
 							 step ? " BY " : "", step ? step : "");
 	}
-	cx->loopdepth++;
-	parse_brace_block(cx, ind + 1);
-	cx->loopdepth--;
-	plx_indent(o, ind);
-	appendStringInfoString(o, "END LOOP;\n");
+	brace_loop_body(cx, ind, start);
 }
 
 /* foreach (query(...) as row) { ... } -> FOR row IN <sql> LOOP */
@@ -578,13 +711,9 @@ parse_switch_brace(Ctx *cx, int ind)
 	int			when_count = 0;		/* plpgsql CASE needs >= 1 WHEN, ELSE last */
 	bool		seen_default = false;
 	int			start = o->len;
-	BraceSwitch sw, *outer_sw = cur_switch;
+	BraceBrk	sw;
 	PlxLabel   *mark = cx->labels;
 
-	sw.cx = cx;
-	sw.loopdepth = cx->loopdepth;
-	sw.fin_id = cx->fin ? cx->fin->id : 0;
-	sw.label = NULL;
 	cx->pos++;					/* switch */
 	paren_group(cx, &ca, &cb);
 	plx_indent(o, ind);
@@ -592,7 +721,7 @@ parse_switch_brace(Ctx *cx, int ind)
 	if (cx->t[cx->pos].kind != T_LBRACE)
 		plx_err(cx, line, "switch requires a '{' block");
 	cx->pos++;
-	cur_switch = &sw;
+	brk_begin(cx, &sw, true, start);
 
 	for (;;)
 	{
@@ -677,7 +806,8 @@ parse_switch_brace(Ctx *cx, int ind)
 				st = &cx->t[cx->pos];
 				/* a bare break ends the arm; break with a label is a statement */
 				if (st->kind == T_KW && st->kw == KW_BREAK &&
-					cx->t[cx->pos + 1].kind != T_IDENT)
+					cx->t[cx->pos + 1].kind != T_IDENT &&
+					cx->t[cx->pos + 1].kind != T_INT)
 				{
 					cx->pos++;
 					plx_skip_seps(cx);
@@ -716,26 +846,8 @@ parse_switch_brace(Ctx *cx, int ind)
 	}
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
-	cur_switch = outer_sw;
 	cx->labels = mark;
-
-	/* a nested break exits the switch: wrap the CASE in a labelled block */
-	if (sw.label)
-	{
-		StringInfoData w;
-
-		initStringInfo(&w);
-		appendBinaryStringInfo(&w, o->data, start);
-		plx_indent(&w, ind);
-		appendStringInfo(&w, "<<%s>>\n", sw.label);
-		plx_indent(&w, ind);
-		appendStringInfoString(&w, "BEGIN\n");
-		appendBinaryStringInfo(&w, o->data + start, o->len - start);
-		plx_indent(&w, ind);
-		appendStringInfoString(&w, "END;\n");
-		pfree(o->data);
-		*o = w;
-	}
+	brk_end(cx, &sw, ind);
 }
 
 static void
@@ -758,9 +870,11 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
 		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;			/* consume name and ':' */
+		pending_label = pnstrdup(tk->s, tk->len);
 		/* the label is in scope only inside its loop: a later loop may
 		 * reuse the name, and a break must not resolve to a closed one */
 		parse_brace_stmt_inner(cx, ind, toplevel);
+		pending_label = NULL;
 		cx->labels = mark;
 		return;
 	}
@@ -800,22 +914,15 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 
 		if (tk->kind == T_KW && tk->kw == KW_RAISE)	/* throw */
 			emit_php_throw(cx, a, b, ind);
+		else if (tk->kind == T_KW && (tk->kw == KW_BREAK || tk->kw == KW_NEXT) &&
+				 cx->t[a + 1].kind == T_INT)
+			emit_leveled_exit(cx, a, b, ind);
 		else if (tk->kind == T_KW && tk->kw == KW_BREAK && b == a + 1 &&
-				 cur_switch && cur_switch->cx == cx &&
-				 cur_switch->loopdepth == cx->loopdepth)
+				 cur_brk && cur_brk->cx == cx && cur_brk->is_switch &&
+				 cur_brk->loopdepth == cx->loopdepth)
 		{
 			/* the innermost breakable construct is a switch: leave it */
-			if (!cur_switch->label)
-			{
-				PlxLabel   *l = palloc(sizeof(PlxLabel));
-
-				cur_switch->label = psprintf("__plx_sw_%d", ++cx->subq);
-				l->name = cur_switch->label;
-				l->fin_id = cur_switch->fin_id;
-				l->next = cx->labels;
-				cx->labels = l;
-			}
-			plx_emit_exit(cx, &cx->out, ind, PLX_EXIT_BREAK, cur_switch->label,
+			plx_emit_exit(cx, &cx->out, ind, PLX_EXIT_BREAK, brk_label(cx, cur_brk),
 						  NULL, NULL);
 		}
 		else
@@ -1222,7 +1329,8 @@ plx_brace_parse_body(Ctx *cx)
 	 * still embedded via the unchanged body). */
 	if (cx->surf->ts_types)
 		cx->body = ts_preprocess(cx->body);
-	cur_switch = NULL;
+	cur_brk = NULL;
+	pending_label = NULL;
 	plx_lex(cx);
 	parse_brace_program(cx);
 }

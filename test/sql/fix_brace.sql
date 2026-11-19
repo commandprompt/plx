@@ -192,3 +192,109 @@ for (let i = 0; i < n; i++) {
 return c;
 $$;
 SELECT fb_sw7(5);
+-- A16: PHP break N and continue N leave or continue the N-th enclosing loop or switch
+CREATE FUNCTION fb_bn1(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    $c = $c + 1;
+    if ($j == 1) { break 2; }
+  }
+}
+return $c;
+$$;
+SELECT fb_bn1(5);
+CREATE FUNCTION fb_bn2(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i % 2) {
+    case 0:
+      continue 2;
+    default:
+      $c = $c + 1;
+      break;
+  }
+  $c = $c + 10;
+}
+return $c;
+$$;
+SELECT fb_bn2(4);
+CREATE FUNCTION fb_bn3(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) {
+    case 3:
+      break 2;
+    default:
+      $c = $c + 1;
+      break;
+  }
+}
+return $c;
+$$;
+SELECT fb_bn3(10);
+CREATE FUNCTION fb_bn4(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    try {
+      if ($j == 1) { break 2; }
+      $c = $c + 1;
+    } finally {
+      $c = $c + 100;
+    }
+  }
+}
+return $c;
+$$;
+SELECT fb_bn4(5);
+CREATE FUNCTION fb_bn5(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    if ($j == 2) { continue 2; }
+    $c = $c + 1;
+  }
+}
+return $c;
+$$;
+SELECT fb_bn5(4);
+\set VERBOSITY terse
+CREATE FUNCTION fb_bn6(n int) RETURNS int LANGUAGE plxphp AS $$
+for ($i = 0; $i < $n; $i++) {
+  for ($j = 0; $j < $n; $j++) {
+    break 3;
+  }
+}
+return 0;
+$$;
+CREATE FUNCTION fb_bn7(n int) RETURNS int LANGUAGE plxphp AS $$
+for ($i = 0; $i < $n; $i++) {
+  break 0;
+}
+return 0;
+$$;
+CREATE FUNCTION fb_bn8(n int) RETURNS int LANGUAGE plxphp AS $$
+switch ($n) {
+  case 1:
+    switch ($n) {
+      case 1:
+        continue 2;
+      default:
+        break;
+    }
+    break;
+  default:
+    break;
+}
+return 0;
+$$;
+CREATE FUNCTION fb_bn9(n int) RETURNS int LANGUAGE plxjs AS $$
+for (let i = 0; i < n; i++) {
+  for (let j = 0; j < n; j++) {
+    break 2;
+  }
+}
+return 0;
+$$;
+\set VERBOSITY default
