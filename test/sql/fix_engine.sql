@@ -41,6 +41,35 @@ let abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcY = 2;
 return abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX;
 $$;
 
+-- A5: a counting-loop variable spelled like an earlier local or parameter is rejected
+CREATE FUNCTION fe_a5_loop_js() RETURNS int LANGUAGE plxjs AS $$
+let i = 100;
+let s = 0;
+for (let I = 1; I <= 3; I++) { s += i; }
+return s;
+$$;
+CREATE FUNCTION fe_a5_loop_py() RETURNS int LANGUAGE plxpython3 AS $$
+i = 100
+s = 0
+for I in range(3):
+    s += i
+return s
+$$;
+CREATE FUNCTION fe_a5_loop_rb(n int) RETURNS int LANGUAGE plxruby AS $$
+s = 0
+for N in 1..3
+  s += n
+end
+return s
+$$;
+CREATE FUNCTION fe_a5_loop_go() RETURNS int LANGUAGE plxgo AS $$
+i := 100
+s := 0
+for I := 1; I <= 3; I++ {
+	s += i
+}
+return s
+$$;
 -- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
 CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
 x = 0755

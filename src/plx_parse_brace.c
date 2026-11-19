@@ -286,6 +286,7 @@ parse_for_brace(Ctx *cx, int ind)
 			step = plx_rw_range(cx, xa + 2, xb, false);
 		else
 			plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
+		plx_check_loop_var(cx, cx->t[ia].s, cx->t[ia].len);
 		plx_indent(o, ind);
 		if (lt)
 			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n", var, lo, hi,

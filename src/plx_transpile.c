@@ -1224,6 +1224,24 @@ plx_local_find(Ctx *cx, const char *name, int len)
 	return l;
 }
 
+/*
+ * A counting loop's variable is declared by plpgsql's FOR itself, not by
+ * plx, so it never reaches plx_local_add. It still hides any local or
+ * parameter with the same name to plpgsql: reject a second spelling of one.
+ */
+void
+plx_check_loop_var(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l;
+
+	if (names_fold_case(cx))
+		return;
+	l = local_lookup(cx, name, len);
+	if (l && !same_spelling(l->name, name, len))
+		name_clash(cx, l->name, name, len);
+	(void) plx_is_param(cx, name, len);
+}
+
 PlxLocal2 *
 plx_local_add(Ctx *cx, const char *name, int len)
 {

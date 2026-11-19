@@ -56,6 +56,43 @@ return abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX;
 $$;
 ERROR:  plxjs: identifiers "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX" and "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcY" are the same name to plpgsql, which ignores case
 HINT:  Rename one of them.
+-- A5: a counting-loop variable spelled like an earlier local or parameter is rejected
+CREATE FUNCTION fe_a5_loop_js() RETURNS int LANGUAGE plxjs AS $$
+let i = 100;
+let s = 0;
+for (let I = 1; I <= 3; I++) { s += i; }
+return s;
+$$;
+ERROR:  plxjs: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_py() RETURNS int LANGUAGE plxpython3 AS $$
+i = 100
+s = 0
+for I in range(3):
+    s += i
+return s
+$$;
+ERROR:  plxpython3: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_rb(n int) RETURNS int LANGUAGE plxruby AS $$
+s = 0
+for N in 1..3
+  s += n
+end
+return s
+$$;
+ERROR:  plxruby: identifiers "N" and "n" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_go() RETURNS int LANGUAGE plxgo AS $$
+i := 100
+s := 0
+for I := 1; I <= 3; I++ {
+	s += i
+}
+return s
+$$;
+ERROR:  plxgo: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
 -- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
 CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
 x = 0755

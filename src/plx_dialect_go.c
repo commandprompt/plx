@@ -1935,6 +1935,7 @@ go_for(Go *g, int ind)
 
 		if (ivar >= 0)
 		{
+			plx_check_loop_var(g->cx, g->t[ivar].s, g->t[ivar].len);
 			plx_indent(&g->cx->out, ind);
 			appendStringInfo(&g->cx->out, "FOR %s IN%s", go_ident(g->t[ivar].s, g->t[ivar].len),
 							 dir == 'd' ? " REVERSE" : "");
