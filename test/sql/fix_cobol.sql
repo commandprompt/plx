@@ -93,3 +93,33 @@ PROCEDURE DIVISION.
         DISPLAY "k=" K
     END-PERFORM.
 $$;
+-- A36: the lexer rejects a character it does not recognise instead of dropping it
+CREATE FUNCTION fc_a36_ne(a int, b int) RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    IF A != B
+        GOBACK RETURNING "different"
+    END-IF
+    GOBACK RETURNING "same".
+$$;
+CREATE FUNCTION fc_a36_pos(int) RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-X PIC 9(9).
+PROCEDURE DIVISION.
+    COMPUTE WS-X = $1 * 10
+    GOBACK RETURNING WS-X.
+$$;
+CREATE FUNCTION fc_a36_abs(a int) RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    GOBACK RETURNING @ A.
+$$;
+CREATE FUNCTION fc_a36_cat(a text) RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    GOBACK RETURNING A || "x".
+$$;
+-- A36: the same characters inside a string literal or a comment are fine
+CREATE FUNCTION fc_a36_ok() RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    *> a comment may say != or $1 or @
+    GOBACK RETURNING "!= $1 @ || é".
+$$;
+SELECT fc_a36_ok() AS expect_chars;

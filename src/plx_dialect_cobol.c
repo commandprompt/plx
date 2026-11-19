@@ -127,7 +127,8 @@ cob_lex(Cb *cb, const char *body)
 			sp = true;
 			continue;
 		}
-		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == ';')
+		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\f' || *p == '\v' ||
+			*p == ';')
 		{
 			p++;
 			sp = true;
@@ -275,7 +276,16 @@ cob_lex(Cb *cb, const char *body)
 			p++;
 			continue;
 		}
-		p++;										/* skip anything else */
+		/*
+		 * Anything else is an error. Dropping it silently would change the
+		 * meaning of what remains: "A != B" would become "a = b", "$1" the
+		 * literal 1, and "@ A" plain "a".
+		 */
+		if ((unsigned char) *p >= 0x20 && (unsigned char) *p < 0x7f)
+			plx_err(cb->cx, line, "unexpected character \"%c\"", *p);
+		plx_err(cb->cx, line,
+				"unexpected byte 0x%02x outside a string literal or comment",
+				(unsigned char) *p);
 	}
 	CBPUSH(CB_EOF, p, 0);
 	cb->t = t;

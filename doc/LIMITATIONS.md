@@ -61,7 +61,7 @@ These follow from running as plpgsql and are not specific to any one dialect.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
   (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL, T-SQL), or
-  `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is dropped.
+  `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is rejected.
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type
@@ -187,7 +187,10 @@ fail when the function runs.
   passes through and fails when the function runs); use SQL functions in
   expressions.
 - The `||` operator and `::` casts inside `COMPUTE` and conditions; use
-  `CONCAT(...)` and `CAST(x AS type)`.
+  `CONCAT(...)` and `CAST(x AS type)`. `||`, like any character COBOL does not
+  use (`!`, `$`, `@`, and others), is rejected at `CREATE FUNCTION` time
+  outside a string literal or comment. A `::` cast fails when the function
+  runs.
 
 ### plxplsql ([chapter](plxplsql.md))
 

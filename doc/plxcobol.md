@@ -37,8 +37,11 @@ $$;
 
 Function arguments are referenced by name (case-insensitively). Most SQL
 expressions are valid inside `COMPUTE` and conditions, because expressions are
-passed through to plpgsql and SQL. The `||` operator and `::` casts are not:
-the tokenizer drops them, so use `CONCAT(...)` and `CAST(x AS type)`.
+passed through to plpgsql and SQL. The `||` operator and `::` casts are not,
+so use `CONCAT(...)` and `CAST(x AS type)`. Outside a string literal or a
+comment, a character that COBOL does not use, such as `|`, `!`, `$`, or `@`,
+is rejected at `CREATE FUNCTION` time. A `::` cast is not rejected, but the
+function fails with a syntax error when it runs.
 
 ### Local variables and types
 

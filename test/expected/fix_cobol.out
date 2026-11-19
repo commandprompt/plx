@@ -121,3 +121,46 @@ PROCEDURE DIVISION.
 $$;
 NOTICE:  k=1
 NOTICE:  k=2
+-- A36: the lexer rejects a character it does not recognise instead of dropping it
+CREATE FUNCTION fc_a36_ne(a int, b int) RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    IF A != B
+        GOBACK RETURNING "different"
+    END-IF
+    GOBACK RETURNING "same".
+$$;
+ERROR:  plxcobol: unexpected character "!"
+DETAIL:  at plxcobol source line 3
+CREATE FUNCTION fc_a36_pos(int) RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-X PIC 9(9).
+PROCEDURE DIVISION.
+    COMPUTE WS-X = $1 * 10
+    GOBACK RETURNING WS-X.
+$$;
+ERROR:  plxcobol: unexpected character "$"
+DETAIL:  at plxcobol source line 5
+CREATE FUNCTION fc_a36_abs(a int) RETURNS int LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    GOBACK RETURNING @ A.
+$$;
+ERROR:  plxcobol: unexpected character "@"
+DETAIL:  at plxcobol source line 3
+CREATE FUNCTION fc_a36_cat(a text) RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    GOBACK RETURNING A || "x".
+$$;
+ERROR:  plxcobol: unexpected character "|"
+DETAIL:  at plxcobol source line 3
+-- A36: the same characters inside a string literal or a comment are fine
+CREATE FUNCTION fc_a36_ok() RETURNS text LANGUAGE plxcobol AS $$
+PROCEDURE DIVISION.
+    *> a comment may say != or $1 or @
+    GOBACK RETURNING "!= $1 @ || é".
+$$;
+SELECT fc_a36_ok() AS expect_chars;
+ expect_chars 
+--------------
+ != $1 @ || é
+(1 row)
+
