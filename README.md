@@ -266,6 +266,11 @@ bench/                      benchmark harness and results
 
 ## Tests
 
+Caution: `test/run_corpus.py` drops and re-creates the plx extension in its
+database, which drops every plx function there. Point it at a test database.
+It and `test/fuzz.py` use the first `psql` on `PATH` (or `PLX_PSQL`) and the
+usual libpq variables (`PGHOST`, `PGPORT`, `PGDATABASE`).
+
 ```
 make installcheck            # pg_regress suite
 make differentialcheck       # each dialect against a plpgsql reference
