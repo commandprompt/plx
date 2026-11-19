@@ -187,3 +187,10 @@ SET check_function_bodies = off;
 DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_quad() RETURNS void LANGUAGE plxtsql AS $plx$DECLARE @x int = 1; SET @x = ' || repeat('f(', 160000) || ';$plx$'; END $d$;
 RESET check_function_bodies;
 RESET statement_timeout;
+-- N-plsql-quadratic-paren: unbalanced DBMS_OUTPUT.PUT_LINE( calls transpile in linear time
+SET statement_timeout = '5s';
+SET check_function_bodies = off;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad() RETURNS void LANGUAGE plxplsql AS $plx$BEGIN ' || repeat('DBMS_OUTPUT.PUT_LINE(', 80000) || '$plx$'; END $d$;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad2() RETURNS void LANGUAGE plxplsql AS $plx$BEGIN ' || repeat('RAISE_APPLICATION_ERROR(', 80000) || '$plx$'; END $d$;
+RESET check_function_bodies;
+RESET statement_timeout;

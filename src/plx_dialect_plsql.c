@@ -54,6 +54,7 @@ typedef struct
 	Ctx		   *cx;
 	PlTok	   *t;
 	int			nt;
+	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
 } Pl;
 
 static bool
@@ -96,6 +97,7 @@ pl_lex(Pl *pl, const char *body)
 	{
 		const char *pre = p;
 
+		CHECK_FOR_INTERRUPTS();
 		/* accumulate leading trivia: whitespace and comments */
 		for (;;)
 		{
@@ -236,27 +238,36 @@ pl_word_map(PlTok *tk)
 	return NULL;
 }
 
+/*
+ * Pair every '(' with its ')' once, after lexing. A forward scan from each
+ * DBMS_OUTPUT.PUT_LINE( or RAISE_APPLICATION_ERROR( made unbalanced input cost
+ * O(n^2): every call rescanned to the end of the body.
+ */
+static void
+pl_pair_parens(Pl *pl)
+{
+	int		   *stack = palloc(sizeof(int) * (pl->nt + 1));
+	int			sp = 0,
+				i;
+
+	pl->match = palloc(sizeof(int) * (pl->nt + 1));
+	for (i = 0; i < pl->nt; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		pl->match[i] = -1;
+		if (pl_punct(&pl->t[i], '('))
+			stack[sp++] = i;
+		else if (pl_punct(&pl->t[i], ')') && sp > 0)
+			pl->match[stack[--sp]] = i;
+	}
+	pfree(stack);
+}
+
 /* index of the ')' matching the '(' at index lp, or -1 */
 static int
 pl_match_paren(Pl *pl, int lp)
 {
-	int			depth = 0,
-				i;
-
-	for (i = lp; i < pl->nt; i++)
-	{
-		if (pl_punct(&pl->t[i], '('))
-			depth++;
-		else if (pl_punct(&pl->t[i], ')'))
-		{
-			depth--;
-			if (depth == 0)
-				return i;
-		}
-		else if (pl->t[i].kind == PL_EOF)
-			break;
-	}
-	return -1;
+	return pl->match[lp];
 }
 
 /* raw source text spanning tokens [a, b) (text only, not leading trivia of a) */
@@ -293,6 +304,7 @@ pl_mark_strict_into(Pl *pl)
 	{
 		PlTok	   *t = &pl->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (at_start)
 		{
 			at_start = false;
@@ -348,6 +360,7 @@ plx_plsql_parse_body(Ctx *cx)
 	memset(&pl, 0, sizeof(pl));
 	pl.cx = cx;
 	pl_lex(&pl, cx->body);
+	pl_pair_parens(&pl);
 	strict_into = pl_mark_strict_into(&pl);
 
 	/* find the first real token; if the body does not already open with BEGIN or
@@ -364,6 +377,7 @@ plx_plsql_parse_body(Ctx *cx)
 	{
 		PlTok	   *t = &pl.t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		/* leading trivia is always preserved verbatim */
 		if (t->prelen)
 			appendBinaryStringInfo(out, t->pre, t->prelen);
