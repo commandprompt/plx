@@ -29,6 +29,18 @@ return userId;
 $$;
 SELECT fe_a5_camel_js(1);
 
+-- A5: a variable read with a second spelling is rejected, not read as the first
+CREATE FUNCTION fe_a5_ref_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 1;
+return A + 1;
+$$;
+-- A5: names that differ only after byte 63 are the same name to plpgsql
+CREATE FUNCTION fe_a5_long_js() RETURNS int LANGUAGE plxjs AS $$
+let abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX = 1;
+let abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcY = 2;
+return abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX;
+$$;
+
 -- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
 CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
 x = 0755
