@@ -378,13 +378,22 @@ the plx extension.
 2. Restart the server, or start new sessions, so that they load the new build.
    The transpiler fixes need only this step.
 
-   **Caution:** Until step 3 runs in a database, a function created there with
-   a string append fails when it is called, with
-   `function <schema>.plx_sb_append_strict(plx_strbuild, text) does not exist`.
+   **Caution:** Run step 3 in each database right after this step, before
+   anyone creates or replaces a plx function there. Until step 3 runs, a
+   function that uses a string append (Ruby `<<`, PHP `.=`, or `+=` on a
+   string in plxjs, plxts or plxpython3) is created without an error, but
+   every call to it fails:
+
+   ```
+   ERROR:  function public.plx_sb_append_strict(plx_strbuild, text) does not exist
+   ```
+
+   The schema in the message is the one plx is installed in. The new build
+   generates a call to this function, and only step 3 creates it. After step
+   3, the function works without being created again. Until step 3,
    `ALTER EXTENSION plx SET SCHEMA` is also still allowed, and it would break
-   the functions the new build creates. Run step 3 before anyone creates or
-   replaces a plx function.
-3. In each database that has plx, run:
+   the functions the new build creates.
+3. Right after step 2, in each database that has plx, run:
 
    ```sql
    ALTER EXTENSION plx UPDATE;

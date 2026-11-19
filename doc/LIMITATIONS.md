@@ -42,9 +42,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
   plxjs, plxts, plxpython3 and plxgo, where case matters, `CREATE FUNCTION`
   rejects a body that spells one name two ways, for example a local `A` beside
   a local or parameter `a`, or a loop variable `I` beside a local `i`. Rename
-  one of them. SQL folds an unquoted parameter
-  name to lower case, so a parameter declared as `userId` may be written
-  `userId` in the body, as long as the body always spells it the same way.
+  one of them. SQL folds an unquoted parameter name to lower case, so a
+  parameter declared as `userId` may be written `userId` in the body, as long
+  as the body always spells it the same way.
 - **No SQL reserved word as a variable name.** plx writes variable names into
   the generated SQL without quotes. A variable named after a reserved word,
   such as `array`, makes `CREATE FUNCTION` fail with a syntax error. When
