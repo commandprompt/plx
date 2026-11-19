@@ -14,12 +14,21 @@ CREATE FUNCTION plx_sb_in(cstring) RETURNS plx_strbuild
 	AS '$libdir/plx', 'plx_sb_in' LANGUAGE C IMMUTABLE STRICT;
 CREATE FUNCTION plx_sb_out(plx_strbuild) RETURNS cstring
 	AS '$libdir/plx', 'plx_sb_out' LANGUAGE C IMMUTABLE STRICT;
+CREATE FUNCTION plx_sb_recv(internal) RETURNS plx_strbuild
+	AS '$libdir/plx', 'plx_sb_recv' LANGUAGE C IMMUTABLE STRICT;
+CREATE FUNCTION plx_sb_send(plx_strbuild) RETURNS bytea
+	AS '$libdir/plx', 'plx_sb_send' LANGUAGE C IMMUTABLE STRICT;
 
+-- Collatable like text, so sorting, DISTINCT and GROUP BY can use text's
+-- operators with a collation.
 CREATE TYPE plx_strbuild (
 	INPUT = plx_sb_in,
 	OUTPUT = plx_sb_out,
+	RECEIVE = plx_sb_recv,
+	SEND = plx_sb_send,
 	LIKE = text,
-	STORAGE = extended
+	STORAGE = extended,
+	COLLATABLE = true
 );
 
 CREATE FUNCTION plx_sb_append_support(internal) RETURNS internal

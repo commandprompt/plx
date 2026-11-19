@@ -122,6 +122,8 @@ sb_ensure(ExpandedSBHeader *sb, int32 need)
 
 PG_FUNCTION_INFO_V1(plx_sb_in);
 PG_FUNCTION_INFO_V1(plx_sb_out);
+PG_FUNCTION_INFO_V1(plx_sb_recv);
+PG_FUNCTION_INFO_V1(plx_sb_send);
 PG_FUNCTION_INFO_V1(plx_sb_append);
 PG_FUNCTION_INFO_V1(plx_sb_append_support);
 
@@ -141,6 +143,19 @@ plx_sb_out(PG_FUNCTION_ARGS)
 	text	   *t = PG_GETARG_TEXT_PP(0);
 
 	PG_RETURN_CSTRING(text_to_cstring(t));
+}
+
+/* Binary I/O. The flat form is text, so the wire format is text's. */
+Datum
+plx_sb_recv(PG_FUNCTION_ARGS)
+{
+	return textrecv(fcinfo);
+}
+
+Datum
+plx_sb_send(PG_FUNCTION_ARGS)
+{
+	return textsend(fcinfo);
 }
 
 /*
