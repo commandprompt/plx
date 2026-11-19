@@ -498,3 +498,44 @@ ERROR:  code 7
 DO LANGUAGE plxjs $$ throw Error("plain"); $$;
 ERROR:  plain
 \set VERBOSITY default
+-- A16: break 2 out of a switch inside two try/finally blocks runs both finally bodies
+CREATE FUNCTION fb_rv1(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0; $fb = 0; $fc = 0;
+for ($i = 0; $i < $n; $i++) {
+  try {
+    try {
+      switch ($i) {
+        case 1: break 2;
+        default: $c = $c + 1; break;
+      }
+    } finally { $fb = $fb + 1; }
+  } finally { $fc = $fc + 1; }
+}
+return $c * 100 + $fb * 10 + $fc;
+$$;
+SELECT fb_rv1(3);
+ fb_rv1 
+--------
+    122
+(1 row)
+
+CREATE FUNCTION fb_rv2(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0; $f = 0; $g = 0;
+for ($i = 0; $i < $n; $i++) {
+  try {
+    try {
+      lbl: for ($j = 0; $j < $n; $j++) {
+        if ($j == 1) { break 2; }
+        $c = $c + 1;
+      }
+    } finally { $f = $f + 1; }
+  } finally { $g = $g + 1; }
+}
+return $c * 100 + $f * 10 + $g;
+$$;
+SELECT fb_rv2(3);
+ fb_rv2 
+--------
+    111
+(1 row)
+

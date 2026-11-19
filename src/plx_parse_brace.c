@@ -89,6 +89,26 @@ brk_label(Ctx *cx, BraceBrk *b)
 	return b->label;
 }
 
+/*
+ * Take the entries for label name, added after mark, off cx->labels when the
+ * construct with that label closes. Other entries stay: break N registers
+ * the label of an outer loop from inside this construct, and a finally that
+ * closes later must still find it to run the outer finally bodies.
+ */
+static void
+labels_drop(Ctx *cx, PlxLabel *mark, const char *name)
+{
+	PlxLabel  **pp = &cx->labels;
+
+	while (*pp && *pp != mark)
+	{
+		if (name && pg_strcasecmp((*pp)->name, name) == 0)
+			*pp = (*pp)->next;
+		else
+			pp = &(*pp)->next;
+	}
+}
+
 static void
 brk_end(Ctx *cx, BraceBrk *b, int ind)
 {
@@ -1050,7 +1070,7 @@ parse_switch_brace(Ctx *cx, int ind)
 	}
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
-	cx->labels = mark;
+	labels_drop(cx, mark, sw.label);
 	brk_end(cx, &sw, ind);
 }
 
@@ -1069,17 +1089,18 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
 	{
 		PlxLabel   *mark = cx->labels;
+		char	   *label = pnstrdup(tk->s, tk->len);
 
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
 		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;			/* consume name and ':' */
-		pending_label = pnstrdup(tk->s, tk->len);
+		pending_label = label;
 		/* the label is in scope only inside its loop: a later loop may
 		 * reuse the name, and a break must not resolve to a closed one */
 		parse_brace_stmt_inner(cx, ind, toplevel);
 		pending_label = NULL;
-		cx->labels = mark;
+		labels_drop(cx, mark, label);
 		return;
 	}
 	if (tk->kind == T_KW)
