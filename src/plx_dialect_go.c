@@ -2679,8 +2679,8 @@ go_for(Go *g, int ind)
 	/*
 	 * for init; cond; post { } becomes
 	 *
-	 *     [DECLARE v T; BEGIN]       when init is "v := A": v belongs to the loop
-	 *     init;
+	 *     [DECLARE v T := A; BEGIN]  when init is "v := A": v belongs to the loop
+	 *     [init;]                    any other init statement
 	 *     WHILE cond LOOP
 	 *         [<<__plx_cN>> BEGIN] body [END;]
 	 *         post;
@@ -2715,17 +2715,20 @@ go_for(Go *g, int ind)
 				plx_err(g->cx, g->t[h0].line,
 						"cannot infer a PostgreSQL type for loop variable \"%s\"; declare it before the loop (var %s T) and write for %s = ...",
 						lvar, lvar, lvar);
+			/*
+			 * The start value is the DECLARE default: plpgsql evaluates it
+			 * before the new variable is in scope, so for i := i reads the
+			 * outer i, as in Go.
+			 */
 			plx_indent(&g->cx->out, ind);
 			appendStringInfo(&g->cx->out, "DECLARE\n");
 			plx_indent(&g->cx->out, ind + 1);
-			appendStringInfo(&g->cx->out, "%s %s;\n", lvar, ltyp);
+			appendStringInfo(&g->cx->out, "%s %s :=", lvar, ltyp);
+			go_emit_range(g, h0 + 2, semi1, &g->cx->out);
+			appendStringInfoString(&g->cx->out, ";\n");
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "BEGIN\n");
 			bind = ind + 1;
-			plx_indent(&g->cx->out, bind);
-			appendStringInfo(&g->cx->out, "%s :=", lvar);
-			go_emit_range(g, h0 + 2, semi1, &g->cx->out);
-			appendStringInfoString(&g->cx->out, ";\n");
 		}
 		else if (semi1 > h0)				/* any other init statement */
 			go_simple(g, bind, semi1);

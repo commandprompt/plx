@@ -94,7 +94,9 @@ the body in a labelled block and lowers `continue` to `EXIT` of that block.
 
 When the init statement declares the loop variable (`for i := A; ...`), the
 variable belongs to the loop, as in Go: plx declares it in a block around the
-loop, so it does not change a variable of the same name outside the loop. Its
+loop, so it does not change a variable of the same name outside the loop. `A`
+is the variable's default value in that block, so `A` may read an outer
+variable of the same name (`for i := i; ...` starts at the outer `i`). Its
 type comes from `A`: a literal or one of the forms `:=` infers (below), else
 the type of the first variable in `A` (`for i := n - 1; ...` gives `i` the
 type of `n`). If `A` is a function call, plx cannot tell the type and rejects

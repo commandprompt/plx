@@ -108,6 +108,19 @@ CREATE FUNCTION fg27_scope() RETURNS text LANGUAGE plxgo AS $$
  return fmt.Sprintf("%s %d", i, n)
 $$;
 SELECT fg27_scope() AS go_outer_3;
+-- the start value may read an outer variable of the same name
+CREATE FUNCTION fg27_shadow() RETURNS text LANGUAGE plxgo AS $$
+ i := 2
+ c := 0
+ for i := i; i < 5; i++ {
+   c++
+ }
+ for i := i * 2; i < 6; i++ {
+   c += 10
+ }
+ return fmt.Sprintf("%d %d", c, i)
+$$;
+SELECT fg27_shadow() AS go_23_2;
 
 -- A28: switch runs default only when no case matches, wherever default
 -- stands, and break inside a switch leaves only the switch
