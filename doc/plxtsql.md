@@ -80,7 +80,7 @@ reserved word.
 | `DECLARE @a int, @b int` | both hoisted |
 | `SET @x = e` | `x := e;` |
 | `SET @x += e` | `x := x + (e);` (also `-=`, `*=`, `/=`, `%=`) |
-| `SET @s += e`, `@s` a string variable | `s := s \|\| (e);` |
+| `SET @s += e`, `@s` a string variable and `e` a known string | `s := s \|\| (e);` |
 | `SELECT @x = e` (no `FROM`) | `x := e;` |
 | `SELECT @x = a, @y = b` | `x := a; y := b;` |
 | `SELECT @x = col FROM t ...` | `FOR r IN SELECT col AS c1 FROM t ... LOOP x := r.c1; END LOOP;` |
@@ -183,7 +183,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | --- | --- |
 | `a ^ b` (bitwise exclusive OR) | `a # b` |
 | `a != b` | `a <> b` |
-| `@s + 'x'` (string operands) | `s \|\| 'x'` |
+| `@s + 'x'` (every operand a known string) | `s \|\| 'x'` |
 
 In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
 `^` to `#`. Use `POWER(a, b)` for exponentiation.
@@ -201,23 +201,37 @@ T-SQL uses `+` both to add numbers and to join strings. PostgreSQL has no `+`
 for strings: it joins them with `||`. plx has no type information for most
 expressions, so it decides from what it can see in the body.
 
-A chain of operands joined by `+`, such as `@a + ' ' + @b`, is a string chain
-when one of its operands is a known string, or when every operand is a string
-literal. A known string is one of:
+plx writes `+` as `||` only when every operand of the chain is a known string.
+A chain is a run of operands joined by `+`, such as `@a + ' ' + @b`. A known
+string is one of:
 
 - a variable or parameter declared with a string type: `VARCHAR`, `NVARCHAR`,
   `CHAR`, `NCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
+- a string literal, `'...'` or `N'...'`;
 - `CAST` or `CONVERT` to one of those types;
 - `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
   `REPLACE`, `REPLICATE`, `CONCAT` or `STUFF`;
 - `ISNULL` or `COALESCE` whose first argument is a string variable or a string
   literal.
 
-In a string chain plx writes each `+` as `||`, except a `+` next to a number:
-a numeric literal, a numeric variable or parameter, `CAST` or `CONVERT` to a
-numeric type, or a product such as `@n * 2`. SQL Server converts the string to
-a number there and adds, so plx keeps `+`. `SET @s += e` on a string variable
-becomes `s := s || (e)`.
+`SET @s += e` becomes `s := s || (e)` only when `@s` is a string variable and
+`e` is a known string or a chain of them.
+
+In every other case plx keeps `+`. This includes a chain with a number, a
+column, a parenthesized expression, a `CASE` expression, a `BIT` variable or a
+function not in the list above, such as `LEN`. It also includes a chain followed
+by `-`, `&`, `|` or `^`, because PostgreSQL would group that operator with the
+last operand. What happens then depends on the operands:
+
+- A string variable next to anything that is not a known string fails when the
+  function runs: `@s + LEN(@s)`, `@s + @n` with `@n` an `INT`, and `SET @s += 1`
+  raise `operator does not exist: character varying + integer`. SQL Server
+  converts the string to a number and adds. Write the conversion yourself, for
+  example `CAST(@s AS int) + LEN(@s)`.
+- A string literal next to a number adds, as in SQL Server: `'1' + 2` is 3.
+
+plx never guesses `||` from one string operand, because a wrong guess returns a
+wrong value without an error. A failing call shows you where to add a `CAST`.
 
 ```sql
 CREATE FUNCTION label(id int) RETURNS text LANGUAGE plxtsql AS $$
@@ -230,11 +244,8 @@ $$;
 Both `+` and `||` return NULL when either side is NULL, as in SQL Server with
 the default `CONCAT_NULL_YIELDS_NULL ON`.
 
-Write `||` or `CONCAT(...)` yourself when no operand of the chain is a known
-string, for example to join two columns or a column and a literal. plx leaves
-such a `+` as `+`, and PostgreSQL then reports that the operator does not
-exist. A `CASE` expression is not an operand plx can classify, so a `+` next to
-one is also left as `+`.
+Write `||` or `CONCAT(...)` yourself to join strings that are not all known
+strings, for example two columns, or a column and a literal.
 
 `CHAR(n)` and `NCHAR(n)` variables keep PostgreSQL behavior. `||` drops their
 trailing spaces before it joins, and assigning a value longer than `n` is an
@@ -312,7 +323,7 @@ session option.
   expression once per row with the updated value, so it rejects the function
   rather than return a different result. Use an aggregate such as `SUM(v)` or
   `string_agg(name, ',')`.
-- String concatenation with `+` when no operand is a known string. See
+- String concatenation with `+` when an operand is not a known string. See
   [String concatenation with `+`](#string-concatenation-with).
 
 See [PARITY.md](PARITY.md) for the full per-dialect feature matrix and

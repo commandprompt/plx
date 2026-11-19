@@ -98,8 +98,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
   except plxtsql, `+` is SQL numeric addition. Use the dialect's string form:
   interpolation (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL), or
   `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is rejected.
-  plxtsql writes `+` as `||` when an operand is a known string, such as a
-  `VARCHAR` variable; see [plxtsql.md](plxtsql.md#string-concatenation-with).
+  plxtsql writes `+` as `||` only when every operand is a known string, such as
+  a `VARCHAR` variable or a string literal; see
+  [plxtsql.md](plxtsql.md#string-concatenation-with).
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type

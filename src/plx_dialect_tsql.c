@@ -630,9 +630,13 @@ tq_match_lp(Tq *tq, int lp, int limit)
  *   TC_NUM  a number, a numeric local or parameter, CAST or CONVERT to a
  *           numeric type, or a product (a * b binds tighter than +);
  *   TC_UNK  anything else (a column, another call, a parenthesized expression).
- * A chain concatenates when it has a TC_STR operand, or when every operand is
- * a string literal. In such a chain each + becomes || unless an operand next
- * to it is TC_NUM: T-SQL then converts the string to a number and adds.
+ * TC_STR and TC_LIT are known strings. A chain concatenates only when every
+ * operand is a known string and no -, &, | or ^ follows it; then each + becomes
+ * ||. Anything else keeps every + as +, so a string next to anything else fails
+ * at run time ("operator does not exist") instead of giving a wrong value.
+ * Requiring every operand, not only the two beside one +, keeps the grouping:
+ * T-SQL reads a + b + c as (a + b) + c, but PostgreSQL binds + tighter than ||,
+ * so a || b + c would mean a || (b + c).
  */
 typedef enum
 {
@@ -871,41 +875,71 @@ tq_chain_start(Tq *tq, int i)
 	}
 }
 
-/* decide each + of the operand chain starting at i (see TqCls) */
-static void
-tq_chain(Tq *tq, int i, int b)
+/*
+ * Walk the operand chain a + b + ... starting at i. Returns the index past its
+ * last operand (or -1 when no operand starts at i), sets *n to the number of
+ * operands and *all_str to whether every one is a known string (see TqCls).
+ */
+static int
+tq_chain_scan(Tq *tq, int i, int b, int *n, bool *all_str)
 {
-	bool		any_str = false,
-				all_lit = true;
-	int			n = 0,
-				e = i;
-	TqCls		c,
-				prev;
+	int			e = i,
+				end = -1;
+	TqCls		c;
 
+	*n = 0;
+	*all_str = true;
 	for (;;)
 	{
 		e = tq_operand(tq, e, b, &c);
 		if (e < 0)
 			break;
-		n++;
-		any_str |= (c == TC_STR);
-		all_lit &= (c == TC_LIT);
+		end = e;
+		(*n)++;
+		*all_str &= (c == TC_STR || c == TC_LIT);
 		if (e >= b || !tq_is_plus(&tq->t[e]))
 			break;
 		e++;
 	}
-	if (n < 2)
-		return;
-	e = tq_operand(tq, i, b, &prev);
-	while (e >= 0 && e < b && tq_is_plus(&tq->t[e]))
-	{
-		int			op = e;
+	return end;
+}
 
-		e = tq_operand(tq, op + 1, b, &c);
-		if (e < 0)
+/* is [a,b) a known string: one operand, or a + chain of them (see TqCls)? */
+static bool
+tq_known_str(Tq *tq, int a, int b)
+{
+	int			n;
+	bool		all_str;
+
+	return tq_chain_scan(tq, a, b, &n, &all_str) == b && n >= 1 && all_str;
+}
+
+/* decide each + of the operand chain starting at i (see TqCls) */
+static void
+tq_chain(Tq *tq, int i, int b)
+{
+	int			n,
+				e;
+	bool		all_str;
+	TqTok	   *nx;
+
+	e = tq_chain_scan(tq, i, b, &n, &all_str);
+	if (n < 2 || !all_str)
+		return;
+	/* an operator after the chain that binds as + does would regroup it */
+	nx = e < b ? &tq->t[e] : NULL;
+	if (nx && (tq_is_plus(nx) ||
+			   (nx->kind == TQ_OP && nx->len == 1 && strchr("-*/%&|^", nx->s[0]))))
+		return;
+	for (e = i; e >= 0 && e < b;)
+	{
+		TqCls		c;
+
+		e = tq_operand(tq, e, b, &c);
+		if (e < 0 || e >= b || !tq_is_plus(&tq->t[e]))
 			break;
-		tq->cat[op] = (any_str || all_lit) && prev != TC_NUM && c != TC_NUM;
-		prev = c;
+		tq->cat[e] = true;
+		e++;
 	}
 }
 
@@ -1414,9 +1448,13 @@ tq_set(Tq *tq, int ind)
 	if (e1 <= e0)
 		tq_err(tq, "SET is missing a value expression");
 	plx_indent(&tq->cx->out, ind);
-	if (arith == '+' && tq_var_class(tq, v) == TC_STR)
+	if (arith == '+' && tq_var_class(tq, v) == TC_STR && tq_known_str(tq, e0, e1))
 	{
-		/* += on a string variable concatenates in T-SQL */
+		/*
+		 * += of a known string onto a string variable concatenates in T-SQL.
+		 * With anything else, such as a number, SQL Server adds; plx keeps +,
+		 * which fails at run time rather than concatenate.
+		 */
 		appendStringInfo(&tq->cx->out, "%s := %s || (", name, name);
 		tq_emit_range(tq, e0, e1, &tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ");\n");

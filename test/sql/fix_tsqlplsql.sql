@@ -299,3 +299,54 @@ CREATE FUNCTION fxps_mixed(p varchar) RETURNS text LANGUAGE plxtsql AS $$
   RETURN @p + '-' + UPPER(@p) + '-' + CONVERT(varchar(10), '1' + 2) + '-' + CONVERT(varchar(10), @n);
 $$;
 SELECT fxps_mixed('hi');
+-- review of 5a1465d: + becomes || only when every operand of the chain is a known string, and SET @s += e
+-- only when e is one. Anything else stays +, so a string next to a number fails at call time ("operator
+-- does not exist") instead of returning the concatenated value; SQL Server's answer is in each comment.
+CREATE FUNCTION fxps_pe_num() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5';
+  SET @s += 1;
+  RETURN @s;
+$$;
+SELECT fxps_pe_num();  -- SQL Server: 6
+CREATE FUNCTION fxps_pe_var() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5', @n int = 2;
+  SET @s += @n;
+  RETURN @s;
+$$;
+SELECT fxps_pe_var();  -- SQL Server: 7
+CREATE FUNCTION fxps_un_len() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5';
+  RETURN @s + LEN(@s);
+$$;
+SELECT fxps_un_len();  -- SQL Server: 6
+CREATE FUNCTION fxps_un_paren() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5', @n int = 1;
+  RETURN (@n + 1) + @s;
+$$;
+SELECT fxps_un_paren();  -- SQL Server: 7
+CREATE TABLE fxps_t(qty int);
+INSERT INTO fxps_t VALUES (2);
+CREATE FUNCTION fxps_un_col() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5', @r varchar(10);
+  SELECT @r = qty + @s FROM fxps_t;
+  RETURN @r;
+$$;
+SELECT fxps_un_col();  -- SQL Server: 7
+CREATE FUNCTION fxps_un_bit() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5', @b bit = 1;
+  RETURN @s + @b;
+$$;
+SELECT fxps_un_bit();  -- SQL Server: 6
+-- a number later in the chain: T-SQL groups (@n + '2') + @s and adds; || there would give 35
+CREATE FUNCTION fxps_un_mid() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5', @n int = 1;
+  RETURN @n + '2' + @s;
+$$;
+SELECT fxps_un_mid();  -- SQL Server: 8
+-- a - after the chain: T-SQL computes (@s + '0') - 1; || binds looser than - in PostgreSQL and would give 1-1
+CREATE FUNCTION fxps_un_minus() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '1';
+  RETURN @s + '0' - 1;
+$$;
+SELECT fxps_un_minus();  -- SQL Server: 9
+DROP TABLE fxps_t;
