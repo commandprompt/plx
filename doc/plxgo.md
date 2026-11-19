@@ -111,11 +111,13 @@ not supported; walk a slice by index with a counting loop
 
 ### switch
 
-A `switch` becomes an `IF`/`ELSIF`/`ELSE` chain (Go has no implicit
-fall-through). Both the tagged form and the tagless (boolean-case) form are
-supported. Comma-separated case values are OR-ed. As in Go, `default` runs only
-when no case matches, wherever it stands in the switch: plx always emits it as
-the final `ELSE`.
+A tagged `switch x { ... }` becomes a plpgsql `CASE x WHEN ... END CASE`, and a
+tagless `switch { ... }` (boolean cases) becomes an `IF`/`ELSIF`/`ELSE` chain.
+Go has no implicit fall-through, and neither form falls through. As in Go, the
+tag is evaluated once, and each case value is compared with it as a whole, so
+`case a || b:` matches when the tag equals `a || b`. Comma-separated case values
+match if any one matches. `default` runs only when no case matches, wherever it
+stands in the switch: plx always emits it as the final `ELSE`.
 
 `break` inside a switch leaves the switch, not a loop around it. plx puts such
 a switch in a labelled block and lowers `break` to `EXIT` of that block. A

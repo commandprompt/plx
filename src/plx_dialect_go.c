@@ -2107,7 +2107,13 @@ go_for(Go *g, int ind)
 }
 
 /*
- * switch [tag] { case a, b: ...; default: ... } -> IF/ELSIF/ELSE
+ * switch tag { case a, b: ...; default: ... } -> CASE tag WHEN a, b ... END CASE
+ * switch { case c: ...; default: ... }          -> IF/ELSIF/ELSE
+ *
+ * Go evaluates the tag once. plpgsql's simple CASE does too, and compares it
+ * with each WHEN value as a whole (tag IN (a, b)), so `case a || b` means
+ * tag = (a OR b), as in Go. A CASE with no match and no ELSE raises
+ * case_not_found, so a tagged switch always gets an ELSE.
  *
  * Go runs default only when no case matches, wherever default stands, so its
  * body is emitted into a buffer of its own and appended as the final ELSE.
@@ -2192,8 +2198,16 @@ go_switch(Go *g, int ind)
 			}
 			if (colon < 0)
 				go_err(g, "expected : after case");
+			if (tag0 >= 0 && first)
+			{
+				plx_indent(&g->cx->out, sind);
+				appendStringInfoString(&g->cx->out, "CASE (");
+				go_emit_range(g, tag0, tag1, &g->cx->out);
+				appendStringInfoString(&g->cx->out, ")\n");
+			}
 			plx_indent(&g->cx->out, sind);
-			appendStringInfoString(&g->cx->out, first ? "IF" : "ELSIF");
+			appendStringInfoString(&g->cx->out,
+								   tag0 >= 0 ? "WHEN" : first ? "IF" : "ELSIF");
 			/* split the case values on top-level commas */
 			{
 				int			s = cv0,
@@ -2211,14 +2225,11 @@ go_switch(Go *g, int ind)
 					else if (k == GO_COMMA && d == 0)
 					{
 						if (nc)
-							appendStringInfoString(&g->cx->out, " OR");
-						if (tag0 >= 0)
-						{
-							appendStringInfoChar(&g->cx->out, ' ');
-							go_emit_range(g, tag0, tag1, &g->cx->out);
-							appendStringInfoString(&g->cx->out, " =");
-						}
+							appendStringInfoString(&g->cx->out,
+												   tag0 >= 0 ? "," : " OR");
+						appendStringInfoString(&g->cx->out, " (");
 						go_emit_range(g, s, j, &g->cx->out);
+						appendStringInfoChar(&g->cx->out, ')');
 						s = j + 1;
 						nc++;
 					}
@@ -2269,19 +2280,48 @@ go_switch(Go *g, int ind)
 	if (go_cur(g)->kind == GO_RBRACE)
 		g->pos++;
 	go_eat_semi(g);
-	if (had_default)
+	if (first && tag0 >= 0 && had_default)
+	{
+		/* no case: Go still evaluates the tag once, then runs default */
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "PERFORM (");
+		go_emit_range(g, tag0, tag1, &g->cx->out);
+		appendStringInfoString(&g->cx->out, ");\n");
+	}
+	if (first && had_default)
 	{
 		plx_indent(&g->cx->out, sind);
-		appendStringInfoString(&g->cx->out, first ? "IF true THEN\n" : "ELSE\n");
+		appendStringInfoString(&g->cx->out, "IF true THEN\n");
 		appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
-		first = false;
-	}
-	pfree(defbuf.data);
-	if (!first)
-	{
 		plx_indent(&g->cx->out, sind);
 		appendStringInfoString(&g->cx->out, "END IF;\n");
 	}
+	else if (!first && tag0 >= 0)
+	{
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "ELSE\n");
+		if (had_default)
+			appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		else
+		{
+			plx_indent(&g->cx->out, sind + 1);
+			appendStringInfoString(&g->cx->out, "NULL;\n");
+		}
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "END CASE;\n");
+	}
+	else if (!first)
+	{
+		if (had_default)
+		{
+			plx_indent(&g->cx->out, sind);
+			appendStringInfoString(&g->cx->out, "ELSE\n");
+			appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		}
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "END IF;\n");
+	}
+	pfree(defbuf.data);
 	if (label)
 	{
 		plx_indent(&g->cx->out, ind);

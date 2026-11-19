@@ -177,3 +177,39 @@ CREATE FUNCTION fg28_twodefaults(x int) RETURNS text LANGUAGE plxgo AS $$
    return "b"
  }
 $$;
+
+-- A29: a switch tag is evaluated once, and each case value is compared as a
+-- whole
+CREATE SEQUENCE fg29_seq;
+CREATE FUNCTION fg29_tag() RETURNS text LANGUAGE plxgo AS $$
+ switch nextval("fg29_seq") % 3 {
+ case 5:
+   return "five"
+ case 6:
+   return "six"
+ case 7:
+   return "seven"
+ }
+ return "none"
+$$;
+SELECT setval('fg29_seq', 1);
+SELECT fg29_tag() AS go_none;
+SELECT currval('fg29_seq') AS go_2;
+CREATE FUNCTION fg29_or(flag bool, a bool, b bool) RETURNS text LANGUAGE plxgo AS $$
+ switch flag {
+ case a || b:
+   return "match"
+ }
+ return "nomatch"
+$$;
+SELECT fg29_or(false, false, true) AS go_nomatch, fg29_or(true, false, true) AS go_match;
+-- a tagged switch with no matching case and no default does nothing
+CREATE FUNCTION fg29_nomatch(x int) RETURNS text LANGUAGE plxgo AS $$
+ r := "none"
+ switch x + 1 {
+ case 1, 2:
+   r = "small"
+ }
+ return r
+$$;
+SELECT fg29_nomatch(1) AS go_small, fg29_nomatch(7) AS go_none;
