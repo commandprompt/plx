@@ -247,3 +247,35 @@ $b = $a /*:: text[] */;
 $b .= "y";
 return $b;
 $$;
+-- A2: ARRAY['x'] and jsonb subscripts are not rewritten to record field access
+CREATE FUNCTION fe_a2_arr_js() RETURNS text[] LANGUAGE plxjs AS $$
+return ARRAY['x'];
+$$;
+SELECT fe_a2_arr_js();
+CREATE FUNCTION fe_a2_arr_rb() RETURNS text[] LANGUAGE plxruby AS $$
+return array["x"]
+$$;
+SELECT fe_a2_arr_rb();
+CREATE FUNCTION fe_a2_jsub_js(j jsonb) RETURNS jsonb LANGUAGE plxjs AS $$
+return j['a'];
+$$;
+CREATE FUNCTION fe_a2_jsub_py(j jsonb) RETURNS jsonb LANGUAGE plxpython3 AS $$
+d = j #:: jsonb
+return d["a"]
+$$;
+SELECT proname, prosrc LIKE '%RETURN j[''a''];%' AS j_kept,
+       prosrc LIKE '%RETURN d[''a''];%' AS d_kept
+FROM pg_proc WHERE proname IN ('fe_a2_jsub_js', 'fe_a2_jsub_py') ORDER BY proname;
+-- A2: a composite parameter and a query row still take field subscripts
+CREATE TYPE fe_a2_pt AS (name text, "a b" int);
+CREATE FUNCTION fe_a2_comp_js(r fe_a2_pt) RETURNS text LANGUAGE plxjs AS $$
+return r['name'];
+$$;
+SELECT fe_a2_comp_js(ROW('bob', 1)::fe_a2_pt);
+CREATE FUNCTION fe_a2_row_rb() RETURNS int LANGUAGE plxruby AS $$
+query('SELECT 7 AS "a b"').each do |row|
+  return row["a b"]
+end
+return 0
+$$;
+SELECT fe_a2_row_rb();

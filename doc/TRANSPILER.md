@@ -253,7 +253,7 @@ FOR row IN EXECUTE <SQL-expr'> USING a', b' LOOP … END LOOP;
 
 - **`row` is ALWAYS hoisted as `row RECORD;`** (mandatory: plpgsql auto-declares only *integer* FOR vars; a query FOR needs a pre-declared record var, else `"row" is not a known variable`). Register `row` in the active-loop-var stack for the body.
 - `each_with_index`: the index var is a **synthesized local** routed through the symtab (`idx integer;`), registered in the active-loop stack and checked against params. Emit `idx := -1;` immediately before the FOR and inject `idx := idx + 1;` as the **very first** body statement (above any `next if` guard) → 0-based, matching Ruby.
-- Field access `row.col`, `row[:col]`, `row['col']` all normalize to `row.col`.
+- Field access `row.col`, `row[:col]`, `row['col']` all normalize to `row.col`. A key that is not a plain identifier is quoted (`row['a b']` gives `row."a b"`). The bracket form is left as SQL subscripting when the name is `ARRAY`, a parameter whose type is not a row type (for example jsonb), or a local declared jsonb, json, hstore or an array.
 - Nested/overlapping loops need distinct row names (checked against the active stack only; sequential sibling loops may reuse `row`, §5).
 
 ### PLX_FETCH: `fetch_one` → SELECT INTO

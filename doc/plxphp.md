@@ -121,7 +121,9 @@ foreach (query("SELECT id, amount FROM orders WHERE grp = {$g}") as $row) {
 }
 ```
 
-The row variable is a record. Field access is `$row->col` or `$row['col']`. For
+The row variable is a record. Field access is `$row->col` or `$row['col']`. The
+bracket form reads a field only on a record. On a jsonb or hstore value it is
+SQL subscripting (`$j['a']` needs PostgreSQL 14 or later). For
 bind parameters or non-literal SQL, pass extra arguments:
 `query($sql, $a) as $row`.
 

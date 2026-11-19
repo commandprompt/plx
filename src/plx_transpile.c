@@ -653,6 +653,55 @@ is_array_type(const char *typ)
 	return l > 0 && typ[l - 1] == ']';
 }
 
+/*
+ * May w[...] with a quoted key be read as record field access (r['col'] ->
+ * r.col)?  It may for a record local, a row loop variable, NEW/OLD and any
+ * name whose type is not known.  It may not for the SQL array constructor
+ * ARRAY['x'], for a parameter whose type is known not to be a row type, or for
+ * a local declared jsonb, json, hstore or an array: there the subscript is
+ * SQL subscripting and passes through unchanged.
+ */
+static bool
+field_subscript_ok(Ctx *cx, const char *w, int wl)
+{
+	PlxLocal2  *l;
+
+	if (wl == 5 && pg_strncasecmp(w, "array", 5) == 0)
+		return false;
+	if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
+	{
+		int			i;
+
+		for (i = 0; i < cx->meta->nargs; i++)
+		{
+			const char *an = cx->meta->argnames[i];
+			Oid			t = cx->meta->argtypes[i];
+
+			if (an && (int) strlen(an) == wl && pg_strncasecmp(an, w, wl) == 0)
+				return t == RECORDOID || IsPolymorphicType(t) || type_is_rowtype(t);
+		}
+	}
+	l = plx_local_find(cx, w, wl);
+	if (l && !l->is_record && l->typ)
+	{
+		char		buf[64];
+		const char *b = buf;
+		const char *dot;
+
+		if (is_array_type(l->typ))
+			return false;
+		if (type_norm(l->typ, buf, sizeof(buf)))
+		{
+			if ((dot = strrchr(b, '.')) != NULL)
+				b = dot + 1;
+			if (strcmp(b, "jsonb") == 0 || strcmp(b, "json") == 0 ||
+				strcmp(b, "hstore") == 0)
+				return false;
+		}
+	}
+	return true;
+}
+
 /* is a declared type text-like (so string append applies)? */
 static bool
 is_stringy(const char *typ)
@@ -2185,7 +2234,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			i = j;
 
 			/* record subscript: r[:id] / r['id'] / r["id"] -> r.id */
-			if (i < len && s[i] == '[')
+			if (i < len && s[i] == '[' && field_subscript_ok(cx, s + i - wl, wl))
 			{
 				int			k = i + 1;
 
@@ -2212,8 +2261,27 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					}
 					if (k < len && s[k] == ']' && fe > fs)
 					{
+						int			m;
+						bool		plain = true;
+
+						for (m = fs; m < fe; m++)
+							if (!plx_is_ident(s[m]))
+								plain = false;
 						appendStringInfoChar(&out, '.');
-						appendBinaryStringInfo(&out, s + fs, fe - fs);
+						if (plain)
+							appendBinaryStringInfo(&out, s + fs, fe - fs);
+						else
+						{
+							/* "a b" is a column name, not code: quote it */
+							appendStringInfoChar(&out, '"');
+							for (m = fs; m < fe; m++)
+							{
+								if (s[m] == '"')
+									appendStringInfoChar(&out, '"');
+								appendStringInfoChar(&out, s[m]);
+							}
+							appendStringInfoChar(&out, '"');
+						}
 						i = k + 1;
 					}
 				}
