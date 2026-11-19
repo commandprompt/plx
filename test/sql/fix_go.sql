@@ -108,3 +108,72 @@ CREATE FUNCTION fg27_scope() RETURNS text LANGUAGE plxgo AS $$
  return fmt.Sprintf("%s %d", i, n)
 $$;
 SELECT fg27_scope() AS go_outer_3;
+
+-- A28: switch runs default only when no case matches, wherever default
+-- stands, and break inside a switch leaves only the switch
+CREATE FUNCTION fg28_first(x int) RETURNS text LANGUAGE plxgo AS $$
+ switch x {
+ default:
+   return "d"
+ case 1:
+   return "one"
+ }
+$$;
+SELECT fg28_first(1) AS go_one, fg28_first(5) AS go_d;
+CREATE FUNCTION fg28_middle(x int) RETURNS text LANGUAGE plxgo AS $$
+ switch x {
+ case 1:
+   return "one"
+ default:
+   return "d"
+ case 2:
+   return "two"
+ }
+$$;
+SELECT fg28_middle(2) AS go_two, fg28_middle(1) AS go_one, fg28_middle(9) AS go_d;
+CREATE FUNCTION fg28_break() RETURNS int LANGUAGE plxgo AS $$
+ var n int = 0
+ for i := 0; i < 5; i++ {
+   switch i {
+   case 2:
+     break
+   }
+   n = n + 1
+ }
+ return n
+$$;
+SELECT fg28_break() AS go_5;
+CREATE FUNCTION fg28_noloop(x int) RETURNS text LANGUAGE plxgo AS $$
+ r := "start"
+ switch {
+ case x > 0:
+   r = "pos"
+   if x > 10 { break }
+   r = "small pos"
+ }
+ return r
+$$;
+SELECT fg28_noloop(5) AS go_small_pos, fg28_noloop(50) AS go_pos;
+-- a break in a loop inside a switch still leaves only that loop
+CREATE FUNCTION fg28_inner() RETURNS int LANGUAGE plxgo AS $$
+ n := 0
+ switch {
+ case true:
+   for {
+     n++
+     if n == 3 { break }
+   }
+   n += 10
+ }
+ return n
+$$;
+SELECT fg28_inner() AS go_13;
+-- a second default is rejected, as Go rejects it
+CREATE FUNCTION fg28_twodefaults(x int) RETURNS text LANGUAGE plxgo AS $$
+ switch x {
+ default:
+   return "a"
+ default:
+   return "b"
+ }
+$$;

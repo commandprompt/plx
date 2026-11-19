@@ -83,7 +83,7 @@ literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
 | `for i := range n { ... }` | `FOR i IN 0 .. (n) - 1 LOOP ...` (integer range) |
 | `for _, v := range slice { ... }` | `FOREACH v IN ARRAY slice LOOP ...` |
 | `for _, row := range query("...") { ... }` | `FOR row IN EXECUTE '...' LOOP ...` |
-| `break` / `continue` | `EXIT;` / `CONTINUE;` (in a three-clause `for`, `continue` leaves the body block, see below) |
+| `break` / `continue` | `EXIT;` / `CONTINUE;` (in a three-clause `for`, `continue` leaves the body block; in a `switch`, `break` leaves the switch; see below) |
 | `return e` | `RETURN e;` |
 
 A three-clause `for` keeps Go's meaning. plx tests the condition before every
@@ -113,7 +113,13 @@ not supported; walk a slice by index with a counting loop
 
 A `switch` becomes an `IF`/`ELSIF`/`ELSE` chain (Go has no implicit
 fall-through). Both the tagged form and the tagless (boolean-case) form are
-supported. Comma-separated case values are OR-ed.
+supported. Comma-separated case values are OR-ed. As in Go, `default` runs only
+when no case matches, wherever it stands in the switch: plx always emits it as
+the final `ELSE`.
+
+`break` inside a switch leaves the switch, not a loop around it. plx puts such
+a switch in a labelled block and lowers `break` to `EXIT` of that block. A
+`break` in a loop nested inside the switch still leaves only that loop.
 
 ```sql
 CREATE FUNCTION classify(n int) RETURNS text LANGUAGE plxgo AS $$

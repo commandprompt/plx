@@ -64,6 +64,11 @@ typedef struct
 	 * that block (EXIT label) so the loop's post statement still runs.
 	 */
 	const char *cont_label;
+	/*
+	 * Label of the block around the innermost enclosing switch, or NULL inside
+	 * a loop nested in it: break inside a switch leaves only the switch.
+	 */
+	const char *brk_label;
 } Go;
 
 static void go_stmt(Go *g, int ind);
@@ -1748,18 +1753,22 @@ go_if(Go *g, int ind)
 /*
  * The body of a loop whose continue plpgsql's CONTINUE already gets right
  * (range, condition-only and infinite loops): hide any enclosing three-clause
- * loop's continue label while it is parsed.
+ * loop's continue label, and any enclosing switch's break label, while it is
+ * parsed.
  */
 static void
 go_loop_body(Go *g, int ind)
 {
 	const char *save_label = g->cont_label;
+	const char *save_brk = g->brk_label;
 
 	g->cont_label = NULL;
+	g->brk_label = NULL;
 	g->cx->loopdepth++;
 	go_block(g, ind);
 	g->cx->loopdepth--;
 	g->cont_label = save_label;
+	g->brk_label = save_brk;
 }
 
 /* true when a Go numeric literal is a float (has a '.' or a decimal exponent) */
@@ -1989,6 +1998,7 @@ go_for(Go *g, int ind)
 	if (semi1 >= 0)
 	{
 		const char *save_label = g->cont_label;
+		const char *save_brk = g->brk_label;
 		char	   *label = NULL;
 		char	   *lvar = NULL;
 		int			bodyend = go_match(g, hb, g->nt);
@@ -2039,6 +2049,7 @@ go_for(Go *g, int ind)
 				break;
 			}
 		g->cx->loopdepth++;
+		g->brk_label = NULL;
 		if (label)
 		{
 			plx_indent(&g->cx->out, bind + 1);
@@ -2058,6 +2069,7 @@ go_for(Go *g, int ind)
 			g->cont_label = save_label;
 		}
 		g->cx->loopdepth--;
+		g->brk_label = save_brk;
 		if (semi2 >= 0 && hb > semi2 + 1)		/* post statement */
 		{
 			int			save = g->pos;
@@ -2094,16 +2106,29 @@ go_for(Go *g, int ind)
 	go_eat_semi(g);
 }
 
-/* switch [tag] { case a, b: ...; default: ... } -> IF/ELSIF/ELSE */
+/*
+ * switch [tag] { case a, b: ...; default: ... } -> IF/ELSIF/ELSE
+ *
+ * Go runs default only when no case matches, wherever default stands, so its
+ * body is emitted into a buffer of its own and appended as the final ELSE.
+ * break inside a switch leaves only the switch: when the switch holds a
+ * break, the chain goes in a labelled block and break lowers to EXIT label.
+ */
 static void
 go_switch(Go *g, int ind)
 {
 	int			hb,
 				t0,
 				tag0 = -1,
-				tag1 = -1;
+				tag1 = -1,
+				close,
+				sind = ind,
+				j;
 	bool		first = true,
 				had_default = false;
+	char	   *label = NULL;
+	const char *save_brk = g->brk_label;
+	StringInfoData defbuf;
 
 	g->pos++;								/* switch */
 	t0 = g->pos;
@@ -2117,11 +2142,29 @@ go_switch(Go *g, int ind)
 		g->pos = hb;
 	if (go_cur(g)->kind != GO_LBRACE)
 		go_err(g, "expected { after switch");
+	close = go_match(g, g->pos, g->nt);
+	for (j = g->pos; close > 0 && j < close; j++)
+		if (go_ci(&g->t[j], "break"))
+		{
+			label = psprintf("__plx_s%d", ++g->cx->subq);
+			break;
+		}
+	if (label)
+	{
+		plx_indent(&g->cx->out, ind);
+		appendStringInfo(&g->cx->out, "<<%s>>\n", label);
+		plx_indent(&g->cx->out, ind);
+		appendStringInfoString(&g->cx->out, "BEGIN\n");
+		sind = ind + 1;
+	}
+	g->brk_label = label;
+	initStringInfo(&defbuf);
 	g->pos++;								/* { */
 	go_eat_semi(g);
 	while (go_cur(g)->kind != GO_RBRACE && go_cur(g)->kind != GO_EOF)
 	{
 		bool		is_default = go_ci(go_cur(g), "default");
+		StringInfoData save_out;
 
 		if (!go_ci(go_cur(g), "case") && !is_default)
 			go_err(g, "expected case or default in switch");
@@ -2131,7 +2174,6 @@ go_switch(Go *g, int ind)
 			/* case values up to the ':' ; multiple values are OR-ed */
 			int			cv0 = g->pos,
 						colon = -1,
-						j,
 						depth = 0;
 
 			for (j = g->pos; j < g->nt; j++)
@@ -2150,7 +2192,7 @@ go_switch(Go *g, int ind)
 			}
 			if (colon < 0)
 				go_err(g, "expected : after case");
-			plx_indent(&g->cx->out, ind);
+			plx_indent(&g->cx->out, sind);
 			appendStringInfoString(&g->cx->out, first ? "IF" : "ELSIF");
 			/* split the case values on top-level commas */
 			{
@@ -2188,9 +2230,10 @@ go_switch(Go *g, int ind)
 		}
 		else
 		{
-			int			colon = -1,
-						j;
+			int			colon = -1;
 
+			if (had_default)
+				go_err(g, "multiple defaults in switch");
 			for (j = g->pos; j < g->nt; j++)
 				if (g->t[j].kind == GO_OP && g->t[j].len == 1 && g->t[j].s[0] == ':')
 				{
@@ -2199,31 +2242,52 @@ go_switch(Go *g, int ind)
 				}
 			if (colon < 0)
 				go_err(g, "expected : after default");
-			plx_indent(&g->cx->out, ind);
-			appendStringInfoString(&g->cx->out, first ? "IF true THEN\n" : "ELSE\n");
 			g->pos = colon + 1;
 			had_default = true;
-			first = false;
 		}
 		go_eat_semi(g);
+		/* the default body goes to its own buffer, emitted last */
+		if (is_default)
+		{
+			save_out = g->cx->out;
+			g->cx->out = defbuf;
+		}
 		/* the case body runs until the next case/default or the closing } */
 		while (!go_ci(go_cur(g), "case") && !go_ci(go_cur(g), "default") &&
 			   go_cur(g)->kind != GO_RBRACE && go_cur(g)->kind != GO_EOF)
 		{
 			if (go_ci(go_cur(g), "fallthrough"))
 				go_err(g, "fallthrough is not supported");
-			go_stmt(g, ind + 1);
+			go_stmt(g, sind + 1);
+		}
+		if (is_default)
+		{
+			defbuf = g->cx->out;
+			g->cx->out = save_out;
 		}
 	}
 	if (go_cur(g)->kind == GO_RBRACE)
 		g->pos++;
 	go_eat_semi(g);
+	if (had_default)
+	{
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, first ? "IF true THEN\n" : "ELSE\n");
+		appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		first = false;
+	}
+	pfree(defbuf.data);
 	if (!first)
 	{
-		(void) had_default;
-		plx_indent(&g->cx->out, ind);
+		plx_indent(&g->cx->out, sind);
 		appendStringInfoString(&g->cx->out, "END IF;\n");
 	}
+	if (label)
+	{
+		plx_indent(&g->cx->out, ind);
+		appendStringInfoString(&g->cx->out, "END;\n");
+	}
+	g->brk_label = save_brk;
 }
 
 /* return [expr] */
@@ -2286,7 +2350,10 @@ go_stmt(Go *g, int ind)
 	{
 		g->pos++;
 		plx_indent(&g->cx->out, ind);
-		appendStringInfoString(&g->cx->out, "EXIT;\n");
+		if (g->brk_label)		/* leave the switch, not a loop around it */
+			appendStringInfo(&g->cx->out, "EXIT %s;\n", g->brk_label);
+		else
+			appendStringInfoString(&g->cx->out, "EXIT;\n");
 		go_eat_semi(g);
 	}
 	else if (go_ci(tk, "continue"))
