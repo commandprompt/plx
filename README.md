@@ -280,6 +280,11 @@ the `contrib_regression` database it uses. The expected output is in
 `test/expected/`. CI runs installcheck, differentialcheck, and metacheck on
 PostgreSQL 13 through 18.
 
+The fuzzer needs a database where plx is installed. After installcheck, run it
+with `PGDATABASE=contrib_regression`. It stops with an error when the plx
+languages are missing, and it reports a crash, a statement cancelled at its
+timeout, or an out-of-memory error as a finding.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
