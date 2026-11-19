@@ -130,6 +130,25 @@ let b = 0;
 NEW.x = b = 1;
 return NEW;
 $$;
+-- A8: a compound assignment such as <<=, &= or ??= inside a right-hand side is rejected too
+CREATE FUNCTION fe_a8_shift_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 1;
+a = b <<= 2;
+return a;
+$$;
+CREATE FUNCTION fe_a8_and_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 6;
+a = b &= 3;
+return a;
+$$;
+CREATE FUNCTION fe_a8_nullish_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 1;
+a = b ??= 4;
+return a;
+$$;
 -- A8: == in a right-hand side is a comparison, not an assignment
 CREATE FUNCTION fe_a8_ok_rb(x int) RETURNS boolean LANGUAGE plxruby AS $$
 ok = x == 1 #:: boolean

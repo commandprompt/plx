@@ -50,7 +50,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `"\x41"` is `A` and `"\v"` is a vertical tab.
 - **One assignment per statement.** In plxruby, plxphp, plxjs, plxts and
   plxpython3, `CREATE FUNCTION` rejects a chained assignment such as
-  `a = b = 0` or `a += b = 1`. Assign each variable in its own statement.
+  `a = b = 0`, `a += b = 1` or `a = b <<= 2`. Assign each variable in its own
+  statement.
 - **SQL semantics, not the source language's.** Decimal literals are exact
   `numeric`, not IEEE 754 floating point. Comparisons use SQL three-valued logic,
   so a comparison involving NULL is unknown rather than false, and `==`/`===`

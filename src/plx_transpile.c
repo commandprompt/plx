@@ -4582,8 +4582,9 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 }
 
 /*
- * Reject an assignment inside the right-hand side [ra, rb), as in a = b = v
- * or a += b = v. In every dialect that reaches here, a = b = v sets both a
+ * Reject an assignment inside the right-hand side [ra, rb), as in a = b = v,
+ * a += b = v or a = b <<= 2. Any operator that ends in '=' assigns, except
+ * the comparisons ==, !=, ===, !==, <= and >=. In every dialect that reaches here, a = b = v sets both a
  * and b. SQL reads the inner = as a comparison, so b would be left unchanged
  * and a would get a boolean.
  */
@@ -4600,9 +4601,11 @@ reject_chained_assignment(Ctx *cx, int ra, int rb, int line)
 			depth++;
 		else if (tk->kind == T_RPAREN || tk->kind == T_RBRACKET || tk->kind == T_RBRACE)
 			depth--;
-		else if (depth == 0 && tk->kind == T_OP &&
-				 (plx_tok_is(tk, "=") || plx_tok_is(tk, "**=") ||
-				  (tk->len == 2 && tk->s[1] == '=' && strchr("+-*/%", tk->s[0]))))
+		else if (depth == 0 && tk->kind == T_OP && tk->len >= 1 &&
+				 tk->s[tk->len - 1] == '=' &&
+				 !plx_tok_is(tk, "==") && !plx_tok_is(tk, "!=") &&
+				 !plx_tok_is(tk, "===") && !plx_tok_is(tk, "!==") &&
+				 !plx_tok_is(tk, "<=") && !plx_tok_is(tk, ">="))
 			plx_err(cx, line,
 					"chained assignment is not supported; assign each variable in its own statement");
 	}
