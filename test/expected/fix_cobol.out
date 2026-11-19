@@ -226,3 +226,64 @@ SELECT fc_a37_searched_other(2) AS expect_other;
  other
 (1 row)
 
+-- A38: a store into a numeric PICTURE item truncates excess digits, as COBOL does
+CREATE FUNCTION fc_a38_trunc(a numeric) RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(4).
+01 WS-M PIC 9(3)V99.
+01 WS-J PIC S9(4) VALUE 0.
+01 WS-K PIC 9(4) VALUE 0.
+01 WS-ARR PIC 9(3)V9 OCCURS 2 TIMES.
+PROCEDURE DIVISION.
+    COMPUTE WS-I = 7.9
+    COMPUTE WS-M = 2.0 / 3
+    MOVE A TO WS-J
+    ADD 1.5 TO WS-K
+    MULTIPLY 2.5 BY WS-K
+    COMPUTE WS-ARR(1) = 1.99
+    GOBACK RETURNING concat(WS-I, " ", WS-M, " ", WS-J, " ", WS-K, " ", WS-ARR(1)).
+$$;
+SELECT fc_a38_trunc(2.5) AS expect_7_066_2_2_19, fc_a38_trunc(-2.5) AS neg;
+ expect_7_066_2_2_19 |       neg       
+---------------------+-----------------
+ 7 0.66 2 2 1.9      | 7 0.66 -2 2 1.9
+(1 row)
+
+-- A38: ROUNDED rounds half away from zero, in COMPUTE and the arithmetic verbs
+CREATE FUNCTION fc_a38_rounded() RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(4).
+01 WS-M PIC 9(3)V99.
+01 WS-Q PIC 9(4) VALUE 0.
+01 WS-G PIC 9(4) VALUE 0.
+01 WS-D PIC 9(4) VALUE 0.
+PROCEDURE DIVISION.
+    COMPUTE WS-I ROUNDED = 7.5
+    COMPUTE WS-M ROUNDED = 2.0 / 3
+    ADD 1.5 TO WS-Q ROUNDED
+    ADD 1.5 TO WS-Q GIVING WS-G ROUNDED
+    DIVIDE 4 INTO 10.0 GIVING WS-D ROUNDED
+    GOBACK RETURNING concat(WS-I, " ", WS-M, " ", WS-Q, " ", WS-G, " ", WS-D).
+$$;
+SELECT fc_a38_rounded() AS expect_8_067_2_4_3;
+ expect_8_067_2_4_3 
+--------------------
+ 8 0.67 2 4 3
+(1 row)
+
+-- A38: TYPE and COMP-2 items keep the plain SQL assignment
+CREATE FUNCTION fc_a38_other() RETURNS text LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-T TYPE integer.
+01 WS-F PIC 9(4) USAGE COMP-2.
+PROCEDURE DIVISION.
+    COMPUTE WS-T = 7.9
+    COMPUTE WS-F = 7.9
+    GOBACK RETURNING concat(WS-T, " ", WS-F).
+$$;
+SELECT fc_a38_other() AS expect_8_79;
+ expect_8_79 
+-------------
+ 8 7.9
+(1 row)
+

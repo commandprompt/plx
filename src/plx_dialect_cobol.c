@@ -12,6 +12,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/pg_list.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
@@ -53,10 +54,21 @@ typedef struct
 	Ctx		   *cx;
 	CbTok	   *t;
 	int			nt, pos;
-	/* the VARYING step of the innermost PERFORM, or NULL when the innermost
-	 * PERFORM has none; EXIT PERFORM CYCLE runs it before CONTINUE */
+	/* the VARYING step of the innermost PERFORM (the new value of the control
+	 * variable cycle_step_var), or NULL when the innermost PERFORM has none;
+	 * EXIT PERFORM CYCLE runs it before CONTINUE */
 	const char *cycle_step;
+	const char *cycle_step_var;
+	/* the numeric PICTURE items (CbNum), whose stores truncate as in COBOL */
+	List	   *nums;
 } Cb;
+
+/* a numeric PICTURE item and its number of fractional digits */
+typedef struct
+{
+	char	   *name;
+	int			scale;
+} CbNum;
 
 /* case-insensitive: is token tk exactly the reserved word w? */
 static bool
@@ -854,6 +866,7 @@ cob_decl(Cb *cb)
 	const char *usage = NULL;
 	int			ulen = 0;
 	bool		is_array = false;
+	bool		from_pic = false;
 
 	/* level number */
 	if (cob_cur(cb)->kind != CB_NUM)
@@ -893,6 +906,7 @@ cob_decl(Cb *cb)
 				cb->pos++;
 			}
 			l->typ = cob_type_from_pic(cb, rs, (int) (re - rs), usage, ulen);
+			from_pic = true;
 		}
 		else if (cob_ci(tk, "USAGE"))
 		{
@@ -972,6 +986,7 @@ cob_decl(Cb *cb)
 		{
 			const char *rs, *re;
 
+			from_pic = false;
 			cb->pos++;
 			rs = cob_cur(cb)->s;
 			re = rs;
@@ -1008,6 +1023,22 @@ cob_decl(Cb *cb)
 	}
 	if (cob_cur(cb)->kind == CB_PERIOD)
 		cb->pos++;
+
+	/*
+	 * A numeric PICTURE item (not COMP-1/COMP-2, not a TYPE clause): COBOL
+	 * truncates the excess fractional digits of a value stored into it.
+	 */
+	if (from_pic && !l->is_const && l->typ &&
+		(strcmp(l->typ, "integer") == 0 || strcmp(l->typ, "bigint") == 0 ||
+		 strncmp(l->typ, "numeric(", 8) == 0))
+	{
+		CbNum	   *num = palloc(sizeof(CbNum));
+		const char *comma = strchr(l->typ, ',');
+
+		num->name = mapped;
+		num->scale = comma ? atoi(comma + 1) : 0;
+		cb->nums = lappend(cb->nums, num);
+	}
 
 	if (is_array)
 	{
@@ -1065,6 +1096,94 @@ cob_target(Cb *cb)
 	return nm;
 }
 
+/* the numeric PICTURE item named by a target (a data name, or name[i]) */
+static CbNum *
+cob_num_find(Cb *cb, const char *tgt, int len)
+{
+	ListCell   *lc;
+
+	foreach(lc, cb->nums)
+	{
+		CbNum	   *num = (CbNum *) lfirst(lc);
+
+		if ((int) strlen(num->name) == len && strncmp(num->name, tgt, len) == 0)
+			return num;
+	}
+	return NULL;
+}
+
+/*
+ * True if the SQL expression is sure to have an integral value: it holds only
+ * integer literals, numeric PICTURE items without fractional digits, and the
+ * operators + - * % with parentheses and subscripts. Storing such a value
+ * needs no truncation.
+ */
+static bool
+cob_integral(Cb *cb, const char *e)
+{
+	const char *p = e;
+
+	while (*p)
+	{
+		if (*p >= '0' && *p <= '9')
+		{
+			while (*p >= '0' && *p <= '9')
+				p++;
+			if (*p == '.')
+				return false;	/* a decimal literal */
+			continue;
+		}
+		if ((*p >= 'a' && *p <= 'z') || *p == '_')
+		{
+			const char *st = p;
+			CbNum	   *num;
+
+			while ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+				   *p == '_')
+				p++;
+			num = cob_num_find(cb, st, (int) (p - st));
+			if (!num || num->scale != 0 || *p == '.')
+				return false;
+			continue;
+		}
+		if (!strchr(" +-*%()[]", *p))
+			return false;
+		p++;
+	}
+	return true;
+}
+
+/*
+ * Emit "tgt := val;". A numeric PICTURE target keeps only its declared
+ * fractional digits: the excess is truncated, as in COBOL, or rounded half
+ * away from zero with ROUNDED. A plain plpgsql assignment would round.
+ */
+static void
+cob_store(Cb *cb, int ind, const char *tgt, const char *val, bool rounded)
+{
+	const char *br = strchr(tgt, '[');
+	CbNum	   *num = cob_num_find(cb, tgt, br ? (int) (br - tgt) : (int) strlen(tgt));
+
+	plx_indent(&cb->cx->out, ind);
+	if (num && !cob_integral(cb, val))
+		appendStringInfo(&cb->cx->out, "%s := %s((%s)::numeric, %d);\n",
+						 tgt, rounded ? "round" : "trunc", val, num->scale);
+	else
+		appendStringInfo(&cb->cx->out, "%s := %s;\n", tgt, val);
+}
+
+/* consume an optional ROUNDED phrase after a receiving field */
+static bool
+cob_rounded(Cb *cb)
+{
+	if (!cob_ci(cob_cur(cb), "ROUNDED"))
+		return false;
+	cb->pos++;
+	if (cob_ci(cob_cur(cb), "MODE"))
+		cob_err(cb, "ROUNDED MODE is not supported");
+	return true;
+}
+
 static void
 cob_move(Cb *cb, int ind)
 {
@@ -1083,8 +1202,7 @@ cob_move(Cb *cb, int ind)
 	{
 		char	   *tgt = cob_target(cb);
 
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := %s;\n", tgt, v.data);
+		cob_store(cb, ind, tgt, v.data, false);
 	}
 }
 
@@ -1092,6 +1210,7 @@ static void
 cob_compute(Cb *cb, int ind)
 {
 	char	   *tgts[16];
+	bool		rnd[16];
 	int			ntg = 0;
 	StringInfoData v;
 	int			k;
@@ -1101,7 +1220,9 @@ cob_compute(Cb *cb, int ind)
 	{
 		if (ntg >= 16)
 			cob_err(cb, "too many COMPUTE receivers");
-		tgts[ntg++] = cob_target(cb);
+		tgts[ntg] = cob_target(cb);
+		rnd[ntg] = cob_rounded(cb);
+		ntg++;
 	}
 	if (ntg == 0)
 		cob_err(cb, "COMPUTE requires a receiving field");
@@ -1113,10 +1234,7 @@ cob_compute(Cb *cb, int ind)
 	if (!cob_value(cb, &v, NULL, 0))
 		cob_err(cb, "COMPUTE requires an expression");
 	for (k = 0; k < ntg; k++)
-	{
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := (%s );\n", tgts[k], v.data);
-	}
+		cob_store(cb, ind, tgts[k], psprintf("(%s )", v.data), rnd[k]);
 }
 
 /*
@@ -1134,6 +1252,7 @@ cob_arith(Cb *cb, int ind)
 	CbTok	   *verb = cob_cur(cb);
 	char	   *recv,
 			   *giv = NULL;
+	bool		rounded;
 
 	cb->pos++;
 
@@ -1168,16 +1287,20 @@ cob_arith(Cb *cb, int ind)
 			recv = cob_operand(cb);
 			if (!recv)
 				cob_err(cb, "arithmetic verb requires a receiving field");
+			rounded = cob_rounded(cb);
 			if (cob_ci(cob_cur(cb), "GIVING"))
 			{
+				if (rounded)
+					cob_err(cb, "ROUNDED must follow the GIVING field");
 				cb->pos++;
 				giv = cob_operand(cb);
 				if (!giv)
 					cob_err(cb, "GIVING requires a receiving field");
+				rounded = cob_rounded(cb);
 			}
-			plx_indent(&cb->cx->out, ind);
-			appendStringInfo(&cb->cx->out, "%s := (%s %c (%s));\n",
-							 giv ? giv : recv, recv, is_add ? '+' : '-', sum.data);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s %c (%s))", recv, is_add ? '+' : '-', sum.data),
+					  rounded);
 		}
 		else if (is_add && cob_ci(cob_cur(cb), "GIVING"))
 		{
@@ -1185,8 +1308,8 @@ cob_arith(Cb *cb, int ind)
 			giv = cob_operand(cb);
 			if (!giv)
 				cob_err(cb, "GIVING requires a receiving field");
-			plx_indent(&cb->cx->out, ind);
-			appendStringInfo(&cb->cx->out, "%s := (%s);\n", giv, sum.data);
+			rounded = cob_rounded(cb);
+			cob_store(cb, ind, giv, psprintf("(%s)", sum.data), rounded);
 		}
 		else
 			cob_err(cb, is_add ? "ADD requires TO or GIVING"
@@ -1219,23 +1342,26 @@ cob_arith(Cb *cb, int ind)
 		recv = cob_operand(cb);
 		if (!recv)
 			cob_err(cb, "arithmetic verb requires a receiving field");
+		rounded = cob_rounded(cb);
 		if (cob_ci(cob_cur(cb), "GIVING"))
 		{
+			if (rounded)
+				cob_err(cb, "ROUNDED must follow the GIVING field");
 			cb->pos++;
 			giv = cob_operand(cb);
 			if (!giv)
 				cob_err(cb, "GIVING requires a receiving field");
+			rounded = cob_rounded(cb);
 		}
-		plx_indent(&cb->cx->out, ind);
 		if (strcmp(op, "*") == 0)
-			appendStringInfo(&cb->cx->out, "%s := (%s * %s);\n",
-							 giv ? giv : recv, recv, src);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s * %s)", recv, src), rounded);
 		else if (strcmp(op, "/into") == 0)
-			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
-							 giv ? giv : recv, recv, src);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s / %s)", recv, src), rounded);
 		else					/* /by : DIVIDE a BY b GIVING g -> g := a / b */
-			appendStringInfo(&cb->cx->out, "%s := (%s / %s);\n",
-							 giv ? giv : recv, src, recv);
+			cob_store(cb, ind, giv ? giv : recv,
+					  psprintf("(%s / %s)", src, recv), rounded);
 	}
 }
 
@@ -1375,10 +1501,12 @@ static void
 cob_perform(Cb *cb, int ind)
 {
 	const char *saved = cb->cycle_step;
+	const char *saved_var = cb->cycle_step_var;
 
 	cb->cycle_step = NULL;
 	cob_perform_inner(cb, ind);
 	cb->cycle_step = saved;
+	cb->cycle_step_var = saved_var;
 }
 
 static void
@@ -1437,15 +1565,14 @@ cob_perform_inner(Cb *cb, int ind)
 			plx_local_add(cb->cx, var, strlen(var))->typ = pstrdup("integer");
 		initStringInfo(&c);
 		cob_value(cb, &c, NULL, 0);
-		plx_indent(&cb->cx->out, ind);
-		appendStringInfo(&cb->cx->out, "%s := (%s );\n", var, from.data);
+		cob_store(cb, ind, var, psprintf("(%s )", from.data), false);
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfo(&cb->cx->out, "WHILE NOT (%s ) LOOP\n", c.data);
 		/* the step ends the body; EXIT PERFORM CYCLE must run it too */
-		cb->cycle_step = psprintf("%s := %s + (%s );\n", var, var, by.data);
+		cb->cycle_step = psprintf("%s + (%s )", var, by.data);
+		cb->cycle_step_var = var;
 		cob_block(cb, ind + 1);
-		plx_indent(&cb->cx->out, ind + 1);
-		appendStringInfoString(&cb->cx->out, cb->cycle_step);
+		cob_store(cb, ind + 1, var, cb->cycle_step, false);
 		cob_expect(cb, "END-PERFORM");
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "END LOOP;\n");
@@ -1696,10 +1823,7 @@ cob_exit(Cb *cb, int ind)
 		cb->pos++;
 		/* CYCLE ends the iteration, and a VARYING loop then runs its step */
 		if (cb->cycle_step)
-		{
-			plx_indent(&cb->cx->out, ind);
-			appendStringInfoString(&cb->cx->out, cb->cycle_step);
-		}
+			cob_store(cb, ind, cb->cycle_step_var, cb->cycle_step, false);
 		plx_indent(&cb->cx->out, ind);
 		appendStringInfoString(&cb->cx->out, "CONTINUE;\n");
 		return;

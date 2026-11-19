@@ -188,6 +188,24 @@ MULTIPLY A BY B GIVING WS-P
 DIVIDE B INTO A GIVING WS-Q
 ```
 
+A value stored into a numeric `PICTURE` item keeps only the fractional digits
+that the `PICTURE` allows, and the rest are truncated, as in COBOL.
+`COMPUTE WS-I = 7.9` stores 7 in a `PIC 9(4)` item, and `MOVE 2.5 TO WS-I`
+stores 2. To round instead, write `ROUNDED` after the receiving field; it
+rounds half away from zero:
+
+```sql
+COMPUTE WS-M ROUNDED = 2.0 / 3       *> PIC 9(3)V99: stores 0.67
+ADD 1.5 TO WS-Q ROUNDED
+MULTIPLY A BY B GIVING WS-P ROUNDED
+```
+
+This applies to `MOVE`, `COMPUTE`, the four arithmetic verbs, and the
+`PERFORM VARYING` control variable. `ROUNDED MODE` is not supported. An item
+declared with a `TYPE` clause or `USAGE COMP-1` / `COMP-2`, and a value stored
+by `EXECUTE ... INTO`, `FETCH-CURSOR`, or `GET`, follow the SQL assignment
+rule, which rounds.
+
 ### Iterating a query
 
 `PERFORM <record> OVER "<sql>"` runs the loop body once per row. Field access on
@@ -360,6 +378,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 
 - Decimal literals infer `numeric`, not a floating-point type.
 - Integer division and modulo follow SQL (truncate toward zero).
+- The number of integer digits in a `PICTURE` is not enforced: a `PIC 9(n)`
+  item holds any value of its `integer` or `bigint` type, and a value too large
+  for a `numeric(p,s)` item raises an error. COBOL would drop the high-order
+  digits.
 - A condition must be a boolean expression; there is no COBOL 88-level or
   class-condition abbreviation. An 88-level entry is rejected. A class
   condition such as `N IS NUMERIC` is not rejected but mistranslated (`IS` is
