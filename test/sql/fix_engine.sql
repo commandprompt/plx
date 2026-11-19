@@ -194,3 +194,56 @@ c"""
 break
 return 1
 $$;
+
+-- A1: a typed array, varchar(n) or char(n) local keeps its type when appended to
+CREATE FUNCTION fe_a1_push_rb(a text[]) RETURNS text[] LANGUAGE plxruby AS $$
+b = a #:: text[]
+b << 'y'
+return b
+$$;
+SELECT fe_a1_push_rb('{x}');
+CREATE FUNCTION fe_a1_vc_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "" /*:: varchar(3) */;
+for (let i = 1; i <= 5; i++) { s += "z"; }
+return s;
+$$;
+CREATE FUNCTION fe_a1_vc_php() RETURNS text LANGUAGE plxphp AS $$
+$s = "" /*:: varchar(3) */;
+for ($i = 1; $i <= 5; $i++) { $s .= "z"; }
+return $s;
+$$;
+CREATE FUNCTION fe_a1_vc_rb() RETURNS text LANGUAGE plxruby AS $$
+s = "" #:: character varying(3)
+s << "ab"
+s << "cd"
+return s
+$$;
+CREATE FUNCTION fe_a1_ch_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "a" /*:: char(2) */;
+s += "bc";
+return s;
+$$;
+\set VERBOSITY terse
+SELECT fe_a1_vc_js();
+SELECT fe_a1_vc_php();
+SELECT fe_a1_vc_rb();
+SELECT fe_a1_ch_js();
+\set VERBOSITY default
+-- A1: plain text and varchar locals still use the string builder
+CREATE FUNCTION fe_a1_vc_ok_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "" /*:: varchar */;
+let t = "" /*:: text */;
+for (let i = 1; i <= 5; i++) { s += "z"; t += i; }
+return `${s}${t}`;
+$$;
+SELECT fe_a1_vc_ok_js();
+SELECT proname, prosrc LIKE '%s public.plx_strbuild%' AS s_builder,
+       prosrc LIKE '%t public.plx_strbuild%' AS t_builder
+FROM pg_proc WHERE proname IN ('fe_a1_vc_ok_js', 'fe_a1_vc_js', 'fe_a1_ch_js')
+ORDER BY proname;
+-- A1: PHP .= on an array local is rejected instead of pushing an element
+CREATE FUNCTION fe_a1_arr_php(a text[]) RETURNS text LANGUAGE plxphp AS $$
+$b = $a /*:: text[] */;
+$b .= "y";
+return $b;
+$$;

@@ -581,15 +581,89 @@ plx_name_eq(Tok *tk, const char *w)
 	return tk->len == l && strncmp(tk->s, w, l) == 0;
 }
 
+/*
+ * Copy a declared type name in lower case, with runs of blanks folded to one
+ * space and leading and trailing blanks removed, into buf.  Returns false if
+ * the name does not fit.
+ */
+static bool
+type_norm(const char *typ, char *buf, int bufsz)
+{
+	int			n = 0;
+	bool		sp = false;
+
+	for (; *typ; typ++)
+	{
+		if (*typ == ' ' || *typ == '\t' || *typ == '\n' || *typ == '\r')
+		{
+			sp = (n > 0);
+			continue;
+		}
+		if (n + 2 >= bufsz)
+			return false;
+		if (sp)
+			buf[n++] = ' ';
+		sp = false;
+		buf[n++] = (char) pg_tolower((unsigned char) *typ);
+	}
+	buf[n] = '\0';
+	return true;
+}
+
+/*
+ * Is the declared type one the string builder can stand in for?  Only plain
+ * text and varchar without a length qualify (and the builder type itself).
+ * The builder has no typmod and compares as text, so retyping a varchar(n),
+ * char(n), citext or array local to it would drop the declared behaviour.
+ */
+static bool
+is_builder_type(const char *typ)
+{
+	char		buf[64];
+	const char *b = buf;
+
+	if (!typ || !type_norm(typ, buf, sizeof(buf)))
+		return false;
+	if (strncmp(b, "pg_catalog.", 11) == 0)
+		b += 11;
+	if (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
+		strcmp(b, "character varying") == 0)
+		return true;
+	/* plx_strbuild, bare or schema-qualified */
+	{
+		size_t		l = strlen(b);
+
+		return l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
+			(l == 12 || b[l - 13] == '.');
+	}
+}
+
+/* is a declared type an array (int[], text [ ], varchar(3)[2])? */
+static bool
+is_array_type(const char *typ)
+{
+	size_t		l;
+
+	if (!typ)
+		return false;
+	l = strlen(typ);
+	while (l > 0 && (typ[l - 1] == ' ' || typ[l - 1] == '\t' ||
+					 typ[l - 1] == '\n' || typ[l - 1] == '\r'))
+		l--;
+	return l > 0 && typ[l - 1] == ']';
+}
+
 /* is a declared type text-like (so string append applies)? */
 static bool
 is_stringy(const char *typ)
 {
 	if (!typ)
 		return false;
-	return (strcasestr(typ, "text") != NULL ||
-			strcasestr(typ, "char") != NULL ||
-			strcasestr(typ, "plx_strbuild") != NULL);
+	if (is_array_type(typ))
+		return false;
+	return (is_builder_type(typ) ||
+			strcasestr(typ, "text") != NULL ||
+			strcasestr(typ, "char") != NULL);
 }
 
 void
@@ -4206,6 +4280,26 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 		int			app_rhs = -1;
 		PlxLocal2  *l = plx_local_find(cx, t0->s, t0->len);
 
+		/* Ruby shovel on an array local is a push: array_append keeps the type */
+		if (a + 2 < b && plx_tok_is(&cx->t[a + 1], "<<") && l && is_array_type(l->typ))
+		{
+			int			rb = b;
+			char	   *rhs,
+					   *r;
+
+			if (rb > a + 2 && cx->t[rb - 1].kind == T_TYPEANN)
+				rb--;
+			if (a + 2 >= rb)
+				plx_err(cx, t0->line, "append requires a value on the right-hand side");
+			if (l->is_const)
+				plx_err(cx, t0->line, "cannot append to a constant");
+			rhs = plx_span_text(cx, a + 2, rb);
+			r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+			plx_indent(o, ind);
+			appendStringInfo(o, "%.*s := array_append(%.*s, (%s));\n",
+							 t0->len, t0->s, t0->len, t0->s, r);
+			return;
+		}
 		if (a + 1 < b && plx_tok_is(&cx->t[a + 1], "<<") && l && is_stringy(l->typ))
 			app_rhs = a + 2;	/* Ruby shovel on a string */
 		else if (a + 2 < b && cx->t[a + 1].kind == T_DOT && plx_tok_is(&cx->t[a + 2], "="))
@@ -4228,9 +4322,25 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 				l = plx_local_add(cx, t0->s, t0->len);
 			if (l->is_const)
 				plx_err(cx, t0->line, "cannot append to a constant");
-			l->typ = plx_ext_object("plx_strbuild");
 			rhs = plx_span_text(cx, app_rhs, rb);
 			r = plx_rewrite_expr(cx, rhs, (int) strlen(rhs), false);
+			/*
+			 * A local declared with a string type the builder cannot stand in
+			 * for (varchar(n), char(n), citext, ...) keeps that type, so plpgsql
+			 * still checks its length or compares it its own way. Its append is
+			 * a plain ||.
+			 */
+			if (is_array_type(l->typ))
+				plx_err(cx, t0->line, "cannot append a string to array \"%.*s\"",
+						t0->len, t0->s);
+			if (is_stringy(l->typ) && !is_builder_type(l->typ))
+			{
+				plx_indent(o, ind);
+				appendStringInfo(o, "%.*s := %.*s || (%s)::text;\n",
+								 t0->len, t0->s, t0->len, t0->s, r);
+				return;
+			}
+			l->typ = plx_ext_object("plx_strbuild");
 			plx_indent(o, ind);
 			/* cast the appended value to text (int, numeric, etc. render) */
 			appendStringInfo(o, "%.*s := %s(%.*s, (%s)::text);\n",

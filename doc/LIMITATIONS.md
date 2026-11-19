@@ -86,6 +86,15 @@ These follow from running as plpgsql and are not specific to any one dialect.
   amortized-O(1) building. The in-place path relies on a PostgreSQL 18 planner
   hook; on 13 through 17 the result is correct but the append is O(n^2), the same
   as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
+- **Only `text` and `varchar` locals use the string builder.** The append
+  operators turn a local into a `plx_strbuild` only when it has no declared type
+  or is declared `text` or `varchar` without a length. A local declared with
+  another string type, such as `varchar(20)`, `char(4)` or `citext`, keeps that
+  type. Its append becomes `s := s || x`, so plpgsql still checks the length
+  (`value too long for type character varying(20)`) and a NULL value makes the
+  result NULL. That append is not accelerated. In plxruby, `<<` on an array
+  local appends an element (`array_append`). In plxphp, `.=` on an array local
+  is rejected at `CREATE FUNCTION` time.
 - **The string builder must be on the search path.** Functions that use the
   append operators reference the extension's `plx_strbuild` type and
   `plx_sb_append` function unqualified, so the extension's schema must be on the

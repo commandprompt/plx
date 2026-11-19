@@ -293,6 +293,16 @@ correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature). Alternatively, assemble text in SQL with `string_agg` when the pieces
 come from a query.
 
+The builder is used only for a local declared `text` or `varchar` without a
+length. A local declared with a length, such as `s = "" #:: varchar(20)`, keeps
+its type, and `<<` becomes `s := s || x`, which raises `value too long` when the
+text outgrows it. On an array local, `<<` appends an element:
+
+```sql
+tags = a #:: text[]
+tags << "new"          # tags := array_append(tags, ('new'))
+```
+
 ## Trigger functions
 
 A function returning `trigger` can be used as a trigger. Assign to `NEW` fields
