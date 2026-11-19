@@ -317,12 +317,16 @@ SELFTEST = [
     ("license empty list", {"license": []}, "license"),
     ("license object with a non-string", {"license": {"MIT": 5}}, "license"),
     ("license list", {"license": ["mit", "postgresql"]}, None),
+    ("license list repeats an entry", {"license": ["mit", "mit"]}, "repeat"),
     ("license object", {"license": {"MIT": "https://opensource.org/license/mit"}}, None),
     ("empty abstract", {"abstract": ""}, "abstract"),
     ("empty description", {"description": ""}, "description"),
+    ("empty generated_by", {"generated_by": ""}, "generated_by"),
     ("unknown top-level key", {"homepage": "https://example.org"}, "homepage"),
     ("meta-spec version not 1.0.x", {"meta-spec": {"version": "banana"}}, "meta-spec"),
     ("meta-spec unknown key", {"meta-spec": {"version": "1.0.0", "spec": "x"}}, "meta-spec"),
+    ("meta-spec url not the spec", {"meta-spec": {"version": "1.0.0",
+        "url": "https://example.org/spec.txt"}}, "meta-spec url"),
     ("prereq version not a version", {"prereqs": {"runtime": {"requires":
         {"PostgreSQL": "thirteen"}}}}, "thirteen"),
     ("prereq unknown phase", {"prereqs": {"install": {"requires":
@@ -331,8 +335,17 @@ SELFTEST = [
         {"PostgreSQL": "13.0.0"}}}}, "needs"),
     ("prereq version range", {"prereqs": {"runtime": {"requires":
         {"PostgreSQL": ">= 13.0.0, < 19.0.0", "plpgsql": 0}}}}, None),
-    ("resources unknown key", {"resources": {"home": "https://example.org"}},
-        "resources"),
+    # homepage is present, so only the unknown key can cause the error.
+    ("resources unknown key", {"resources": {"homepage": "https://example.org",
+        "home": "https://example.org"}}, "'home'"),
+    ("bugtracker unknown key", {"resources": {"bugtracker": {
+        "web": "https://example.org/issues", "email": "a@example.org"}}},
+        "'email'"),
+    ("repository unknown key", {"resources": {"repository": {
+        "web": "https://example.org", "vcs": "git"}}}, "'vcs'"),
+    ("resources with x_ keys", {"resources": {"homepage": "https://example.org",
+        "x_a": 1, "bugtracker": {"web": "https://example.org/i", "x_b": 2},
+        "repository": {"web": "https://example.org", "x_c": 3}}}, None),
     ("provides unknown key", {"provides": {"plx": {"file": "test/check_meta.py",
         "version": "1.0.0", "docs": "README.md"}}}, "docs"),
     ("duplicate maintainer", {"maintainer": ["a <a@example.org>",
