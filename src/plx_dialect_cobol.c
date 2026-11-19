@@ -1175,6 +1175,9 @@ cob_store(Cb *cb, int ind, const char *tgt, const char *val, bool rounded)
 	const char *br = strchr(tgt, '[');
 	CbNum	   *num = cob_num_find(cb, tgt, br ? (int) (br - tgt) : (int) strlen(tgt));
 
+	/* a whole table stored at once is an array: it keeps the SQL assignment */
+	if (num && !br && cob_is_array(cb, tgt))
+		num = NULL;
 	plx_indent(&cb->cx->out, ind);
 	if (num && !cob_integral(cb, val))
 		appendStringInfo(&cb->cx->out, "%s := %s((%s)::numeric, %d);\n",

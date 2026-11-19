@@ -262,3 +262,21 @@ PROCEDURE DIVISION.
     COMPUTE WS-A(2) = WS-A(2) + 5
     DISPLAY WS-A " " WS-S " " WS-N.
 $$;
+-- A38 review: MOVE of a whole table into a numeric OCCURS item still works
+CREATE FUNCTION fc_r1_arrparam(a int[]) RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-B PIC 9(4) OCCURS 3 TIMES.
+PROCEDURE DIVISION.
+    MOVE A TO WS-B
+    GOBACK RETURNING WS-B(2).
+$$;
+SELECT fc_r1_arrparam(ARRAY[1,2,3]) AS expect_2;
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4)V99 OCCURS 2 TIMES VALUE 5.
+01 WS-B PIC 9(4) OCCURS 2 TIMES.
+PROCEDURE DIVISION.
+    COMPUTE WS-A(2) = 6
+    MOVE WS-A TO WS-B
+    DISPLAY "table=" WS-B.
+$$;

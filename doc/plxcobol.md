@@ -207,9 +207,10 @@ MULTIPLY A BY B GIVING WS-P ROUNDED
 
 This applies to `MOVE`, `COMPUTE`, the four arithmetic verbs, and the
 `PERFORM VARYING` control variable. `ROUNDED MODE` is not supported. An item
-declared with a `TYPE` clause or `USAGE COMP-1` / `COMP-2`, and a value stored
-by `EXECUTE ... INTO`, `FETCH-CURSOR`, or `GET`, follow the SQL assignment
-rule, which rounds.
+declared with a `TYPE` clause or `USAGE COMP-1` / `COMP-2`, a whole table
+stored at once (`MOVE WS-A TO WS-B` where `WS-B` has `OCCURS`), and a value
+stored by `EXECUTE ... INTO`, `FETCH-CURSOR`, or `GET`, follow the SQL
+assignment rule, which rounds.
 
 ### Iterating a query
 
