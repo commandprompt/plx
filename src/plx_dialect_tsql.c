@@ -864,12 +864,37 @@ tq_emit_range(Tq *tq, int a, int b, StringInfo out)
 	tq->cx->depth--;
 }
 
+/*
+ * CASE ... END nesting for the expression scanners below. T-SQL has CASE only
+ * as an expression, so every CASE opens one and its END closes it. Returns
+ * true when tk opens, closes or sits inside a CASE, so the caller must not
+ * take an END, ELSE, BEGIN or statement keyword there as the end of the
+ * expression. ';' and EOF still end it.
+ */
+static bool
+tq_in_case(TqTok *tk, int *cdepth)
+{
+	if (tq_ci(tk, "CASE"))
+	{
+		(*cdepth)++;
+		return true;
+	}
+	if (*cdepth > 0)
+	{
+		if (tq_ci(tk, "END"))
+			(*cdepth)--;
+		return tk->kind != TQ_SEMI && tk->kind != TQ_EOF;
+	}
+	return false;
+}
+
 /* end of an expression/raw statement: first depth-0 ; EOF END or ELSE */
 static int
 tq_value_end(Tq *tq, int from)
 {
 	int			i = from,
-				depth = 0;
+				depth = 0,
+				cdepth = 0;
 
 	while (i < tq->nt)
 	{
@@ -882,7 +907,7 @@ tq_value_end(Tq *tq, int from)
 			if (depth > 0)
 				depth--;
 		}
-		else if (depth == 0)
+		else if (depth == 0 && !tq_in_case(tk, &cdepth))
 		{
 			if (tk->kind == TQ_SEMI || tk->kind == TQ_EOF ||
 				tq_ci(tk, "END") || tq_ci(tk, "ELSE"))
@@ -898,7 +923,8 @@ static int
 tq_cond_end(Tq *tq, int from)
 {
 	int			i = from,
-				depth = 0;
+				depth = 0,
+				cdepth = 0;
 
 	while (i < tq->nt)
 	{
@@ -911,7 +937,7 @@ tq_cond_end(Tq *tq, int from)
 			if (depth > 0)
 				depth--;
 		}
-		else if (depth == 0)
+		else if (depth == 0 && !tq_in_case(tk, &cdepth))
 		{
 			if (tk->kind == TQ_SEMI || tk->kind == TQ_EOF ||
 				tq_ci(tk, "END") || tq_ci(tk, "ELSE") ||
@@ -963,7 +989,8 @@ tq_declare(Tq *tq, int ind)
 			e1 = tq->pos;
 			/* value runs to a top-level comma or the statement terminator */
 			{
-				int			depth = 0;
+				int			depth = 0,
+							cdepth = 0;
 
 				while (e1 < tq->nt)
 				{
@@ -973,7 +1000,7 @@ tq_declare(Tq *tq, int ind)
 						depth++;
 					else if (x->kind == TQ_RP && depth > 0)
 						depth--;
-					else if (depth == 0 &&
+					else if (depth == 0 && !tq_in_case(x, &cdepth) &&
 							 (x->kind == TQ_COMMA || x->kind == TQ_SEMI ||
 							  x->kind == TQ_EOF || tq_ci(x, "END")))
 						break;
@@ -1116,6 +1143,7 @@ tq_select(Tq *tq, int ind)
 		{
 			TqTok	   *v = tq_cur(tq);
 			int			depth = 0,
+						cdepth = 0,
 						e0,
 						e1;
 
@@ -1144,7 +1172,7 @@ tq_select(Tq *tq, int ind)
 					depth++;
 				else if (x->kind == TQ_RP && depth > 0)
 					depth--;
-				else if (depth == 0)
+				else if (depth == 0 && !tq_in_case(x, &cdepth))
 				{
 					if (x->kind == TQ_COMMA || x->kind == TQ_SEMI ||
 						x->kind == TQ_EOF || tq_ci(x, "END") || tq_ci(x, "ELSE"))
@@ -1278,15 +1306,20 @@ static void
 tq_if(Tq *tq, int ind)
 {
 	int			c0,
-				c1;
+				c1,
+				k;
 
 	tq->pos++;								/* IF */
 	c0 = tq->pos;
 	c1 = tq_cond_end(tq, c0);
+	/* plpgsql ends an IF condition at its first THEN, so a condition that
+	 * holds a CASE ... THEN goes in parentheses */
+	for (k = c0; k < c1 && !tq_ci(&tq->t[k], "CASE"); k++)
+		;
 	plx_indent(&tq->cx->out, ind);
-	appendStringInfoString(&tq->cx->out, "IF");
+	appendStringInfoString(&tq->cx->out, k < c1 ? "IF (" : "IF");
 	tq_emit_range(tq, c0, c1, &tq->cx->out);
-	appendStringInfoString(&tq->cx->out, " THEN\n");
+	appendStringInfoString(&tq->cx->out, k < c1 ? ") THEN\n" : " THEN\n");
 	tq->pos = c1;
 	tq_body(tq, ind + 1);
 	tq_eat_semi(tq);

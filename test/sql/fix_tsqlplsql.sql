@@ -158,3 +158,26 @@ CREATE FUNCTION fx46_with() RETURNS int LANGUAGE plxtsql AS $$
   RAISERROR('x', 0, 1) WITH;
   RETURN 1;
 $$;
+-- A47: CASE ... END inside an expression no longer ends the statement or block
+CREATE FUNCTION fx47_case(a int) RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @x int;
+  DECLARE @y int = CASE WHEN @a > 10 THEN 100 ELSE 0 END;
+  SET @x = CASE WHEN @a > 0 THEN 1 ELSE 0 END;
+  IF CASE WHEN @a > 5 THEN 1 ELSE 0 END = 1
+  BEGIN
+    SET @x = @x + CASE @a WHEN 6 THEN 10 WHEN 7 THEN 20 ELSE 30 END;
+  END
+  ELSE
+    SET @x = @x + 1000;
+  RETURN @x + @y;
+$$;
+CREATE FUNCTION fx47_ret(a int) RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CASE WHEN @a > 0 THEN 1 END;
+$$;
+SELECT fx47_case(5) AS c5, fx47_case(6) AS c6, fx47_case(20) AS c20, fx47_case(-1) AS cm1, fx47_ret(-3) AS rm3, fx47_ret(3) AS r3;
+CREATE FUNCTION fx47_sel() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10);
+  SELECT @s = CASE WHEN v > 2 THEN 'big' ELSE 'small' END FROM fx43_amt WHERE v = 3;
+  RETURN @s;
+$$;
+SELECT fx47_sel();
