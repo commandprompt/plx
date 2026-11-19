@@ -167,6 +167,18 @@ The first two entries are breaking changes, and the third says how to upgrade.
   (`let n /*:: bigint */ = 3;`) silently dropped the initializer, so `n` was
   NULL. That form is now rejected with a hint to write
   `let n = 3 /*:: bigint */;`.
+- **An interpolated string as a local's first value read stale values.** The
+  first top-level assignment of a string literal is folded into the `DECLARE`
+  section as the variable's initializer, which runs when the function starts.
+  An interpolating string (Ruby `"#{v}"`, PHP `"$v"`, JS `` `${v}` ``, Python
+  `f"{v}"`) was folded too, so it read its variables before the statements
+  above it had run: `v = "v0"; v = "v2"; s = "got #{v}"` returned `got v0`. Such
+  an assignment now runs in place. A plain literal is still folded.
+- **A constant computed from a local variable read the variable's initial
+  value.** A constant becomes a plpgsql `CONSTANT`, computed when the function
+  starts, so `v = 1; v = 2; c = v + 1 #:: int const` gave `c = 2`. A constant
+  may now use only literals, parameters and earlier constants; reading another
+  local is rejected at `CREATE FUNCTION`.
 
 ## [2.0.1] - 2026-08-25
 
