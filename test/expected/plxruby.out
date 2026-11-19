@@ -430,3 +430,38 @@ SELECT rb_case_noelse(1), rb_case_noelse(2);
              10 |              0
 (1 row)
 
+-- ensure runs on return
+CREATE FUNCTION rb_ensure_return(x int) RETURNS int LANGUAGE plxruby AS $$
+  begin
+    return x * 2
+  ensure
+    raise warning: "ruby ensure"
+  end
+$$;
+SELECT rb_ensure_return(4);
+WARNING:  ruby ensure
+ rb_ensure_return 
+------------------
+                8
+(1 row)
+
+CREATE FUNCTION rb_ensure_label_reuse() RETURNS int LANGUAGE plxruby AS $$
+  r = 0
+  outer: for i in 0..1
+    begin
+      outer: for j in 0..0
+        r = r * 10 + 1
+      end
+      break outer
+    ensure
+      r = r * 10 + 9
+    end
+  end
+  return r
+$$;
+SELECT rb_ensure_label_reuse();   -- 19
+ rb_ensure_label_reuse 
+-----------------------
+                    19
+(1 row)
+

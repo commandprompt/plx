@@ -419,8 +419,10 @@ parse_begin(Ctx *cx, int ind)
 	StringInfoData arms;
 	int			nrescue = 0;
 	char	   *ensure_body = NULL;
+	PlxFin	   *fin;
 
 	cx->pos++;					/* consume 'begin' */
+	fin = plx_fin_push(cx);
 	body = capture_block(cx, ind + 1);
 
 	initStringInfo(&arms);
@@ -474,20 +476,20 @@ parse_begin(Ctx *cx, int ind)
 			cx->exc_var = save_ev;
 			cx->exc_varlen = save_evl;
 
-			appendStringInfoSpaces(&arms, (ind + 1) * 2);
+			plx_indent(&arms, ind + 1);
 			appendStringInfo(&arms, "WHEN %s THEN\n", cond);
 			appendStringInfoString(&arms, pfx);
 			appendStringInfoString(&arms, hb);
+			pfree(hb);
 		}
 		nrescue++;
 	}
 
+	plx_fin_pop(cx, fin);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)
 	{
-		plx_ensure_enter(cx, cx->t[cx->pos].line);
 		cx->pos++;
 		ensure_body = capture_block(cx, ind + 1);
-		cx->ensuredepth--;
 	}
 
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
@@ -495,7 +497,7 @@ parse_begin(Ctx *cx, int ind)
 	else
 		plx_err(cx, bl, "unterminated begin block");
 
-	plx_emit_try(o, ind, body, nrescue, arms.data, ensure_body);
+	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure_body, fin);
 }
 
 /* rewrite a comma-separated value list (for CASE WHEN v1, v2) */
@@ -641,10 +643,17 @@ parse_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE ||
 		 cx->t[cx->pos + 2].kw == KW_UNTIL || cx->t[cx->pos + 2].kw == KW_LOOP))
 	{
+		PlxLabel   *mark = cx->labels;
+
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;
-		tk = &cx->t[cx->pos];
+		/* the label is in scope only inside its loop: a later loop may
+		 * reuse the name, and a break must not resolve to a closed one */
+		parse_stmt_inner(cx, ind, toplevel);
+		cx->labels = mark;
+		return;
 	}
 	if (tk->kind == T_KW)
 	{

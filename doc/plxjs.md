@@ -205,6 +205,15 @@ try {
 `e.table`, `e.schema`, `e.datatype` to the matching `GET STACKED DIAGNOSTICS`
 fields.
 
+The `finally` body runs once, whether the `try` block completes, returns,
+breaks, continues or raises an error. After an error it runs and then raises
+the error again, with its SQLSTATE, message, detail, hint and the names of
+the objects it is about (schema, table, column, constraint, type); the
+`CONTEXT` of the raised error points at the re-raise, not the original
+statement. It does not run when the statement is cancelled (a query cancel
+or `statement_timeout`) or an `assert` fails, because `WHEN OTHERS` does not
+catch those two errors; for the same reason `catch (e)` does not catch them.
+
 ### Assertions
 
 ```sql
