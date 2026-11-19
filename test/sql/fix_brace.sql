@@ -22,3 +22,65 @@ try {
 }
 $$;
 SELECT fb_tscatch(0);
+-- A14: a catch class maps to its own condition; an unknown class is rejected
+\set VERBOSITY terse
+CREATE FUNCTION fb_ct1(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::SerializationFailure $e) {
+  return "retry";
+}
+$$;
+SELECT fb_ct1(0);
+CREATE FUNCTION fb_ct2(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::DivisionByZero $e) {
+  return "div " . $e->sqlstate;
+}
+$$;
+SELECT fb_ct2(0);
+CREATE FUNCTION fb_ct3(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::UniqueViolation | DivisionByZeroError $e) {
+  return "union";
+}
+$$;
+SELECT fb_ct3(0);
+CREATE FUNCTION fb_ct4(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (TypeError $e) {
+  return "type";
+}
+$$;
+CREATE FUNCTION fb_ct5(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::NoSuchCondition $e) {
+  return "none";
+}
+$$;
+SELECT fb_ct5(0);
+CREATE FUNCTION fb_ct6(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (\Throwable $e) {
+  return "any";
+}
+$$;
+SELECT fb_ct6(0);
+\set VERBOSITY default

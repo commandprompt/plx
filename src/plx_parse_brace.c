@@ -336,6 +336,64 @@ parse_foreach_brace(Ctx *cx, int ind)
 	brace_query_loop(cx, &cx->t[rv], ca, as_at, ind);
 }
 
+/*
+ * The plpgsql condition for one catch class, the tokens [a, b).
+ *   Exception, Throwable, Error (an optional leading \)  -> OTHERS
+ *   a class plx_exc_class_to_condition knows, or DivisionByZeroError
+ *   PG::CamelCase -> camel_case; plpgsql rejects an unknown condition name
+ *     when it compiles the function
+ * Any other class is an error: catching every error in its place would hide
+ * the errors the handler was not written for.
+ */
+static const char *
+catch_class_condition(Ctx *cx, int a, int b, int line)
+{
+	StringInfoData cls;
+	const char *p, *c;
+	int			i;
+
+	initStringInfo(&cls);
+	for (i = a; i < b; i++)
+		if (cx->t[i].s)
+			appendBinaryStringInfo(&cls, cx->t[i].s, cx->t[i].len);
+	p = cls.data;
+	while (*p == '\\')
+		p++;
+	if (*p == '\0')
+		plx_err(cx, line, "catch requires an exception class before '|'");
+	if (strcmp(p, "Exception") == 0 || strcmp(p, "Throwable") == 0 ||
+		strcmp(p, "Error") == 0)
+		return "OTHERS";
+	if (strcmp(p, "DivisionByZeroError") == 0)
+		return "division_by_zero";
+	c = plx_exc_class_to_condition(p, (int) strlen(p));
+	if (c)
+		return c;
+	if (strncmp(p, "PG::", 4) == 0 && p[4] >= 'A' && p[4] <= 'Z')
+	{
+		StringInfoData cond;
+		const char *q;
+
+		initStringInfo(&cond);
+		for (q = p + 4; *q; q++)
+		{
+			if (*q >= 'A' && *q <= 'Z')
+			{
+				if (q > p + 4)
+					appendStringInfoChar(&cond, '_');
+				appendStringInfoChar(&cond, (char) (*q - 'A' + 'a'));
+			}
+			else if ((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9'))
+				appendStringInfoChar(&cond, *q);
+			else
+				break;
+		}
+		if (*q == '\0')
+			return cond.data;
+	}
+	plx_err(cx, line, "unsupported exception class \"%s\"", p);
+}
+
 /* try { } catch (Class $e) { } [catch...] [finally { }] */
 static void
 parse_try_brace(Ctx *cx, int ind)
@@ -389,15 +447,24 @@ parse_try_brace(Ctx *cx, int ind)
 			}
 		if (ev_a > ca)
 		{
-			char	   *cls = plx_span_text(cx, ca, ev_a);
-			const char *c;
+			/* catch (A | B $e) -> WHEN a OR b; a catch-all member wins */
+			StringInfoData cl;
+			int			s = ca;
+			bool		all = false;
 
-			/* strip leading backslash/namespace for a bare class name */
-			while (*cls == '\\' || *cls == ' ')
-				cls++;
-			c = plx_exc_class_to_condition(cls, (int) strlen(cls));
-			if (c)
-				cond = c;		/* else OTHERS (e.g. \Exception) */
+			initStringInfo(&cl);
+			for (i = ca; i <= ev_a; i++)
+				if (i == ev_a || cx->t[i].kind == T_PIPE)
+				{
+					const char *c = catch_class_condition(cx, s, i, cx->t[ca].line);
+
+					if (strcmp(c, "OTHERS") == 0)
+						all = true;
+					appendStringInfo(&cl, "%s%s", cl.len ? " OR " : "", c);
+					s = i + 1;
+				}
+			if (!all)
+				cond = cl.data;
 		}
 		if (ev_a >= 0)
 		{

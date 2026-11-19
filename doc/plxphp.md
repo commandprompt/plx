@@ -209,9 +209,18 @@ try {
 }
 ```
 
-`catch (\Exception $e)` maps to `WHEN OTHERS`. To catch a specific condition,
-name it with the `PG::` spelling, for example `catch (PG::UniqueViolation $e)`,
-which maps to `unique_violation`.
+`catch (\Exception $e)` maps to `WHEN OTHERS`, and so do `\Throwable` and
+`\Error`. To catch a specific condition, write `PG::` and then the plpgsql
+condition name in CamelCase. For example, `catch (PG::UniqueViolation $e)` maps
+to `unique_violation`, and `catch (PG::SerializationFailure $e)` maps to
+`serialization_failure`. `DivisionByZeroError` maps to `division_by_zero`. To
+catch several conditions in one handler, join the classes with `|`, as in
+`catch (PG::UniqueViolation | PG::CheckViolation $e)`.
+
+`CREATE FUNCTION` rejects any other class name, such as `TypeError`, with
+`unsupported exception class`. plpgsql checks a `PG::` condition name the first
+time the function runs. An unknown name, such as `PG::NoSuchCondition`, then
+fails with `unrecognized exception condition "no_such_condition"`.
 Accessors: `$e->message` to `SQLERRM`, `$e->sqlstate` to `SQLSTATE`, and
 `$e->detail`, `$e->hint`, `$e->constraint`, `$e->column`, `$e->table`,
 `$e->schema`, `$e->datatype` to the matching `GET STACKED DIAGNOSTICS` fields.
