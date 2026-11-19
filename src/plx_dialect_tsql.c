@@ -657,6 +657,17 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 		return true;
 	}
 
+	/* LEN(x) -> length(rtrim(x)): T-SQL LEN ignores trailing spaces */
+	if (tq_ci(tk, "LEN"))
+	{
+		tq_sp(out);
+		appendStringInfoString(out, "length(rtrim(");
+		tq_emit_range(tq, lp + 1, close, out);
+		appendStringInfoString(out, "))");
+		*ni = close + 1;
+		return true;
+	}
+
 	/* ERROR_MESSAGE() -> SQLERRM (no parens) */
 	if (tq_ci(tk, "ERROR_MESSAGE") && close == lp + 1)
 	{
@@ -673,7 +684,7 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 			const char *tsql;
 			const char *pg;
 		}			r[] = {
-			{"isnull", "coalesce"}, {"len", "length"},
+			{"isnull", "coalesce"},
 			{"datalength", "octet_length"}, {"getdate", "now"},
 			{"sysdatetime", "now"}, {"getutcdate", "now"},
 			{"newid", "gen_random_uuid"}, {"ceiling", "ceil"},
@@ -826,6 +837,8 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 			tq_sp(out);
 			if (tk->len == 2 && tk->s[0] == '!' && tk->s[1] == '=')
 				appendStringInfoString(out, "<>");
+			else if (tk->len == 1 && tk->s[0] == '^')
+				appendStringInfoChar(out, '#');	/* T-SQL XOR; PG ^ is power */
 			else
 				appendBinaryStringInfo(out, tk->s, tk->len);
 			i++;

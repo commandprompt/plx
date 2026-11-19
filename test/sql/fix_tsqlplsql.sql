@@ -79,3 +79,11 @@ CREATE FUNCTION fx44_q() RETURNS text LANGUAGE plxtsql AS $$
 $$;
 SELECT fx44_q();
 CREATE FUNCTION fx44_bad() RETURNS int LANGUAGE plxtsql AS $$ RETURN [abc $$;
+-- A45: ^ is bitwise XOR and LEN() ignores trailing spaces
+CREATE FUNCTION fx45_xor(a int, b int) RETURNS int LANGUAGE plxtsql AS $$
+  RETURN @a ^ @b;
+$$;
+CREATE FUNCTION fx45_len(s varchar) RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(@s);
+$$;
+SELECT fx45_xor(5, 3) AS xor_6, fx45_len('abc   ') AS len_3, fx45_len('  ab') AS len_4;

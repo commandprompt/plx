@@ -145,7 +145,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `ISNULL(a, b)` | `coalesce(a, b)` |
 | `IIF(c, a, b)` | `CASE WHEN c THEN a ELSE b END` |
 | `CONVERT(type, e)` | `CAST(e AS type)` (the style argument is ignored) |
-| `LEN(x)` | `length(x)` |
+| `LEN(x)` | `length(rtrim(x))` (trailing spaces are not counted, as in SQL Server) |
 | `DATALENGTH(x)` | `octet_length(x)` |
 | `CHARINDEX(sub, str)` | `strpos(str, sub)` (arguments swapped) |
 | `GETDATE()`, `SYSDATETIME()` | `now()` |
@@ -155,6 +155,16 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 `CAST(e AS type)` and most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`,
 `LOWER`, `ABS`, `ROUND`, ...) are already valid in PostgreSQL and pass through.
+
+### Operators
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `a ^ b` (bitwise exclusive OR) | `a # b` |
+| `a != b` | `a <> b` |
+
+In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
+`^` to `#`. Use `POWER(a, b)` for exponentiation.
 
 ## Dynamic SQL
 
