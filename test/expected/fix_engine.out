@@ -41,3 +41,72 @@ SELECT fe_a5_camel_js(1);
               2
 (1 row)
 
+-- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
+CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
+x = 0755
+return x + 0_17
+$$;
+SELECT fe_a6_rb();
+ fe_a6_rb 
+----------
+      508
+(1 row)
+
+CREATE FUNCTION fe_a6_php() RETURNS int LANGUAGE plxphp AS $$
+$x = 0755;
+return $x;
+$$;
+SELECT fe_a6_php();
+ fe_a6_php 
+-----------
+       493
+(1 row)
+
+CREATE FUNCTION fe_a6_js() RETURNS int LANGUAGE plxjs AS $$
+return 0755;
+$$;
+SELECT fe_a6_js();
+ fe_a6_js 
+----------
+      493
+(1 row)
+
+-- A6: a leading zero does not make a decimal fraction octal
+CREATE FUNCTION fe_a6_float_rb() RETURNS numeric LANGUAGE plxruby AS $$
+return 00.5 + 0
+$$;
+SELECT fe_a6_float_rb();
+ fe_a6_float_rb 
+----------------
+            0.5
+(1 row)
+
+-- A6: COBOL numbers are decimal, leading zeros included
+CREATE FUNCTION fe_a6_cob() RETURNS int LANGUAGE plxcobol AS $$
+       PROCEDURE DIVISION.
+           RETURN 0755.
+$$;
+SELECT fe_a6_cob();
+ fe_a6_cob 
+-----------
+       755
+(1 row)
+
+-- A6: Python and TypeScript reject a leading zero; 8 and 9 are not octal digits
+CREATE FUNCTION fe_a6_py() RETURNS int LANGUAGE plxpython3 AS $$
+return 0755
+$$;
+ERROR:  plxpython3: leading zeros in an integer literal are not allowed: 0755
+DETAIL:  at plxpython3 source line 2
+HINT:  Write 0o755 for an octal number.
+CREATE FUNCTION fe_a6_ts() RETURNS int LANGUAGE plxts AS $$
+return 0755;
+$$;
+ERROR:  plxts: leading zeros in an integer literal are not allowed: 0755
+DETAIL:  at plxts source line 2
+HINT:  Write 0o755 for an octal number.
+CREATE FUNCTION fe_a6_bad_rb() RETURNS int LANGUAGE plxruby AS $$
+return 0789
+$$;
+ERROR:  plxruby: invalid digit in octal literal: 0789
+DETAIL:  at plxruby source line 2

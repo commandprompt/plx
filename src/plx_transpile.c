@@ -1146,6 +1146,32 @@ find_ternary_colon(const char *s, int len, int q)
 }
 
 /*
+ * Is the number at s[i] (a '0') an integer literal with a leading zero, such
+ * as 0755 or 0_17? Not when it is 0 alone, a fraction or has an exponent.
+ */
+static bool
+leading_zero_int(const char *s, int len, int i)
+{
+	int			k = i + 1;
+
+	if (i > 0 && plx_is_ident(s[i - 1]))
+		return false;			/* part of a name */
+	if (i > 0 && s[i - 1] == '.' && !(i > 1 && s[i - 2] == '.'))
+		return false;			/* a fraction, .0755; a range end (..0755) is not */
+	while (k < len && s[k] == '_')
+		k++;
+	if (k >= len || s[k] < '0' || s[k] > '9')
+		return false;
+	while (k < len && ((s[k] >= '0' && s[k] <= '9') || s[k] == '_'))
+		k++;
+	if (k < len && (s[k] == 'e' || s[k] == 'E'))
+		return false;
+	if (k + 1 < len && s[k] == '.' && s[k + 1] >= '0' && s[k + 1] <= '9')
+		return false;
+	return true;
+}
+
+/*
  * A variable reference [i, j) in expression text s: reject it when it spells a
  * local or a parameter differently from an earlier use (see names_fold_case).
  * Field names (after '.' or '->'), symbols and type names (after ':'), hash
@@ -1582,6 +1608,56 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					appendBinaryStringInfo(&out, s + start, i - start);
 				else
 					appendStringInfo(&out, UINT64_FORMAT, val);
+				continue;
+			}
+			/*
+			 * A leading zero (0755): octal in Ruby, PHP, JS and Go, a syntax
+			 * error in Python 3 and TypeScript, and decimal in COBOL, T-SQL and
+			 * PL/SQL. SQL reads 0755 as decimal, so convert it, reject it, or
+			 * leave it. A fraction or exponent (00.5, 01e3) keeps it decimal.
+			 */
+			if (s[i] == '0' && !names_fold_case(cx) && leading_zero_int(s, len, i))
+			{
+				int			start = i;
+				int			k;
+				uint64		val = 0;
+				bool		ovf = false;
+				int			line = cx->t ? cx->t[cx->pos].line : 0;
+
+				while (i < len && ((s[i] >= '0' && s[i] <= '9') || s[i] == '_'))
+					i++;
+				if (surf->block_style == PLX_BLK_INDENT || surf->ts_types)
+				{
+					k = start;
+					while (k < i && (s[k] == '0' || s[k] == '_'))
+						k++;
+					if (k == i)
+					{
+						appendStringInfoChar(&out, '0');	/* 00 and 0_0 are zero */
+						continue;
+					}
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("%s: leading zeros in an integer literal are not allowed: %.*s",
+									surf->lanname, i - start, s + start),
+							 errdetail_internal("at %s source line %d", surf->lanname, line),
+							 errhint("Write 0o%.*s for an octal number.", i - k, s + k)));
+				}
+				for (k = start; k < i; k++)
+				{
+					if (s[k] == '_')
+						continue;
+					if (s[k] > '7')
+						plx_err(cx, line, "invalid digit in octal literal: %.*s",
+								i - start, s + start);
+					if (val > (UINT64_MAX >> 3))
+						ovf = true;
+					val = val * 8 + (s[k] - '0');
+				}
+				if (ovf)
+					plx_err(cx, line, "integer literal out of range: %.*s",
+							i - start, s + start);
+				appendStringInfo(&out, UINT64_FORMAT, val);
 				continue;
 			}
 			/* decimal integer part */
