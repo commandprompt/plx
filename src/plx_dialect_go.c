@@ -13,6 +13,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
@@ -434,54 +435,126 @@ go_emit_num(Go *g, GoTok *tk, StringInfo out)
 	appendStringInfo(out, UINT64_FORMAT, val);
 }
 
-/* emit a Go string/rune literal as a SQL string literal */
+/* value of hex digit c, or -1 */
+static int
+go_hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * Emit a Go string/rune literal as a SQL string literal. In an interpreted
+ * string ("..." or 'x') each escape is decoded the way Go decodes it:
+ * \a \b \f \n \r \t \v, \\ and the quotes, \xHH and \NNN (one byte each),
+ * \uXXXX and \UXXXXXXXX (a code point, converted to the server encoding).
+ * Bytes that do not form valid text in the server encoding, and NUL, which
+ * text cannot hold, are rejected. A raw string (`...`) has no escapes.
+ */
 static void
-go_emit_str(GoTok *tk, StringInfo out)
+go_emit_str(Go *g, GoTok *tk, StringInfo out)
 {
 	char		q = tk->s[0];
 	const char *s = tk->s + 1,
 			   *e = tk->s + tk->len - 1;
+	StringInfoData v;
+	int			i;
 
-	appendStringInfoChar(out, '\'');
+	initStringInfo(&v);
 	if (q == '`')									/* raw: no escapes */
-	{
-		while (s < e)
-		{
-			if (*s == '\'')
-				appendStringInfoString(out, "''");
-			else
-				appendStringInfoChar(out, *s);
-			s++;
-		}
-	}
+		appendBinaryStringInfo(&v, s, (int) (e - s));
 	else											/* "..." or '...': decode escapes */
 	{
 		while (s < e)
 		{
-			if (*s == '\\' && s + 1 < e)
+			uint32		cp;
+			int			nd, k;
+
+			if (!(*s == '\\' && s + 1 < e))
 			{
-				s++;
-				switch (*s)
-				{
-					case 'n': appendStringInfoChar(out, '\n'); break;
-					case 't': appendStringInfoChar(out, '\t'); break;
-					case 'r': appendStringInfoChar(out, '\r'); break;
-					case '\\': appendStringInfoChar(out, '\\'); break;
-					case '\'': appendStringInfoString(out, "''"); break;
-					case '"': appendStringInfoChar(out, '"'); break;
-					default: appendStringInfoChar(out, *s); break;
-				}
-				s++;
+				appendStringInfoChar(&v, *s++);
 				continue;
 			}
-			if (*s == '\'')
-				appendStringInfoString(out, "''");
-			else
-				appendStringInfoChar(out, *s);
 			s++;
+			switch (*s)
+			{
+				case 'a': appendStringInfoChar(&v, '\a'); s++; continue;
+				case 'b': appendStringInfoChar(&v, '\b'); s++; continue;
+				case 'f': appendStringInfoChar(&v, '\f'); s++; continue;
+				case 'n': appendStringInfoChar(&v, '\n'); s++; continue;
+				case 'r': appendStringInfoChar(&v, '\r'); s++; continue;
+				case 't': appendStringInfoChar(&v, '\t'); s++; continue;
+				case 'v': appendStringInfoChar(&v, '\v'); s++; continue;
+				case 'x':
+				case 'u':
+				case 'U':
+					nd = (*s == 'x') ? 2 : (*s == 'u') ? 4 : 8;
+					cp = 0;
+					for (k = 1; k <= nd; k++)
+					{
+						if (s + k >= e || go_hexval(s[k]) < 0)
+							plx_err(g->cx, tk->line, "invalid escape in string literal: %.*s",
+									tk->len, tk->s);
+						cp = cp * 16 + go_hexval(s[k]);
+					}
+					if (cp == 0)
+						plx_err(g->cx, tk->line, "a string cannot contain a NUL character (\\0)");
+					if (*s == 'x')
+						appendStringInfoChar(&v, (char) cp);
+					else
+					{
+						unsigned char buf[MAX_UNICODE_EQUIVALENT_STRING + 1];
+
+						if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+							plx_err(g->cx, tk->line, "invalid Unicode code point in escape: %X", cp);
+						pg_unicode_to_server((pg_wchar) cp, buf);
+						appendStringInfoString(&v, (char *) buf);
+					}
+					s += nd + 1;
+					continue;
+				default:
+					if (*s >= '0' && *s <= '7')
+					{
+						cp = 0;
+						for (k = 0; k < 3; k++)
+						{
+							if (s + k >= e || s[k] < '0' || s[k] > '7')
+								plx_err(g->cx, tk->line, "invalid escape in string literal: %.*s",
+										tk->len, tk->s);
+							cp = cp * 8 + (s[k] - '0');
+						}
+						if (cp == 0)
+							plx_err(g->cx, tk->line, "a string cannot contain a NUL character (\\0)");
+						if (cp > 255)
+							plx_err(g->cx, tk->line, "invalid escape in string literal: %.*s",
+									tk->len, tk->s);
+						appendStringInfoChar(&v, (char) cp);
+						s += 3;
+						continue;
+					}
+					/* \\, \' and \"; Go rejects any other escape */
+					appendStringInfoChar(&v, *s++);
+					continue;
+			}
 		}
+		/* \x and octal escapes are bytes: the result must still be text */
+		(void) pg_verifymbstr(v.data, v.len, false);
 	}
 	appendStringInfoChar(out, '\'');
+	for (i = 0; i < v.len; i++)
+	{
+		if (v.data[i] == '\'')
+			appendStringInfoString(out, "''");
+		else
+			appendStringInfoChar(out, v.data[i]);
+	}
+	appendStringInfoChar(out, '\'');
+	pfree(v.data);
 }
 
 /* emit a Go format string as one SQL format() accepts.
@@ -495,13 +568,13 @@ go_emit_str(GoTok *tk, StringInfo out)
  * format() at run time.
  */
 static void
-go_emit_format_str(GoTok *tk, StringInfo out)
+go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 {
 	StringInfoData raw;
 	int			i;
 
 	initStringInfo(&raw);
-	go_emit_str(tk, &raw);		/* a quoted SQL literal, escapes decoded */
+	go_emit_str(g, tk, &raw);	/* a quoted SQL literal, escapes decoded */
 
 	for (i = 0; i < raw.len; i++)
 	{
@@ -657,7 +730,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	}
 
 	initStringInfo(&raw);
-	go_emit_str(&g->t[lp + 1], &raw);		/* quoted, escapes decoded */
+	go_emit_str(g, &g->t[lp + 1], &raw);	/* quoted, escapes decoded */
 
 	/* count directives so a mismatch can fall back before emitting anything */
 	for (i = 1; i + 1 < raw.len; i++)
@@ -965,7 +1038,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 			}
 			go_sp(out);
 			appendStringInfoString(out, "format(");
-			go_emit_format_str(&g->t[lp + 1], out);
+			go_emit_format_str(g, &g->t[lp + 1], out);
 			if (lp + 2 < close)
 				go_emit_range(g, lp + 2, close, out);
 			appendStringInfoChar(out, ')');
@@ -1131,7 +1204,7 @@ go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 		if (tk->kind == GO_STR)
 		{
 			go_sp(out);
-			go_emit_str(tk, out);
+			go_emit_str(g, tk, out);
 			i++;
 			continue;
 		}

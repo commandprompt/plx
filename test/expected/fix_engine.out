@@ -440,6 +440,25 @@ return "a\0b"
 $$;
 ERROR:  plxruby: a string cannot contain a NUL character (\0)
 DETAIL:  at plxruby source line 2
+-- A11: Go escapes keep their meaning too
+CREATE FUNCTION fe_a11_go() RETURNS text LANGUAGE plxgo AS $$
+return "[\x41][\101][\v][\u00e9][\U0001F600][\a]"
+$$;
+SELECT encode(convert_to(fe_a11_go(), 'UTF8'), 'hex') AS go;
+                      go                      
+----------------------------------------------
+ 5b415d5b415d5b0b5d5bc3a95d5bf09f98805d5b075d
+(1 row)
+
+CREATE FUNCTION fe_a11_nul_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\x00b"
+$$;
+ERROR:  plxgo: a string cannot contain a NUL character (\0)
+DETAIL:  at plxgo source line 2
+CREATE FUNCTION fe_a11_bad_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\xffb"
+$$;
+ERROR:  invalid byte sequence for encoding "UTF8": 0xff
 -- A12: ? and : inside a template literal are text, not a ternary
 CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
 let s = `is it ${x}? yes: no`;

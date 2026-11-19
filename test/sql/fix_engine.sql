@@ -268,6 +268,17 @@ CREATE FUNCTION fe_a11_nul_rb() RETURNS text LANGUAGE plxruby AS $$
 return "a\0b"
 $$;
 
+-- A11: Go escapes keep their meaning too
+CREATE FUNCTION fe_a11_go() RETURNS text LANGUAGE plxgo AS $$
+return "[\x41][\101][\v][\u00e9][\U0001F600][\a]"
+$$;
+SELECT encode(convert_to(fe_a11_go(), 'UTF8'), 'hex') AS go;
+CREATE FUNCTION fe_a11_nul_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\x00b"
+$$;
+CREATE FUNCTION fe_a11_bad_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\xffb"
+$$;
 -- A12: ? and : inside a template literal are text, not a ternary
 CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
 let s = `is it ${x}? yes: no`;
