@@ -87,6 +87,26 @@ CREATE FUNCTION fe_a7_xor_js() RETURNS int LANGUAGE plxjs AS $$
 return 5 ^ 3;
 $$;
 SELECT fe_a7_xor_js();
+-- A7: SQL gives ^, &, | and the shifts one precedence, so a mix that
+-- the dialect would group differently is rejected instead of computed wrong
+CREATE FUNCTION fe_a7_mix_py(a int, b int, c int) RETURNS int LANGUAGE plxpython3 AS $$
+return a ^ b & c
+$$;
+CREATE FUNCTION fe_a7_mix_js(a int, b int) RETURNS int LANGUAGE plxjs AS $$
+return a ^ b << 2;
+$$;
+CREATE FUNCTION fe_a7_mix_php(a int, b int, c int) RETURNS int LANGUAGE plxphp AS $$
+return ($a | $b & $c) + 1;
+$$;
+-- A7: a mix that SQL already groups the same way still works
+CREATE FUNCTION fe_a7_mixok_js(a int, b int, c int) RETURNS int LANGUAGE plxjs AS $$
+return (a & b | c) * 100 + ((a ^ b) & c) * 10 + (a ^ (b << 1));
+$$;
+SELECT fe_a7_mixok_js(1, 3, 2);
+CREATE FUNCTION fe_a7_mixok_rb(a int, b int, c int) RETURNS int LANGUAGE plxruby AS $$
+return a | b ^ c
+$$;
+SELECT fe_a7_mixok_rb(1, 2, 3);
 -- A7: ** is right-associative and binds tighter than unary minus
 CREATE FUNCTION fe_a7_pow_py() RETURNS numeric LANGUAGE plxpython3 AS $$
 return 2 ** 3 ** 2

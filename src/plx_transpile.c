@@ -2301,6 +2301,68 @@ rewrite_pow(Ctx *cx, const char *s, int len, bool boolctx)
 }
 
 /*
+ * Bitwise operators. Ruby, PHP, JS, TS and Python bind the shifts tightest,
+ * then &, then ^, then | (Ruby gives ^ and | one level). SQL gives &, |, #
+ * (XOR), << and >> one level and reads them from left to right. A run of
+ * them computes the same value in SQL only when no operator binds tighter
+ * than the one before it, as in a & b | c. Anything else, such as a ^ b & c,
+ * is rejected: the body must say with parentheses which part goes first.
+ *
+ * bitwise_prec returns the operator's level (higher binds tighter), 0 for an
+ * operator that binds tighter than all of them (arithmetic, unary), or -1 for
+ * one that binds looser and so ends the run (comparison, logic, assignment,
+ * ternary).
+ */
+#define PLX_BW_MAXDEPTH 64
+
+static int
+bitwise_prec(const PlxSurface *surf, const char *op, int ol)
+{
+	int			k;
+
+	if (ol >= 2 && ((op[0] == '&' && op[1] == '&') || (op[0] == '|' && op[1] == '|')))
+		return -1;
+	for (k = 0; k < ol; k++)
+		if (op[k] == '=' || op[k] == '?' || op[k] == ':')
+			return -1;
+	if (ol >= 2 && ((op[0] == '<' && op[1] == '<') || (op[0] == '>' && op[1] == '>')))
+		return 4;
+	switch (op[0])
+	{
+		case '<':
+		case '>':
+			return -1;
+		case '&':
+			return 3;
+		case '^':
+			return surf->interp_hashbrace ? 1 : 2;	/* Ruby: ^ and | tie */
+		case '|':
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+static void
+bitwise_check(Ctx *cx, signed char *prev, int depth, int p)
+{
+	if (depth >= PLX_BW_MAXDEPTH)
+		return;
+	if (p < 0)
+		prev[depth] = 0;
+	else if (p > 0)
+	{
+		if (prev[depth] > 0 && p > prev[depth])
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s: mixed bitwise operators need parentheses: SQL reads &, |, ^, << and >> from left to right",
+							cx->surf->lanname),
+					 errhint("Group the operator that should go first, for example a ^ (b & c).")));
+		prev[depth] = (signed char) p;
+	}
+}
+
+/*
  * rewrite_expr: single left-to-right pass over source; honors strings; never
  * re-scans its own output. boolctx selects OR vs || and negation handling.
  */
@@ -2310,6 +2372,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	const PlxSurface *surf = cx->surf;
 	StringInfoData out;
 	int			i;
+	signed char bw_prev[PLX_BW_MAXDEPTH];	/* see bitwise_prec */
+	int			bw_depth = 0;
+	bool		bw_on = !names_fold_case(cx);
+
+	memset(bw_prev, 0, sizeof(bw_prev));
 
 	/* trim */
 	while (len > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r'))
@@ -2597,6 +2664,16 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				i = j + (s[j] == '?' ? 1 : 2);
 				continue;
 			}
+			/* a word operator binds looser than the bitwise ones */
+			if (bw_on && bw_depth < PLX_BW_MAXDEPTH &&
+				((wl == 2 && (strncmp(s + i, "or", 2) == 0 ||
+							  strncmp(s + i, "if", 2) == 0 ||
+							  strncmp(s + i, "in", 2) == 0 ||
+							  strncmp(s + i, "is", 2) == 0)) ||
+				 (wl == 3 && (strncmp(s + i, "and", 3) == 0 ||
+							  strncmp(s + i, "not", 3) == 0)) ||
+				 (wl == 4 && strncmp(s + i, "else", 4) == 0)))
+				bw_prev[bw_depth] = 0;
 			if ((wl == 3 && strncmp(s + i, "nil", 3) == 0) ||
 				(wl == 4 && strncmp(s + i, "null", 4) == 0) ||
 				(wl == 4 && strncmp(s + i, "None", 4) == 0) ||
@@ -2890,6 +2967,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				int			ol = j - i;
 				const char *op = s + i;
 
+				if (bw_on)
+					bitwise_check(cx, bw_prev, bw_depth, bitwise_prec(surf, op, ol));
+
 				/* -> record/object access (PHP) */
 				if (ol == 2 && strncmp(op, "->", 2) == 0)
 				{
@@ -2957,6 +3037,19 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				i = j;
 				continue;
 			}
+		}
+		if (bw_on)
+		{
+			if (c == '(' || c == '[' || c == '{')
+			{
+				bw_depth++;
+				if (bw_depth < PLX_BW_MAXDEPTH)
+					bw_prev[bw_depth] = 0;
+			}
+			else if ((c == ')' || c == ']' || c == '}') && bw_depth > 0)
+				bw_depth--;
+			else if ((c == ',' || c == ';') && bw_depth < PLX_BW_MAXDEPTH)
+				bw_prev[bw_depth] = 0;
 		}
 		appendStringInfoChar(&out, c);
 		i++;

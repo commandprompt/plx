@@ -243,7 +243,9 @@ assert(n > 0, "must be positive");
   `let ok = a OR b /*:: boolean */;`.
 - Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
   meaning: `2 ** 3 ** 2` is 512. `a ^ b` is bitwise XOR and
-  becomes SQL `a # b`; it works on integers.
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that JavaScript
+  groups differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
 - `null` and `undefined` become `NULL`.
 

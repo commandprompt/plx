@@ -48,6 +48,12 @@ These follow from running as plpgsql and are not specific to any one dialect.
   byte 0, so `CREATE FUNCTION` rejects a string escape that produces it, such as
   `\0` or `\x00`. Other escapes keep the meaning they have in the dialect:
   `"\x41"` is `A` and `"\v"` is a vertical tab.
+- **Parentheses in a mix of bitwise operators.** SQL gives `&`, `|`, `#` (XOR),
+  `<<` and `>>` one precedence and reads them from left to right. In plxruby,
+  plxphp, plxjs, plxts and plxpython3, `CREATE FUNCTION` rejects a mix that the
+  dialect would group differently, such as `a ^ b & c` or `a | b & c`. Write
+  `a ^ (b & c)`. A mix that SQL groups the same way, such as `a & b | c`, is
+  accepted.
 - **One assignment per statement.** In plxruby, plxphp, plxjs, plxts and
   plxpython3, `CREATE FUNCTION` rejects a chained assignment such as
   `a = b = 0`, `a += b = 1` or `a = b <<= 2`. Assign each variable in its own

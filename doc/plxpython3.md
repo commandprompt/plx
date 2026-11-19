@@ -227,7 +227,9 @@ assert n > 0, "must be positive"
 - Boolean: `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
 - Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
   meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
-  becomes SQL `a # b`; it works on integers.
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that Python groups
+  differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
 - Conversions: `str(x)` and `float(x)` become `(x)::text` and
   `(x)::double precision`. `int(x)` becomes `trunc((x)::numeric)::integer`, so
