@@ -7,15 +7,21 @@ That is an expensive place to discover a typo, so the constraints are checked
 here instead.
 
 The checks cover required keys, unknown keys (only x_ custom keys may be
-added), the license identifiers, non-empty text fields, the meta-spec version,
-the prereqs structure and its version ranges, resources, provides, and tags.
-A self-test runs first: it breaks a valid document in known ways and requires
-each break to be reported.
+added), value types, the license identifiers, non-empty text fields, the
+meta-spec version and url, the prereqs structure and its version ranges,
+resources, provides, no_index, release_status and tags. A self-test runs
+first: it breaks a valid document in known ways and requires each break to be
+reported.
 
-The rules mirror the v1 schemas at https://github.com/pgxn/meta. Note that a
-Tag and a Term are not the same: both exclude slash, backslash and control
-characters, but only a Term also excludes spaces, so "sql server" is a valid
-tag and an invalid term.
+The rules mirror the v1 schemas at https://github.com/pgxn/meta. Each pattern
+must match the whole value, as a JSON Schema pattern does. Note that a Tag and
+a Term are not the same: both exclude slash, backslash and control characters,
+but only a Term also excludes spaces, so "sql server" is a valid tag and an
+invalid term.
+
+Not checked: the "uri" and "email" formats (a URL or address only has to be a
+non-empty string), and that a path uses Unix conventions. A provides file must
+exist as a regular file, but a docfile or a no_index path is not looked up.
 
 Run with `make metacheck`.
 """
@@ -30,9 +36,12 @@ META = os.environ.get("PLX_META", os.path.join(HERE, os.pardir, "META.json"))
 
 REQUIRED = ["name", "version", "abstract", "maintainer", "license", "provides",
             "meta-spec"]
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-                    r"(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?"
-                    r"(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$")
+# version.schema.json. Use fullmatch() with these patterns: a JSON Schema
+# pattern does not match before a trailing newline, and Python's $ does.
+SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+                    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+                    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+                    r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?", re.ASCII)
 RELEASE_STATUS = {"stable", "testing", "unstable"}
 
 # Keys a distribution may carry at the top level. Any other key must be a
@@ -48,7 +57,7 @@ LICENSES = {
     "postgresql", "qpl_1_0", "ssleay", "sun", "zlib", "open_source",
     "restricted", "unrestricted", "unknown",
 }
-META_SPEC_VERSION = re.compile(r"^1\.0\.[0-9]+$")
+META_SPEC_VERSION = re.compile(r"1\.0\.[0-9]+")
 META_SPEC_URLS = {"https://pgxn.org/meta/spec.txt", "http://pgxn.org/meta/spec.txt"}
 PREREQ_PHASES = {"configure", "build", "test", "runtime", "develop"}
 PREREQ_RELATIONS = {"requires", "recommends", "suggests", "conflicts"}
@@ -59,9 +68,10 @@ _V = (r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
       r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?"
       r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?")
 _OP = r"(?:(?:[=!]=|[<>]=?)\s*)?"
-VERSION_RANGE = re.compile(r"^(?:" + _OP + "(?:" + _V + "|0))"
-                           r"(?:,\s*" + _OP + _V + ")*$", re.ASCII)
+VERSION_RANGE = re.compile(r"(?:" + _OP + "(?:" + _V + "|0))"
+                           r"(?:,\s*" + _OP + _V + ")*", re.ASCII)
 EXTENSION_KEYS = {"file", "version", "abstract", "docfile", "docpath"}
+NO_INDEX_KEYS = {"file", "directory"}
 RESOURCE_KEYS = {"homepage": None,
                  "bugtracker": {"web", "mailto"},
                  "repository": {"url", "web", "type"}}
@@ -108,6 +118,44 @@ def unknown_keys(obj, allowed, label, errs):
                         "with x_)" % (label, key))
 
 
+def unique(values):
+    """True when no two values are equal. Works for unhashable values."""
+    return len(set(json.dumps(v, sort_keys=True) for v in values)) == len(values)
+
+
+def is_semver(v):
+    return isinstance(v, str) and SEMVER.fullmatch(v) is not None
+
+
+def check_path(value, label, errs):
+    """A Path (path.schema.json): a string of at least two characters."""
+    if not (isinstance(value, str) and len(value) >= 2):
+        errs.append("%s must be a path of at least two characters" % label)
+
+
+def check_no_index(ni, errs):
+    """no_index: file and/or directory, each a path or a non-empty list of
+    unique paths."""
+    if not isinstance(ni, dict):
+        errs.append("no_index must be an object")
+        return
+    unknown_keys(ni, NO_INDEX_KEYS, "no_index", errs)
+    if not NO_INDEX_KEYS & set(ni):
+        errs.append("no_index must name file or directory")
+    for key in sorted(NO_INDEX_KEYS & set(ni)):
+        label = "no_index/%s" % key
+        paths = ni[key]
+        if isinstance(paths, list):
+            if not paths:
+                errs.append("%s must not be an empty list" % label)
+            elif not unique(paths):
+                errs.append("%s must not repeat a path" % label)
+            for i, p in enumerate(paths):
+                check_path(p, "%s[%d]" % (label, i), errs)
+        else:
+            check_path(paths, label, errs)
+
+
 def check_text(m, field, errs):
     """An optional field that, when present, must be a non-empty string."""
     if field in m and not (isinstance(m[field], str) and m[field]):
@@ -124,10 +172,10 @@ def check_license(lic, errs):
     elif isinstance(lic, list):
         if not lic:
             errs.append("license list must not be empty")
-        if len(set(map(json.dumps, lic))) != len(lic):
+        if not unique(lic):
             errs.append("license list must not repeat an entry")
         for x in lic:
-            if x not in LICENSES:
+            if not isinstance(x, str) or x not in LICENSES:
                 errs.append("license %r is not a PGXN license identifier"
                             % (x,))
     elif isinstance(lic, dict):
@@ -169,7 +217,7 @@ def check_prereqs(pre, errs):
             for name, rng in exts.items():
                 check_term(name, "%s key" % rlabel, errs)
                 ok = (rng == 0 and not isinstance(rng, bool)) or \
-                    (isinstance(rng, str) and VERSION_RANGE.match(rng))
+                    (isinstance(rng, str) and VERSION_RANGE.fullmatch(rng))
                 if not ok:
                     errs.append("%s/%s version %r is not a version range "
                                 "(for example 13.0.0 or >= 13.0.0, or 0)"
@@ -193,6 +241,10 @@ def check_resources(res, errs):
             errs.append("resources/%s must be an object" % key)
             continue
         unknown_keys(res[key], RESOURCE_KEYS[key], "resources/%s" % key, errs)
+        for field in sorted(RESOURCE_KEYS[key] & set(res[key])):
+            if not (isinstance(res[key][field], str) and res[key][field]):
+                errs.append("resources/%s/%s must be a non-empty string"
+                            % (key, field))
     if isinstance(res.get("bugtracker"), dict) and \
             not {"web", "mailto"} & set(res["bugtracker"]):
         errs.append("resources/bugtracker must have web or mailto")
@@ -201,6 +253,11 @@ def check_resources(res, errs):
         if "web" not in rep and not {"url", "type"} <= set(rep):
             errs.append("resources/repository must have web, or both url "
                         "and type")
+        # repository.schema.json: type matches ^\p{lower}+$
+        if isinstance(rep.get("type"), str) and \
+                not (rep["type"] and all(c.islower() for c in rep["type"])):
+            errs.append("resources/repository/type %r must be lower-case "
+                        "letters only (for example git)" % rep["type"])
 
 
 def validate(m, base):
@@ -225,8 +282,10 @@ def validate(m, base):
         check_prereqs(m["prereqs"], errs)
     if "resources" in m:
         check_resources(m["resources"], errs)
+    if "no_index" in m:
+        check_no_index(m["no_index"], errs)
 
-    if "version" in m and not SEMVER.match(str(m["version"])):
+    if "version" in m and not is_semver(m["version"]):
         errs.append("version %r is not a semantic version" % m["version"])
 
     if "maintainer" in m:
@@ -247,10 +306,11 @@ def validate(m, base):
             errs.append("meta-spec must carry a version")
         else:
             if not (isinstance(ms["version"], str)
-                    and META_SPEC_VERSION.match(ms["version"])):
+                    and META_SPEC_VERSION.fullmatch(ms["version"])):
                 errs.append("meta-spec version %r must be 1.0.x"
                             % (ms["version"],))
-            if "url" in ms and ms["url"] not in META_SPEC_URLS:
+            if "url" in ms and not (isinstance(ms["url"], str)
+                                    and ms["url"] in META_SPEC_URLS):
                 errs.append("meta-spec url %r must be %s"
                             % (ms["url"], " or ".join(sorted(META_SPEC_URLS))))
             unknown_keys(ms, {"version", "url"}, "meta-spec", errs)
@@ -270,15 +330,18 @@ def validate(m, base):
                                          and ext[field]):
                     errs.append("provides/%s/%s must be a non-empty string"
                                 % (name, field))
+            if "docfile" in ext:
+                check_path(ext["docfile"], "provides/%s/docfile" % name, errs)
             if "file" not in ext:
                 errs.append("provides/%s is missing file" % name)
-            elif not os.path.exists(os.path.join(base,
-                                                 ext["file"])):
-                errs.append("provides/%s names %s, which is not in the "
+            elif not (isinstance(ext["file"], str) and len(ext["file"]) >= 2):
+                check_path(ext["file"], "provides/%s/file" % name, errs)
+            elif not os.path.isfile(os.path.join(base, ext["file"])):
+                errs.append("provides/%s names %s, which is not a file in the "
                             "distribution" % (name, ext["file"]))
             if "version" not in ext:
                 errs.append("provides/%s is missing version" % name)
-            elif not SEMVER.match(str(ext["version"])):
+            elif not is_semver(ext["version"]):
                 errs.append("provides/%s version %r is not a semantic version"
                             % (name, ext["version"]))
 
@@ -287,12 +350,13 @@ def validate(m, base):
         if not isinstance(tags, list) or not tags:
             errs.append("tags must be a non-empty list")
         else:
-            if len(set(tags)) != len(tags):
+            if not unique(tags):
                 errs.append("tags must be unique")
             for i, t in enumerate(tags):
                 check_tag(t, "tags[%d]" % i, errs)
 
-    if "release_status" in m and m["release_status"] not in RELEASE_STATUS:
+    if "release_status" in m and not (isinstance(m["release_status"], str)
+                                      and m["release_status"] in RELEASE_STATUS):
         errs.append("release_status %r must be one of %s"
                     % (m["release_status"], ", ".join(sorted(RELEASE_STATUS))))
 
@@ -350,6 +414,48 @@ SELFTEST = [
         "version": "1.0.0", "docs": "README.md"}}}, "docs"),
     ("duplicate maintainer", {"maintainer": ["a <a@example.org>",
         "a <a@example.org>"]}, "maintainer"),
+    # no_index.schema.json: file and directory only, plus x_ keys.
+    ("no_index", {"no_index": {"file": "src/a.sql",
+        "directory": ["doc", "test"], "x_note": 1}}, None),
+    ("no_index unknown key", {"no_index": {"files": ["src/a.sql"]}}, "'files'"),
+    ("no_index not an object", {"no_index": "x"}, "no_index"),
+    ("no_index without file or directory", {"no_index": {"x_note": 1}},
+        "no_index"),
+    ("no_index empty list", {"no_index": {"file": []}}, "no_index/file"),
+    ("no_index repeated path", {"no_index": {"directory": ["doc", "doc"]}},
+        "no_index/directory"),
+    ("no_index one-character path", {"no_index": {"file": "a"}},
+        "no_index/file"),
+    # bugtracker and repository values are strings; type is lower case.
+    ("repository url not a string", {"resources": {"repository": {
+        "url": 5, "type": "git"}}}, "resources/repository/url"),
+    ("repository type not lower case", {"resources": {"repository": {
+        "url": "https://example.org/a.git", "type": "Git"}}},
+        "resources/repository/type"),
+    ("bugtracker web not a string", {"resources": {"bugtracker": {
+        "web": 7}}}, "resources/bugtracker/web"),
+    # A JSON Schema pattern does not match before a trailing newline, and
+    # Python's $ does, so each pattern must match the whole string.
+    ("meta-spec version with a newline", {"meta-spec": {
+        "version": "1.0.0\n"}}, "meta-spec version"),
+    ("prereq version with a newline", {"prereqs": {"runtime": {"requires":
+        {"PostgreSQL": "13.0.0\n"}}}}, "not a version range"),
+    ("version with a newline", {"version": "1.0.0\n"}, "semantic version"),
+    ("version not a string", {"version": 1}, "semantic version"),
+    # path.schema.json: at least two characters; file must be a file.
+    ("provides empty docfile", {"provides": {"plx": {
+        "file": "test/check_meta.py", "version": "1.0.0", "docfile": ""}}},
+        "provides/plx/docfile"),
+    ("provides empty file", {"provides": {"plx": {"file": "",
+        "version": "1.0.0"}}}, "provides/plx/file"),
+    ("provides file is a directory", {"provides": {"plx": {"file": "test",
+        "version": "1.0.0"}}}, "not a file"),
+    # A value of the wrong type is reported, not a Python traceback.
+    ("license list holding an object", {"license": [{"mit": "x"}]},
+        "license"),
+    ("tags holding an object", {"tags": [{"a": 1}]}, "tags[0]"),
+    ("release_status a list", {"release_status": ["stable"]},
+        "release_status"),
 ]
 
 
@@ -364,7 +470,12 @@ def selftest():
     for what, change, needle in SELFTEST:
         doc = dict(GOOD)
         doc.update(change)
-        errs = validate(doc, base)
+        try:
+            errs = validate(doc, base)
+        except Exception as exc:  # noqa: BLE001 - report, do not crash
+            failures.append("%s: validate() raised %s: %s"
+                            % (what, type(exc).__name__, exc))
+            continue
         if needle is None and errs:
             failures.append("%s: rejected a valid document: %s"
                             % (what, "; ".join(errs)))
