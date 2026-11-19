@@ -297,3 +297,10 @@ DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad() RETURNS void LANGUAGE plxplsq
 DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fxn_plquad2() RETURNS void LANGUAGE plxplsql AS $plx$BEGIN ' || repeat('RAISE_APPLICATION_ERROR(', 80000) || '$plx$'; END $d$;
 RESET check_function_bodies;
 RESET statement_timeout;
+-- A43: the self-read error names the entry that reads the variable
+CREATE FUNCTION fx43_names() RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @a int, @b int;
+  SELECT @a = v, @b = @a * 2 FROM fx43_amt;
+  RETURN @b;
+$$;
+ERROR:  plxtsql: SELECT @b = ... FROM reads @a in its own assignment list; use an aggregate such as SUM() or string_agg() instead

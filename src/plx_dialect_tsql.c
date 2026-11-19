@@ -1255,7 +1255,7 @@ tq_select(Tq *tq, int ind)
 					if (bsearch(&ref, sorted, nassign, sizeof(char *), tq_cmp_name))
 						plx_err(tq->cx, tq->t[j].line,
 								"SELECT @%s = ... FROM reads @%s in its own assignment list; use an aggregate such as SUM() or string_agg() instead",
-								ref, ref);
+								names[k], ref);
 					pfree(ref);
 				}
 			pfree(sorted);
