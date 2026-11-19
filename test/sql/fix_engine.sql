@@ -124,6 +124,12 @@ b = 0
 a += b = 1
 return a + b
 $$;
+-- A8: a chained assignment to a field or element target is rejected too
+CREATE FUNCTION fe_a8_field_js() RETURNS trigger LANGUAGE plxjs AS $$
+let b = 0;
+NEW.x = b = 1;
+return NEW;
+$$;
 -- A8: == in a right-hand side is a comparison, not an assignment
 CREATE FUNCTION fe_a8_ok_rb(x int) RETURNS boolean LANGUAGE plxruby AS $$
 ok = x == 1 #:: boolean
