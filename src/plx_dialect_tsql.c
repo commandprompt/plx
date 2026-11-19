@@ -64,6 +64,7 @@ typedef struct
 	TqTok	   *t;
 	int			nt, pos;
 	int			nsel;			/* hidden SELECT-assignment loop records */
+	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
 } Tq;
 
 static void tq_stmt(Tq *tq, int ind);
@@ -129,6 +130,7 @@ tq_lex(Tq *tq, const char *body)
 
 	while (p < end)
 	{
+		CHECK_FOR_INTERRUPTS();
 		if (*p == '\n')
 		{
 			line++;
@@ -554,21 +556,38 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 	}
 }
 
+/*
+ * Pair every '(' with its ')' once, after lexing. A forward scan from each
+ * '(' (the old tq_match_lp) made unbalanced input such as f(f(f(... cost
+ * O(n^2): every call name rescanned to the end of the range.
+ */
+static void
+tq_pair_parens(Tq *tq)
+{
+	int		   *stack = palloc(sizeof(int) * (tq->nt + 1));
+	int			sp = 0,
+				i;
+
+	tq->match = palloc(sizeof(int) * (tq->nt + 1));
+	for (i = 0; i < tq->nt; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		tq->match[i] = -1;
+		if (tq->t[i].kind == TQ_LP)
+			stack[sp++] = i;
+		else if (tq->t[i].kind == TQ_RP && sp > 0)
+			tq->match[stack[--sp]] = i;
+	}
+	pfree(stack);
+}
+
 /* index of the ')' matching the '(' at lp, within [.,limit), or -1 */
 static int
 tq_match_lp(Tq *tq, int lp, int limit)
 {
-	int			depth = 0,
-				i;
+	int			close = tq->match[lp];
 
-	for (i = lp; i < limit; i++)
-	{
-		if (tq->t[i].kind == TQ_LP)
-			depth++;
-		else if (tq->t[i].kind == TQ_RP && --depth == 0)
-			return i;
-	}
-	return -1;
+	return (close >= 0 && close < limit) ? close : -1;
 }
 
 /* emit a function-call rename for a WORD at index i (followed by '('), or
@@ -745,6 +764,7 @@ tq_emit_range_inner(Tq *tq, int a, int b, StringInfo out)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_VAR)
 		{
 			tq_sp(out);
@@ -900,6 +920,7 @@ tq_value_end(Tq *tq, int from)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_LP)
 			depth++;
 		else if (tk->kind == TQ_RP)
@@ -930,6 +951,7 @@ tq_cond_end(Tq *tq, int from)
 	{
 		TqTok	   *tk = &tq->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (tk->kind == TQ_LP)
 			depth++;
 		else if (tk->kind == TQ_RP)
@@ -1791,6 +1813,7 @@ plx_tsql_parse_body(Ctx *cx)
 	memset(&tq, 0, sizeof(tq));
 	tq.cx = cx;
 	tq_lex(&tq, cx->body);
+	tq_pair_parens(&tq);
 	tq_eat_semi(&tq);
 
 	/* an outer BEGIN..END wrapper is unwrapped (its locals hoist anyway) */

@@ -181,3 +181,9 @@ CREATE FUNCTION fx47_sel() RETURNS text LANGUAGE plxtsql AS $$
   RETURN @s;
 $$;
 SELECT fx47_sel();
+-- A48: unbalanced call parentheses transpile in linear time
+SET statement_timeout = '5s';
+SET check_function_bodies = off;
+DO $d$ BEGIN EXECUTE 'CREATE FUNCTION fx48_quad() RETURNS void LANGUAGE plxtsql AS $plx$DECLARE @x int = 1; SET @x = ' || repeat('f(', 160000) || ';$plx$'; END $d$;
+RESET check_function_bodies;
+RESET statement_timeout;
