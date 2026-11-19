@@ -270,6 +270,70 @@ pl_emit_raw(Pl *pl, int a, int b, StringInfo out)
 						   (int) (pl->t[b - 1].s + pl->t[b - 1].len - pl->t[a].s));
 }
 
+/*
+ * Mark each INTO that needs STRICT. In Oracle, a SELECT ... INTO or an EXECUTE
+ * IMMEDIATE ... INTO that finds no row raises NO_DATA_FOUND, and one that finds
+ * more than one row raises TOO_MANY_ROWS. plpgsql does that only with INTO
+ * STRICT. One forward pass tracks the first word of each statement, the paren
+ * depth and the CASE ... END depth, so only an INTO at the top level of a
+ * SELECT (or WITH) or EXECUTE statement is marked. FETCH ... INTO and DML
+ * RETURNING ... INTO keep their plain INTO, as in Oracle.
+ */
+static bool *
+pl_mark_strict_into(Pl *pl)
+{
+	bool	   *mark = palloc0(sizeof(bool) * (pl->nt + 1));
+	bool		at_start = true;
+	bool		wants = false;	/* current statement is SELECT/WITH/EXECUTE */
+	int			pdepth = 0,
+				cdepth = 0,
+				i;
+
+	for (i = 0; i < pl->nt && pl->t[i].kind != PL_EOF; i++)
+	{
+		PlTok	   *t = &pl->t[i];
+
+		if (at_start)
+		{
+			at_start = false;
+			pdepth = 0;
+			cdepth = 0;
+			wants = pl_ci(t, "SELECT") || pl_ci(t, "WITH") || pl_ci(t, "EXECUTE");
+			/* a CASE statement: its WHEN ... THEN starts a statement list */
+			if (pl_ci(t, "CASE"))
+				continue;
+		}
+		if (pl_punct(t, '('))
+			pdepth++;
+		else if (pl_punct(t, ')'))
+		{
+			if (pdepth > 0)
+				pdepth--;
+		}
+		else if (pl_punct(t, ';'))
+			at_start = true;
+		else if (pdepth > 0)
+			continue;
+		else if (pl_ci(t, "CASE"))
+			cdepth++;
+		else if (pl_ci(t, "END"))
+		{
+			if (cdepth > 0)
+				cdepth--;
+			else
+				at_start = true;
+		}
+		else if (cdepth > 0)
+			continue;
+		else if (pl_ci(t, "BEGIN") || pl_ci(t, "THEN") || pl_ci(t, "ELSE") ||
+				 pl_ci(t, "LOOP") || pl_ci(t, "DECLARE") || pl_ci(t, "EXCEPTION"))
+			at_start = true;
+		else if (wants && pl_ci(t, "INTO"))
+			mark[i] = true;
+	}
+	return mark;
+}
+
 static void
 plx_plsql_parse_body(Ctx *cx)
 {
@@ -279,10 +343,12 @@ plx_plsql_parse_body(Ctx *cx)
 				first;
 	bool		need_declare;
 	bool		in_decls = true;	/* type names map only before the first BEGIN */
+	bool	   *strict_into;
 
 	memset(&pl, 0, sizeof(pl));
 	pl.cx = cx;
 	pl_lex(&pl, cx->body);
+	strict_into = pl_mark_strict_into(&pl);
 
 	/* find the first real token; if the body does not already open with BEGIN or
 	 * DECLARE, its leading declarations need a DECLARE keyword */
@@ -310,6 +376,15 @@ plx_plsql_parse_body(Ctx *cx)
 			 * reference like "SELECT number FROM t" is not rewritten */
 			if (in_decls && pl_ci(t, "BEGIN"))
 				in_decls = false;
+
+			/* SELECT/EXECUTE ... INTO -> INTO STRICT (Oracle row-count errors) */
+			if (strict_into[i])
+			{
+				appendBinaryStringInfo(out, t->s, t->len);
+				appendStringInfoString(out, " STRICT");
+				i++;
+				continue;
+			}
 
 			/* EXECUTE IMMEDIATE -> EXECUTE */
 			if (pl_ci(t, "EXECUTE") && i + 1 < pl.nt && pl_ci(&pl.t[i + 1], "IMMEDIATE"))
