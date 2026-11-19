@@ -867,6 +867,7 @@ cob_decl(Cb *cb)
 	int			ulen = 0;
 	bool		is_array = false;
 	bool		from_pic = false;
+	CbTok	   *occurs = NULL;	/* the OCCURS count token */
 
 	/* level number */
 	if (cob_cur(cb)->kind != CB_NUM)
@@ -1013,6 +1014,7 @@ cob_decl(Cb *cb)
 			cb->pos++;
 			if (cob_cur(cb)->kind != CB_NUM)
 				cob_err(cb, "OCCURS requires a count");
+			occurs = cob_cur(cb);
 			cb->pos++;
 			if (cob_ci(cob_cur(cb), "TIMES"))
 				cb->pos++;
@@ -1044,6 +1046,15 @@ cob_decl(Cb *cb)
 	{
 		if (!l->typ)
 			cob_err(cb, "an OCCURS item needs a PIC or TYPE for its element type");
+		/* VALUE gives every element the value: fill an array of OCCURS n */
+		if (l->init)
+		{
+			if (occurs->len > 9 || memchr(occurs->s, '.', occurs->len))
+				plx_err(cb->cx, occurs->line,
+						"OCCURS count is too large or not an integer");
+			l->init = psprintf("array_fill((%s)::%s, ARRAY[%.*s])",
+							   l->init, l->typ, occurs->len, occurs->s);
+		}
 		l->typ = psprintf("%s[]", l->typ);
 	}
 	if (!l->typ && !l->is_record)

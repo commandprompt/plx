@@ -334,3 +334,14 @@ SELECT fc_a40_giving() AS expect_25004;
         25004
 (1 row)
 
+-- A41: VALUE on an OCCURS item gives every element that value
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) OCCURS 3 TIMES VALUE ZERO.
+01 WS-S PIC X(2) VALUE "ab" OCCURS 2.
+01 WS-N PIC 9(2) OCCURS 2 VALUE NULL.
+PROCEDURE DIVISION.
+    COMPUTE WS-A(2) = WS-A(2) + 5
+    DISPLAY WS-A " " WS-S " " WS-N.
+$$;
+NOTICE:  {0,5,0} {ab,ab} {NULL,NULL}

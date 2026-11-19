@@ -86,8 +86,9 @@ A COBOL 2023 constant uses `CONSTANT AS`:
 ### Tables (arrays)
 
 `OCCURS n [TIMES]` makes an item a table, mapped to a PostgreSQL array of the
-element type (the fixed bound is not enforced). A subscript `WS-ARR(i)` reads or
-writes element `i` (1-based):
+element type (the fixed bound is not enforced). A `VALUE` clause gives each of
+the `n` elements that value; without one the table starts as NULL. A subscript
+`WS-ARR(i)` reads or writes element `i` (1-based):
 
 ```sql
 01 WS-ARR PIC 9(9) OCCURS 5 TIMES.
