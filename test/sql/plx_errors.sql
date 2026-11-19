@@ -379,3 +379,16 @@ class C:
     pass
 return 1
 $$;
+
+-- A54 review: an expression nested too deeply reports the line of its
+-- statement, not line 0
+DO $outer$
+DECLARE body text; d text;
+BEGIN
+	body := 'let x = 1;' || E'\n' || 'return ' || repeat('a ? 1 : ', 600) || '2;';
+	EXECUTE format('CREATE FUNCTION e_a54_js_deepexpr(a bool) RETURNS int LANGUAGE plxjs AS %L', body);
+	RAISE WARNING 'unexpected: creation succeeded';
+EXCEPTION WHEN OTHERS THEN
+	GET STACKED DIAGNOSTICS d = PG_EXCEPTION_DETAIL;
+	RAISE WARNING '% (%)', SQLERRM, d;
+END $outer$;
