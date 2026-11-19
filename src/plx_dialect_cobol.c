@@ -1257,6 +1257,7 @@ static void
 cob_evaluate(Cb *cb, int ind)
 {
 	bool		searched;
+	bool		has_other = false;
 
 	cb->pos++;								/* EVALUATE */
 	searched = cob_ci(cob_cur(cb), "TRUE");
@@ -1286,6 +1287,7 @@ cob_evaluate(Cb *cb, int ind)
 			plx_indent(&cb->cx->out, ind + 1);
 			appendStringInfoString(&cb->cx->out, "ELSE\n");
 			cob_block(cb, ind + 2);
+			has_other = true;
 			break;
 		}
 		if (searched)
@@ -1327,6 +1329,15 @@ cob_evaluate(Cb *cb, int ind)
 		}
 	}
 	cob_expect(cb, "END-EVALUATE");
+	/* no WHEN OTHER: an unmatched EVALUATE is a no-op in COBOL, but a plpgsql
+	 * CASE with no match raises case_not_found */
+	if (!has_other)
+	{
+		plx_indent(&cb->cx->out, ind + 1);
+		appendStringInfoString(&cb->cx->out, "ELSE\n");
+		plx_indent(&cb->cx->out, ind + 2);
+		appendStringInfoString(&cb->cx->out, "NULL;\n");
+	}
 	plx_indent(&cb->cx->out, ind);
 	appendStringInfoString(&cb->cx->out, "END CASE;\n");
 }

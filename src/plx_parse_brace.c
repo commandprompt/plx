@@ -603,6 +603,15 @@ parse_switch_brace(Ctx *cx, int ind)
 	if (when_count == 0)
 		plx_err(cx, line,
 				"switch needs at least one case (a switch with only default is not supported)");
+	/* no default arm: falling through is a no-op in the source language, but a
+	 * plpgsql CASE with no match raises case_not_found */
+	if (!seen_default)
+	{
+		plx_indent(o, ind + 1);
+		appendStringInfoString(o, "ELSE\n");
+		plx_indent(o, ind + 2);
+		appendStringInfoString(o, "NULL;\n");
+	}
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END CASE;\n");
 }

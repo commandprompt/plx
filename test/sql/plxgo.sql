@@ -258,3 +258,13 @@ CREATE FUNCTION g_badverb(x text) RETURNS text LANGUAGE plxgo AS $$
 	return fmt.Sprintf("%' || version() || '", x)
 $$;
 SELECT g_badverb('v');
+
+-- strconv.Itoa converts to text (it used to cast to integer) and strconv.Atoi
+-- to integer
+CREATE FUNCTION g_itoa_len(n int) RETURNS int LANGUAGE plxgo AS $$
+	return len(strconv.Itoa(n))
+$$;
+CREATE FUNCTION g_atoi(s text) RETURNS int LANGUAGE plxgo AS $$
+	return strconv.Atoi(s) + 1
+$$;
+SELECT g_itoa_len(12345), g_atoi('41');

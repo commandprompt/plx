@@ -908,7 +908,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 				/* strconv.Itoa(x) -> (x)::text ; strconv.Atoi(x) -> (x)::integer */
 				if (r[k].pg == NULL)
 				{
-					bool		toint = (meth->len == 4);	/* "Atoi" */
+					bool		toint = (strncmp(meth->s, "Atoi", 4) == 0);
 
 					go_sp(out);
 					appendStringInfoChar(out, '(');

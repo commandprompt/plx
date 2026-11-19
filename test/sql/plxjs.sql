@@ -196,3 +196,11 @@ return b;
 $q$;
 SELECT js_bs_escape() LIKE '%set_config%' AS literal_kept,
        current_setting('plx.test_pwned', true) IS NULL AS not_run;
+-- a switch with no matching case and no default does nothing (plpgsql's CASE
+-- would raise case_not_found)
+CREATE FUNCTION js_sw_nodefault(x int) RETURNS int LANGUAGE plxjs AS $$
+  let r = 0;
+  switch (x) { case 1: r = 10; break; }
+  return r;
+$$;
+SELECT js_sw_nodefault(1), js_sw_nodefault(2);
