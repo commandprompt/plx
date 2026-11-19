@@ -3,7 +3,8 @@
 (so TEMP tables don't collide), output normalized and compared to expected.
 A case that should succeed must produce the expected result rows in the same
 order, with the same values and row counts, and the same NOTICE lines in the
-same order. Only alignment padding and blank lines are ignored.
+same order. Only trailing spaces and blank lines at either end are ignored.
+psql prints NULL and the empty string the same way, so they compare equal.
 Reject-* categories PASS when transpile/exec raises an ERROR.
 
 Usage: python3 test/run_corpus.py
@@ -41,25 +42,29 @@ ERRORISH = ("ERROR:", "CONTEXT:", "DETAIL:", "HINT:", "LINE ", "QUERY:")
 def normalize(s):
     """Split psql output into (rows, messages), each an ordered list.
 
-    rows holds every result line (headers, data rows and row counts) with the
-    alignment padding removed, so "  1 |    20" becomes "1|20". Blank lines and
-    the dashed separator lines are dropped. messages holds the NOTICE,
-    WARNING and INFO lines. psql writes those to stderr and the results to
-    stdout, so their order relative to the rows is not comparable, but the
-    order within each list is. Error lines are left out; the caller checks
-    for an error separately.
+    rows holds every result line: headers, separator lines, data rows, row
+    counts and the blank lines between result sets. psql lays out a result
+    the same way every time, so a line is compared exactly. Only trailing
+    spaces and the blank lines at either end are dropped: inside a line,
+    spaces and dashes can be data. messages holds the NOTICE, WARNING and
+    INFO lines. psql writes those to stderr and the results to stdout, so
+    their order relative to the rows is not comparable, but the order within
+    each list is. Error lines are left out; the caller checks for an error
+    separately.
     """
     rows, messages = [], []
     for ln in s.splitlines():
-        ln = re.sub(r"^psql:[^:]*:\d+: ", "", ln.strip())
+        ln = re.sub(r"^psql:[^:]*:\d+: ", "", ln).rstrip()
         if ln.startswith(MESSAGE):
-            messages.append(" ".join(ln.split()))
+            messages.append(ln)
         elif ln.startswith(ERRORISH):
             continue
-        elif not ln or set(ln) <= set("-+"):
-            continue
         else:
-            rows.append(re.sub(r"\s*\|\s*", "|", ln))
+            rows.append(ln)
+    while rows and not rows[0]:
+        rows.pop(0)
+    while rows and not rows[-1]:
+        rows.pop()
     return rows, messages
 
 def selftest():
@@ -68,7 +73,8 @@ def selftest():
     t = " a | b | c \n---+---+---\n A | B | F\n(1 row)"
     pairs = [
         # (expected, got, should they compare equal?)
-        (t, "  a|b|c\n-+-+-\n  A |  B | F \n(1 row)\n\n", True),
+        # Trailing spaces and blank lines at the end are not output.
+        (t, " a | b | c\n---+---+---\n A | B | F   \n(1 row)\n\n", True),
         (t, " a | b | c \n---+---+---\n F | B | A\n(1 row)", False),
         (" k | v \n---+---\n 1 | 20\n 2 | 60\n(2 rows)",
          " k | v \n---+---\n 1 | 60\n 2 | 20\n(2 rows)", False),
@@ -79,6 +85,17 @@ def selftest():
         ("NOTICE:  a\nNOTICE:  b\n x \n---\n 1\n(1 row)",
          " x \n---\n 1\n(1 row)\nNOTICE:  b\nNOTICE:  a\n", False),
         (" x \n---\n 1\n(1 row)", " x \n---\n 1\n 1\n(2 rows)", False),
+        # Real psql output. A value made only of '-' or '+' is data, not a
+        # separator line.
+        (" s \n---\n +\n(1 row)", " s \n---\n -\n(1 row)\n\n", False),
+        # Spaces inside a value are data, not alignment padding.
+        ("   v   \n-------\n hello\n(1 row)",
+         "     v     \n-----------\n   hello  \n(1 row)\n\n", False),
+        # An empty-string row keeps its place.
+        (" s \n---\n a\n \n b\n(3 rows)",
+         " s \n---\n \n a\n b\n(3 rows)\n\n", False),
+        # Spaces inside a message are part of it.
+        ("NOTICE:  a  b", "NOTICE:  a b\n", False),
     ]
     failures = []
     for want, got, same in pairs:
