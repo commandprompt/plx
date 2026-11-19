@@ -151,6 +151,68 @@ parse_py_while(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/*
+ * True when the variable of an integer for loop must keep its value outside
+ * the loop. A plpgsql integer FOR declares its own loop variable, which hides
+ * any variable of the same name, so after the loop the source variable would
+ * still hold its old value. That matters when the variable is a parameter, or
+ * when any token outside the loop's tokens [a, b) names it. A string token is
+ * checked too, because an interpolation inside it can name the variable. The
+ * match ignores case, so it may report a use that is not one; that only costs
+ * the hidden counter.
+ */
+static bool
+py_loop_var_escapes(Ctx *cx, int var, int a, int b)
+{
+	const Tok  *v = &cx->t[var];
+	int			i;
+
+	if (plx_is_param(cx, v->s, v->len))
+		return true;
+	for (i = 0; cx->t[i].kind != T_EOF; i++)
+	{
+		const Tok  *t = &cx->t[i];
+
+		if (i >= a && i < b)
+			continue;
+		if (t->kind == T_IDENT && t->len == v->len &&
+			pg_strncasecmp(t->s, v->s, v->len) == 0)
+			return true;
+		if (t->kind == T_STRING)
+		{
+			int			j;
+
+			for (j = 0; j + v->len <= t->len; j++)
+				if (pg_strncasecmp(t->s + j, v->s, v->len) == 0 &&
+					(j == 0 || !plx_is_ident(t->s[j - 1])) &&
+					(j + v->len == t->len || !plx_is_ident(t->s[j + v->len])))
+					return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Declare the variable of a counted loop as an integer local (unless it is a
+ * parameter or already typed) and return the hidden counter's name.
+ */
+static char *
+py_loop_counter(Ctx *cx, int var)
+{
+	const Tok  *v = &cx->t[var];
+
+	if (!plx_is_param(cx, v->s, v->len))
+	{
+		PlxLocal2  *l = plx_local_find(cx, v->s, v->len);
+
+		if (!l)
+			l = plx_local_add(cx, v->s, v->len);
+		if (!l->typ && !l->is_record)
+			l->typ = pstrdup("integer");
+	}
+	return psprintf("__plx_for_%d", cx->subq++);
+}
+
 /* for VAR in <range(...)|query(...)|array>: */
 static void
 parse_py_for(Ctx *cx, int ind)
@@ -176,6 +238,9 @@ parse_py_for(Ctx *cx, int ind)
 	{
 		int			as[8], ae[8], after, n;
 		char	   *lo, *hi, *step = NULL;
+		StringInfoData saved;
+		char	   *body;
+		char	   *ctr = NULL;
 
 		n = plx_parse_args(cx, ia, as, ae, 8, &after);
 		if (n == 1)
@@ -192,14 +257,32 @@ parse_py_for(Ctx *cx, int ind)
 		}
 		else
 			plx_err(cx, hd, "range requires 1 to 3 arguments");
-		plx_indent(o, ind);
-		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
-						 cx->t[var].len, cx->t[var].s, lo, hi,
-						 step ? " BY " : "", step ? step : "");
+		/* parse the body first: whether the variable escapes needs its end */
 		cx->pos = colon + 1;
+		saved = cx->out;
+		initStringInfo(&cx->out);
 		cx->loopdepth++;
 		parse_py_block(cx, ind + 1);
 		cx->loopdepth--;
+		body = cx->out.data;
+		cx->out = saved;
+		if (py_loop_var_escapes(cx, var, var - 1, cx->pos))
+			ctr = py_loop_counter(cx, var);
+		plx_indent(o, ind);
+		if (ctr)
+			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n",
+							 ctr, lo, hi, step ? " BY " : "", step ? step : "");
+		else
+			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
+							 cx->t[var].len, cx->t[var].s, lo, hi,
+							 step ? " BY " : "", step ? step : "");
+		if (ctr)
+		{
+			plx_indent(o, ind + 1);
+			appendStringInfo(o, "%.*s := %s;\n", cx->t[var].len, cx->t[var].s, ctr);
+		}
+		appendStringInfoString(o, body);
+		pfree(body);
 	}
 	else if (cx->t[ia].kind == T_IDENT && plx_name_eq(&cx->t[ia], "query") &&
 			 cx->t[ia + 1].kind == T_LPAREN)

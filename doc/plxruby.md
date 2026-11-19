@@ -114,6 +114,10 @@ end
 `next` and `break` map to `CONTINUE` and `EXIT`, and accept a condition modifier
 (`next if i == 3`).
 
+As in Ruby, the variable of a `for` loop keeps its last value after the loop
+ends or after a `break`. If the range is empty, the variable keeps the value it
+had before the loop.
+
 ### Loop labels
 
 ```sql

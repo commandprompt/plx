@@ -77,7 +77,9 @@ else:
 ### Loops
 
 `for ... in range(...)` is an integer loop. `range(n)` is 0 to n-1, `range(a, b)`
-is a to b-1, `range(a, b, step)` adds a step.
+is a to b-1, `range(a, b, step)` adds a step. As in Python, the loop variable
+keeps its last value after the loop ends or after a `break`. If the range is
+empty, the variable keeps the value it had before the loop.
 
 ```sql
 for i in range(1, n + 1):
