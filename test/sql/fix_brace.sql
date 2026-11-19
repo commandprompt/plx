@@ -549,3 +549,6 @@ try {
 $$;
 SELECT fb_rv20(0);
 SELECT prosrc LIKE '%WHEN OTHERS THEN%' AS plain_others FROM pg_proc WHERE proname = 'fb_rv20';
+-- A15: only a switch with a nested break gets a plpgsql label and block
+SELECT proname, prosrc LIKE '%<<__plx_sw_%' AS labelled
+  FROM pg_proc WHERE proname IN ('fb_sw1', 'fb_sw4') ORDER BY proname;
