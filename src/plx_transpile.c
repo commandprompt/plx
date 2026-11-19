@@ -2472,6 +2472,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	const PlxSurface *surf = cx->surf;
 	StringInfoData out;
 	int			i;
+	int			str_out = -1,	/* where the last string's SQL starts in out */
+				str_end = -1;	/* and where it ended in s */
 	signed char bw_prev[PLX_BW_MAXDEPTH];	/* see bitwise_prec */
 	int			bw_depth = 0;
 	bool		bw_on = !names_fold_case(cx);
@@ -2615,10 +2617,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				Tok			nx;
 				int			nj = scan_string(surf, s, len, k, &nx, &cx->interp_plain);
 
+				str_out = out.len;
 				if (nj < 0)
 				{
 					emit_string_value(cx, &st, &out);
-					i = j;
+					i = str_end = j;
 					continue;
 				}
 				appendStringInfoChar(&out, '(');
@@ -2634,6 +2637,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					j = nj;
 				}
 				appendStringInfoChar(&out, ')');
+				str_end = i;
 				continue;
 			}
 		}
@@ -3016,6 +3020,12 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 							  s[i + 5] == '$' || IS_HIGHBIT_SET(s[i + 5]))))
 		{
 			char		k = s[i + 4];
+			/*
+			 * A string just before: its SQL may be a chain such as
+			 * (a)::text || '5' (an interpolation), so take all of it as
+			 * the receiver, not only its last piece.
+			 */
+			bool		after_str = (str_end == i && str_out >= 0);
 
 			if (k == 'i')
 			{
@@ -3023,7 +3033,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				 * Ruby to_i truncates toward zero; a cast to integer rounds.
 				 * Wrap the receiver, already written, in trunc(numeric).
 				 */
-				int			st = last_operand_start(out.data, out.len);
+				int			st = after_str ? str_out : last_operand_start(out.data, out.len);
 				char	   *recv;
 
 				if (st < 0)
@@ -3032,6 +3042,15 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				out.len = st;
 				out.data[st] = '\0';
 				appendStringInfo(&out, "trunc((%s)::numeric)::integer", recv);
+			}
+			else if (after_str)
+			{
+				char	   *recv = pstrdup(out.data + str_out);
+
+				out.len = str_out;
+				out.data[str_out] = '\0';
+				appendStringInfo(&out, "(%s)%s", recv,
+								 k == 's' ? "::text" : "::double precision");
 			}
 			else
 				appendStringInfoString(&out, k == 's' ? "::text" : "::double precision");

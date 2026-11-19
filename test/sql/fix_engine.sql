@@ -465,6 +465,11 @@ CREATE FUNCTION fe_a23_lit_py() RETURNS int LANGUAGE plxpython3 AS $$
 return int("4.7")
 $$;
 SELECT fe_a23_lit_py();
+-- A23: .to_i and .to_f on an interpolated string convert the whole string
+CREATE FUNCTION fe_a23_interp_rb(a int) RETURNS text LANGUAGE plxruby AS $$
+return "#{"#{a}5".to_i * 2} #{"#{a}.5".to_f * 2}"
+$$;
+SELECT fe_a23_interp_rb(1);
 -- A23: int() of a boolean plx cannot see fails; a comparison makes it visible
 CREATE FUNCTION fe_a23_hb_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
 return int(starts_with(s, 'a'))
