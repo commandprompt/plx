@@ -84,3 +84,81 @@ try {
 $$;
 SELECT fb_ct6(0);
 \set VERBOSITY default
+-- A15: a break nested inside a switch arm leaves the switch, not the enclosing loop
+CREATE FUNCTION fb_sw1(n int) RETURNS int LANGUAGE plxjs AS $$
+let total = 0;
+for (let i = 0; i < n; i++) {
+  switch (i) {
+    case 1:
+      if (n > 2) { break; }
+      total = total + 100;
+      break;
+    default:
+      total = total + 1;
+      break;
+  }
+}
+return total;
+$$;
+SELECT fb_sw1(5);
+CREATE FUNCTION fb_sw2(n int) RETURNS int LANGUAGE plxjs AS $$
+let r = 0;
+switch (n) {
+  case 1: if (n > 0) { break; } r = 5; break;
+  default: r = 9; break;
+}
+return r;
+$$;
+SELECT fb_sw2(1), fb_sw2(2);
+CREATE FUNCTION fb_sw3(n int) RETURNS int LANGUAGE plxjs AS $$
+let r = 0;
+switch (n) {
+  case 1:
+    try {
+      if (n > 0) { break; }
+      r = 5;
+    } finally {
+      r = r + 10;
+    }
+    r = r + 100;
+    break;
+  default:
+    r = 9;
+    break;
+}
+return r;
+$$;
+SELECT fb_sw3(1);
+CREATE FUNCTION fb_sw4(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+switch (n) {
+  case 1:
+    for (let i = 0; i < 5; i++) {
+      if (i == 2) { break; }
+      c = c + 1;
+    }
+    c = c + 100;
+    break;
+  default:
+    c = -1;
+    break;
+}
+return c;
+$$;
+SELECT fb_sw4(1);
+CREATE FUNCTION fb_sw5(n int) RETURNS int LANGUAGE plxphp AS $$
+$t = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) {
+    case 1:
+      if ($n > 2) { break; }
+      $t = $t + 100;
+      break;
+    default:
+      $t = $t + 1;
+      break;
+  }
+}
+return $t;
+$$;
+SELECT fb_sw5(5);

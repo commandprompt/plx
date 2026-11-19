@@ -78,6 +78,9 @@ else { $grade = "F"; }
 `switch` lowers to plpgsql `CASE`. Stacked labels become a value list. Each arm
 must end with `break` or a terminating statement (`return`/`throw`); genuine
 fall-through is rejected.
+A `break` inside an `if` or `try` within an arm leaves the `switch`, as it
+does in the source language. A `break` inside a loop within an arm leaves only
+that loop.
 
 ```sql
 switch ($n) {
