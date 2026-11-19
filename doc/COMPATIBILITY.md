@@ -9,6 +9,9 @@ PostgreSQL 13 through 18. CI (`.github/workflows/ci.yml`) runs `make
 installcheck`, `make differentialcheck`, and `make metacheck` on PostgreSQL 13
 through 18 from the PGDG packages on every push and pull request. The 19 and 20
 results were checked manually against source builds and are not part of CI.
+PostgreSQL 19 and later reject `SET standard_conforming_strings = off`, so the
+plx_scs_off suite has two expected outputs: `plx_scs_off.out` for 13 through 18,
+where the off-mode cases run, and `plx_scs_off_1.out` for 19 and later.
 
 | PostgreSQL | Status | string builder |
 |------------|--------|----------------|

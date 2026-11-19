@@ -144,45 +144,8 @@ end
 $$;
 SELECT f_strict() AS strict_no_row;
 
--- a literal with a backslash reads the same whatever standard_conforming_strings
--- the caller uses: generated code writes it as E'...', so with the setting off
--- the backslash cannot swallow the closing quote and run the next literal as code
-CREATE FUNCTION lit_go() RETURNS text LANGUAGE plxgo AS $P$
-a := "C:\\"
-b := "; RAISE EXCEPTION $$go: injected$$; --"
-return a
-$P$;
-CREATE FUNCTION lit_rb() RETURNS text LANGUAGE plxruby AS $P$
-a = 'C:\\'
-b = "; RAISE EXCEPTION $$rb: injected$$; --"
-return a
-$P$;
-CREATE FUNCTION lit_php() RETURNS text LANGUAGE plxphp AS $P$
-$a = 'C:\\';
-$b = '; RAISE EXCEPTION $$php: injected$$; --';
-return $a;
-$P$;
-CREATE FUNCTION lit_tsql() RETURNS varchar LANGUAGE plxtsql AS $P$
-DECLARE @a varchar(10) = 'C:\';
-DECLARE @b varchar(80) = '; RAISE EXCEPTION $$tsql: injected$$; --';
-RETURN @a;
-$P$;
-CREATE FUNCTION lit_plsql() RETURNS text LANGUAGE plxplsql AS $P$
-DECLARE a text := 'C:\'; b text := '; RAISE EXCEPTION $$plsql: injected$$; --';
-BEGIN RETURN a; END;
-$P$;
-CREATE FUNCTION lit_cob() RETURNS text LANGUAGE plxcobol AS $P$
-DATA DIVISION.
-WORKING-STORAGE SECTION.
-01 A PIC X(10) VALUE "C:\".
-01 B PIC X(60) VALUE "; RAISE EXCEPTION $$cob: injected$$; --".
-PROCEDURE DIVISION.
-    RETURN A.
-$P$;
-SET standard_conforming_strings = off;
-SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
-RESET standard_conforming_strings;
-SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
+-- backslash literals and interpolation with standard_conforming_strings = off
+-- are tested in plx_scs_off, which has an alternative output for PostgreSQL 19+
 
 -- interpolation in a SQL argument: a value is bound (or quoted), never spliced
 -- as SQL text, wherever it sits; ident() quotes identifiers, literal() and raw()
@@ -209,9 +172,6 @@ $$;
 SELECT v, tpl_roundtrip(v) AS "rows|comment_ok"
 FROM (VALUES ($x$plain$x$), ($x$it's$x$), ($x$x'); DROP TABLE tpl_t; --$x$),
              ($x$C:\$x$), ($x$a\'b$x$), ($x$$$; RAISE EXCEPTION 'boom'; $$$x$)) AS p(v);
-SET standard_conforming_strings = off;
-SELECT tpl_roundtrip($x$C:\'; DROP TABLE tpl_t; --$x$) AS "rows|comment_ok (scs off)";
-RESET standard_conforming_strings;
 SELECT count(*) AS tpl_t_survives FROM tpl_t;
 
 -- the generated SQL: values become $n after the call's own binds

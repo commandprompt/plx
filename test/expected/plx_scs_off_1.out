@@ -1,0 +1,91 @@
+-- plx with standard_conforming_strings = off. PostgreSQL 13 to 18 accept the
+-- setting; 19 and later reject it with an error, so the statements below then
+-- run with the setting on. expected/plx_scs_off.out is the 13 to 18 output and
+-- expected/plx_scs_off_1.out is the 19 and later output.
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = notice;
+-- a literal with a backslash reads the same whatever standard_conforming_strings
+-- the caller uses: generated code writes it as E'...', so with the setting off
+-- the backslash cannot swallow the closing quote and run the next literal as code
+CREATE FUNCTION lit_go() RETURNS text LANGUAGE plxgo AS $P$
+a := "C:\\"
+b := "; RAISE EXCEPTION $$go: injected$$; --"
+return a
+$P$;
+CREATE FUNCTION lit_rb() RETURNS text LANGUAGE plxruby AS $P$
+a = 'C:\\'
+b = "; RAISE EXCEPTION $$rb: injected$$; --"
+return a
+$P$;
+CREATE FUNCTION lit_php() RETURNS text LANGUAGE plxphp AS $P$
+$a = 'C:\\';
+$b = '; RAISE EXCEPTION $$php: injected$$; --';
+return $a;
+$P$;
+CREATE FUNCTION lit_tsql() RETURNS varchar LANGUAGE plxtsql AS $P$
+DECLARE @a varchar(10) = 'C:\';
+DECLARE @b varchar(80) = '; RAISE EXCEPTION $$tsql: injected$$; --';
+RETURN @a;
+$P$;
+CREATE FUNCTION lit_plsql() RETURNS text LANGUAGE plxplsql AS $P$
+DECLARE a text := 'C:\'; b text := '; RAISE EXCEPTION $$plsql: injected$$; --';
+BEGIN RETURN a; END;
+$P$;
+CREATE FUNCTION lit_cob() RETURNS text LANGUAGE plxcobol AS $P$
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01 A PIC X(10) VALUE "C:\".
+01 B PIC X(60) VALUE "; RAISE EXCEPTION $$cob: injected$$; --".
+PROCEDURE DIVISION.
+    RETURN A.
+$P$;
+SET standard_conforming_strings = off;
+ERROR:  non-standard string literals are not supported
+SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
+ lit_go | lit_rb | lit_php | lit_tsql | lit_plsql | lit_cob 
+--------+--------+---------+----------+-----------+---------
+ C:\    | C:\    | C:\     | C:\      | C:\       | C:\
+(1 row)
+
+RESET standard_conforming_strings;
+SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
+ lit_go | lit_rb | lit_php | lit_tsql | lit_plsql | lit_cob 
+--------+--------+---------+----------+-----------+---------
+ C:\    | C:\    | C:\     | C:\      | C:\       | C:\
+(1 row)
+
+-- an interpolated value is bound (or quoted) with the setting off too: it
+-- round-trips exactly and nothing it contains runs
+CREATE TABLE scs_t (id int, name text);
+INSERT INTO scs_t VALUES (1, 'alice'), (2, 'bob');
+CREATE TABLE scs_log (m text);
+CREATE FUNCTION scs_roundtrip(v text) RETURNS text LANGUAGE plxjs AS $$
+  execute(`DELETE FROM scs_log`);
+  execute(`INSERT INTO scs_log VALUES (${v})`);
+  execute(`INSERT INTO scs_log VALUES ('${v}')`);
+  execute(`INSERT INTO scs_log VALUES ('<${v}>')`);
+  execute(`COMMENT ON TABLE scs_log IS '${v}'`);
+  let r = fetch_one(`SELECT count(*) AS c FROM scs_log
+                     WHERE m = $1 OR m = '<' || $1 || '>'`, v);
+  let d = fetch_one(`SELECT obj_description('scs_log'::regclass) AS d`);
+  return `${r.c}|${d.d = v}`;
+$$;
+SET standard_conforming_strings = off;
+ERROR:  non-standard string literals are not supported
+SELECT scs_roundtrip($x$C:\'; DROP TABLE scs_t; --$x$) AS "rows|comment_ok (scs off)";
+ rows|comment_ok (scs off) 
+---------------------------
+ 3|true
+(1 row)
+
+RESET standard_conforming_strings;
+SELECT count(*) AS scs_t_survives FROM scs_t;
+ scs_t_survives 
+----------------
+              2
+(1 row)
+
+DROP FUNCTION lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob(),
+  scs_roundtrip(text);
+DROP TABLE scs_t, scs_log;
