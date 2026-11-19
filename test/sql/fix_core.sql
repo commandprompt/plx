@@ -214,6 +214,13 @@ DROP EXTENSION plx CASCADE;
 CREATE EXTENSION plx VERSION '2.0.0';
 CREATE TABLE a4_old(v plx_strbuild);
 INSERT INTO a4_old VALUES ('b'), ('a'), ('b');
+-- A4: so do a domain column and a composite-type field made under 2.0.0
+CREATE DOMAIN a4_odom AS plx_strbuild;
+CREATE TABLE a4_old_dom(v a4_odom);
+INSERT INTO a4_old_dom VALUES ('b'), ('a'), ('b');
+CREATE TYPE a4_comp AS (v plx_strbuild);
+CREATE TABLE a4_old_comp(c a4_comp);
+INSERT INTO a4_old_comp VALUES (ROW('b')), (ROW('a')), (ROW('b'));
 -- A4: range types over plx_strbuild made under 2.0.0 get the collation too
 CREATE TYPE a4_rng AS RANGE (subtype = plx_strbuild);
 CREATE DOMAIN a4_rdom AS plx_strbuild;
@@ -223,6 +230,8 @@ ALTER EXTENSION plx UPDATE TO '3.0.0';
 SELECT * FROM plx_fresh EXCEPT SELECT * FROM plx_objects;
 SELECT * FROM plx_objects EXCEPT SELECT * FROM plx_fresh;
 SELECT DISTINCT v FROM a4_old ORDER BY v;
+SELECT DISTINCT v FROM a4_old_dom ORDER BY v;
+SELECT DISTINCT (c).v FROM a4_old_comp ORDER BY 1;
 SELECT rngtypid::regtype, rngcollation FROM pg_range
 WHERE rngtypid IN ('a4_rng'::regtype, 'a4_drng'::regtype) ORDER BY rngtypid::regtype::text;
 SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
