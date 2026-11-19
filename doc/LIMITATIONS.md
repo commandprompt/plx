@@ -44,6 +44,10 @@ These follow from running as plpgsql and are not specific to any one dialect.
   a local or parameter `a`. Rename one of them. SQL folds an unquoted parameter
   name to lower case, so a parameter declared as `userId` may be written
   `userId` in the body, as long as the body always spells it the same way.
+- **No SQL reserved word as a variable name.** plx writes variable names into
+  the generated SQL without quotes. A variable named after a reserved word,
+  such as `array`, passes `CREATE FUNCTION` but fails with a syntax error when
+  the function runs. Rename the variable.
 - **No NUL character in a string.** A PostgreSQL text value cannot hold the
   byte 0, so `CREATE FUNCTION` rejects a string escape that produces it, such as
   `\0` or `\x00`. Other escapes keep the meaning they have in the dialect:

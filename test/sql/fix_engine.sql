@@ -349,6 +349,17 @@ end
 return 0
 $$;
 SELECT fe_a2_row_rb();
+-- A2: a variable named array is not the ARRAY constructor
+CREATE FUNCTION fe_a2_var_php() RETURNS text LANGUAGE plxphp AS $$
+$array = fetch_one("SELECT 'bob'::text AS name");
+return $array['name'];
+$$;
+CREATE FUNCTION fe_a2_var_rb() RETURNS text LANGUAGE plxruby AS $$
+array = fetch_one("SELECT 'bob'::text AS name")
+return array['name']
+$$;
+SELECT proname, prosrc LIKE '%RETURN array.name;%' AS field_read
+FROM pg_proc WHERE proname IN ('fe_a2_var_php', 'fe_a2_var_rb') ORDER BY proname;
 -- A10: PHP "$r->prop" and "$a[key]" interpolate the property or element
 CREATE FUNCTION fe_a10_php(i int) RETURNS text LANGUAGE plxphp AS $$
 $r = fetch_one("SELECT 'bob'::text AS name");

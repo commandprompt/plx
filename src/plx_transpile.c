@@ -799,15 +799,15 @@ is_array_type(const char *typ)
  * name whose type is not known.  It may not for the SQL array constructor
  * ARRAY['x'], for a parameter whose type is known not to be a row type, or for
  * a local declared jsonb, json, hstore or an array: there the subscript is
- * SQL subscripting and passes through unchanged.
+ * SQL subscripting and passes through unchanged. A word written with the
+ * variable sigil ($array), or the name of a parameter or local, is a
+ * variable and never the ARRAY constructor.
  */
 static bool
-field_subscript_ok(Ctx *cx, const char *w, int wl)
+field_subscript_ok(Ctx *cx, const char *w, int wl, bool sigil)
 {
 	PlxLocal2  *l;
 
-	if (wl == 5 && pg_strncasecmp(w, "array", 5) == 0)
-		return false;
 	if (cx->meta && cx->meta->argnames && cx->meta->argtypes)
 	{
 		int			i;
@@ -822,6 +822,8 @@ field_subscript_ok(Ctx *cx, const char *w, int wl)
 		}
 	}
 	l = plx_local_find(cx, w, wl);
+	if (!l && !sigil && wl == 5 && pg_strncasecmp(w, "array", 5) == 0)
+		return false;
 	if (l && !l->is_record && l->typ)
 	{
 		char		buf[64];
@@ -2699,7 +2701,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			i = j;
 
 			/* record subscript: r[:id] / r['id'] / r["id"] -> r.id */
-			if (i < len && s[i] == '[' && field_subscript_ok(cx, s + i - wl, wl))
+			if (i < len && s[i] == '[' && field_subscript_ok(cx, s + i - wl, wl,
+														   surf->var_sigil && i - wl > 0 &&
+														   s[i - wl - 1] == surf->var_sigil))
 			{
 				int			k = i + 1;
 
