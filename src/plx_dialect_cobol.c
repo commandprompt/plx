@@ -1380,12 +1380,28 @@ cob_arith(Cb *cb, int ind)
 		if (strcmp(op, "*") == 0)
 			cob_store(cb, ind, giv ? giv : recv,
 					  psprintf("(%s * %s)", recv, src), rounded);
-		else if (strcmp(op, "/into") == 0)
-			cob_store(cb, ind, giv ? giv : recv,
-					  psprintf("(%s / %s)", recv, src), rounded);
-		else					/* /by : DIVIDE a BY b GIVING g -> g := a / b */
-			cob_store(cb, ind, giv ? giv : recv,
-					  psprintf("(%s / %s)", src, recv), rounded);
+		else
+		{
+			const char *tgt = giv ? giv : recv;
+			const char *br = strchr(tgt, '[');
+			bool		exact;
+
+			/*
+			 * SQL division of two integers drops the fraction before cob_store
+			 * can truncate or round it. For a numeric PICTURE receiver, divide
+			 * as numeric so the quotient keeps its fraction, as in COBOL.
+			 */
+			exact = cob_num_find(cb, tgt, br ? (int) (br - tgt) : (int) strlen(tgt)) &&
+				(br || !cob_is_array(cb, tgt));
+			if (strcmp(op, "/into") == 0)
+				cob_store(cb, ind, tgt,
+						  psprintf(exact ? "((%s)::numeric / %s)" : "(%s / %s)",
+								   recv, src), rounded);
+			else				/* /by : DIVIDE a BY b GIVING g -> g := a / b */
+				cob_store(cb, ind, tgt,
+						  psprintf(exact ? "((%s)::numeric / %s)" : "(%s / %s)",
+								   src, recv), rounded);
+		}
 	}
 }
 

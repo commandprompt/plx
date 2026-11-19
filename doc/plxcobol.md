@@ -213,6 +213,15 @@ This applies to `MOVE`, `COMPUTE`, the four arithmetic verbs, the
 `PERFORM v OVER ARRAY`, and a value stored by `EXECUTE ... INTO`,
 `FETCH-CURSOR`, or `GET`, follow the SQL assignment rule, which rounds.
 
+`DIVIDE` into a numeric `PICTURE` item divides as `numeric`, so the quotient
+keeps its fraction until it is stored: `DIVIDE 2 INTO 7 GIVING WS-M` stores
+3.50 in a `PIC 9V99` item, and `DIVIDE 4 INTO WS-A ROUNDED` stores 1 when
+`WS-A` is 3. In `COMPUTE` and in conditions, `/` follows SQL instead: the
+quotient of two integers is truncated before `ROUNDED` can act, so
+`COMPUTE WS-C ROUNDED = WS-A / WS-B` stores 0 when `WS-A` is 3 and `WS-B`
+is 4. To keep the fraction, make one operand `numeric`, for example
+`WS-A * 1.0 / WS-B`.
+
 ### Iterating a query
 
 `PERFORM <record> OVER "<sql>"` runs the loop body once per row. Field access on
@@ -387,7 +396,9 @@ $$;
 These are intentional. plx pins semantics to SQL and plpgsql.
 
 - Decimal literals infer `numeric`, not a floating-point type.
-- Integer division and modulo follow SQL (truncate toward zero).
+- Integer division and modulo in expressions follow SQL (truncate toward
+  zero). The `DIVIDE` verb into a numeric `PICTURE` item is the exception; see
+  [Assignment and arithmetic](#assignment-and-arithmetic).
 - The number of integer digits in a `PICTURE` is not enforced: a `PIC 9(n)`
   item holds any value of its `integer` or `bigint` type, and a value too large
   for a `numeric(p,s)` item raises an error. COBOL would drop the high-order
