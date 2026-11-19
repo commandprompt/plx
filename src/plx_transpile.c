@@ -2028,9 +2028,9 @@ leading_zero_int(const char *s, int len, int i)
 /*
  * A variable reference [i, j) in expression text s: reject it when it spells a
  * local or a parameter differently from an earlier use (see names_fold_case).
- * Field names (after '.' or '->'), symbols and type names (after ':'), hash
- * keys (before ':') and function names (before '(') are not variables and are
- * skipped.
+ * Field names (after '.' or '->'), symbols and type names (after ':' or a
+ * TypeScript "as"), hash keys (before ':') and function names (before '(')
+ * are not variables and are skipped.
  */
 static void
 note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
@@ -2044,6 +2044,10 @@ note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
 		k--;
 	if (k >= 0 && (s[k] == '.' || s[k] == ':' ||
 				   (s[k] == '>' && k > 0 && s[k - 1] == '-')))
+		return;
+	/* a TypeScript type assertion, x as T: T is a type, not a variable */
+	if (cx->surf->ts_types && k >= 1 && s[k] == 's' && s[k - 1] == 'a' &&
+		(k == 1 || !plx_is_ident(s[k - 2])))
 		return;
 	if (j < len && (s[j] == '(' || (s[j] == ':' && !(j + 1 < len && s[j + 1] == ':'))))
 		return;

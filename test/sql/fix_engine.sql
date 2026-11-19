@@ -70,6 +70,12 @@ for I := 1; I <= 3; I++ {
 }
 return s
 $$;
+-- A5: a TypeScript type after "as" is not a variable
+CREATE FUNCTION fe_a5_as_ts(x int) RETURNS int LANGUAGE plxts AS $$
+let num: number = x as Num;
+return num;
+$$;
+SELECT fe_a5_as_ts(4);
 -- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
 CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
 x = 0755
