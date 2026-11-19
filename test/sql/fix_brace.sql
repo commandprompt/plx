@@ -496,3 +496,20 @@ CREATE FUNCTION fb_rv15(d int) RETURNS text LANGUAGE plxphp AS $$
 try { $r = 0; $r = 10 / $d; return "ok"; } catch (PG::UniqueViolation | DivisionByZeroError) { return "union"; }
 $$;
 SELECT fb_rv15(0);
+-- A19: throw new Error(...) with no semicolon, last in its block, is accepted
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv16(x int) RETURNS int LANGUAGE plxts AS $$
+if (x < 0) {
+  throw new Error("neg")
+}
+return x
+$$;
+SELECT fb_rv16(-1);
+CREATE FUNCTION fb_rv17(x int) RETURNS int LANGUAGE plxjs AS $$
+if (x < 0) {
+  throw new Error(`neg ${x}`)
+}
+return x
+$$;
+SELECT fb_rv17(-2);
+\set VERBOSITY default

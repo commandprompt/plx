@@ -1023,6 +1023,9 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 		cx->pos = call;
 		n = plx_parse_args(cx, call, sa, se, 16, &after);
 		cx->pos = savedpos;
+		/* with no ';' the statement runs on to the '}', past line breaks */
+		while (after < b && cx->t[after].kind == T_NEWLINE)
+			after++;
 		if (after != b)
 			plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
 		plx_indent(&cx->out, ind);

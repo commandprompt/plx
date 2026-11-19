@@ -660,3 +660,22 @@ SELECT fb_rv15(0);
  union
 (1 row)
 
+-- A19: throw new Error(...) with no semicolon, last in its block, is accepted
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv16(x int) RETURNS int LANGUAGE plxts AS $$
+if (x < 0) {
+  throw new Error("neg")
+}
+return x
+$$;
+SELECT fb_rv16(-1);
+ERROR:  neg
+CREATE FUNCTION fb_rv17(x int) RETURNS int LANGUAGE plxjs AS $$
+if (x < 0) {
+  throw new Error(`neg ${x}`)
+}
+return x
+$$;
+SELECT fb_rv17(-2);
+ERROR:  neg -2
+\set VERBOSITY default
