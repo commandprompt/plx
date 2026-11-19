@@ -307,3 +307,30 @@ PROCEDURE DIVISION.
 $$;
 ERROR:  plxcobol: DISPLAY operands must be data names, table elements, or literals
 DETAIL:  at plxcobol source line 3
+-- A40: DIVIDE ... BY without GIVING is rejected instead of overwriting the divisor
+CREATE FUNCTION fc_a40_divby() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) VALUE 100.
+01 WS-B PIC 9(4) VALUE 4.
+PROCEDURE DIVISION.
+    DIVIDE WS-A BY WS-B
+    GOBACK RETURNING WS-B.
+$$;
+ERROR:  plxcobol: DIVIDE ... BY requires GIVING
+DETAIL:  at plxcobol source line 6
+-- A40: DIVIDE ... BY ... GIVING still works
+CREATE FUNCTION fc_a40_giving() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) VALUE 100.
+01 WS-B PIC 9(4) VALUE 4.
+01 WS-Q PIC 9(4) VALUE 0.
+PROCEDURE DIVISION.
+    DIVIDE WS-A BY WS-B GIVING WS-Q
+    GOBACK RETURNING WS-Q * 1000 + WS-B.
+$$;
+SELECT fc_a40_giving() AS expect_25004;
+ expect_25004 
+--------------
+        25004
+(1 row)
+

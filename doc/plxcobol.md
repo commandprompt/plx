@@ -189,6 +189,9 @@ MULTIPLY A BY B GIVING WS-P
 DIVIDE B INTO A GIVING WS-Q
 ```
 
+`DIVIDE a BY b` needs `GIVING`, as in COBOL; without it plx rejects the
+statement. `DIVIDE a INTO b` may omit `GIVING` and stores into `b`.
+
 A value stored into a numeric `PICTURE` item keeps only the fractional digits
 that the `PICTURE` allows, and the rest are truncated, as in COBOL.
 `COMPUTE WS-I = 7.9` stores 7 in a `PIC 9(4)` item, and `MOVE 2.5 TO WS-I`

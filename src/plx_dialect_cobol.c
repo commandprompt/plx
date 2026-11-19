@@ -1353,6 +1353,10 @@ cob_arith(Cb *cb, int ind)
 				cob_err(cb, "GIVING requires a receiving field");
 			rounded = cob_rounded(cb);
 		}
+		/* COBOL has DIVIDE ... BY only with GIVING; without it the divisor
+		 * would be overwritten with the quotient */
+		if (!giv && strcmp(op, "/by") == 0)
+			plx_err(cb->cx, verb->line, "DIVIDE ... BY requires GIVING");
 		if (strcmp(op, "*") == 0)
 			cob_store(cb, ind, giv ? giv : recv,
 					  psprintf("(%s * %s)", recv, src), rounded);
