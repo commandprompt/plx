@@ -96,17 +96,17 @@ SELECT acc_rb(5);
 
 -- the lowered plpgsql uses plx_strbuild + plx_sb_append
 SELECT regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g') FROM pg_proc WHERE proname = 'acc_rb';
-               regexp_replace                
----------------------------------------------
- /*plx:v1:plxruby:9849bb14*/                +
- DECLARE                                    +
-   s plx_strbuild := '';                    +
- BEGIN                                      +
-   FOR i IN 1..n LOOP                       +
-     s := plx_sb_append(s, (i::text)::text);+
-   END LOOP;                                +
-   RETURN s;                                +
- END;                                       +
+                   regexp_replace                   
+----------------------------------------------------
+ /*plx:v1:plxruby:9849bb14*/                       +
+ DECLARE                                           +
+   s public.plx_strbuild := '';                    +
+ BEGIN                                             +
+   FOR i IN 1..n LOOP                              +
+     s := public.plx_sb_append(s, (i::text)::text);+
+   END LOOP;                                       +
+   RETURN s;                                       +
+ END;                                              +
  
 (1 row)
 
@@ -222,3 +222,43 @@ SELECT acc_reset(4);
  Raa
 (1 row)
 
+-- generated code names plx_strbuild/plx_sb_append with the extension's schema,
+-- so a function with a hardened search_path still finds them ...
+CREATE FUNCTION sb_hardened(n int) RETURNS text LANGUAGE plxruby
+  SECURITY DEFINER SET search_path = pg_catalog AS $$
+  s = ""
+  for i in 1..n
+    s << "x"
+  end
+  return s
+$$;
+SELECT sb_hardened(3);
+ sb_hardened 
+-------------
+ xxx
+(1 row)
+
+-- ... and an object of the same name earlier on the path cannot stand in
+CREATE SCHEMA sb_evil;
+CREATE FUNCTION sb_evil.plx_sb_append(plx_strbuild, text) RETURNS plx_strbuild
+  LANGUAGE sql AS $$ SELECT 'hijacked'::text::plx_strbuild $$;
+CREATE FUNCTION sb_path(n int) RETURNS text LANGUAGE plxruby
+  SET search_path = sb_evil, public AS $$
+  s = ""
+  for i in 1..n
+    s << "y"
+  end
+  return s
+$$;
+SELECT sb_path(3);
+ sb_path 
+---------
+ yyy
+(1 row)
+
+DROP SCHEMA sb_evil CASCADE;
+-- the extension is not relocatable, since stored functions name its schema
+CREATE SCHEMA sb_other;
+ALTER EXTENSION plx SET SCHEMA sb_other;
+ERROR:  extension "plx" does not support SET SCHEMA
+DROP SCHEMA sb_other;

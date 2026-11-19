@@ -188,6 +188,7 @@ void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
 void plx_locals_reset(Ctx *cx);
+char *plx_ext_object(const char *name);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */

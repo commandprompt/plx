@@ -2117,10 +2117,10 @@ cob_string_append(Cb *cb, int ind)
 	cb->pos++;
 	l = plx_local_find(cb->cx, tgt, strlen(tgt));
 	if (l && !l->is_record)
-		l->typ = pstrdup("plx_strbuild");	/* the accumulator becomes a builder */
+		l->typ = plx_ext_object("plx_strbuild");	/* the accumulator becomes a builder */
 	plx_indent(&cb->cx->out, ind);
-	appendStringInfo(&cb->cx->out, "%s := plx_sb_append(%s, (%s )::text);\n",
-					 tgt, tgt, v.data);
+	appendStringInfo(&cb->cx->out, "%s := %s(%s, (%s )::text);\n",
+					 tgt, plx_ext_object("plx_sb_append"), tgt, v.data);
 }
 
 static void

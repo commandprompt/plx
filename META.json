@@ -10,9 +10,9 @@
    "provides": {
       "plx": {
          "abstract": "Dialect-pluggable procedural language over plpgsql (Ruby, PHP, JavaScript, TypeScript, Python, Go, COBOL, Oracle PL/SQL, Transact-SQL)",
-         "file": "plx--2.0.0.sql",
+         "file": "plx--2.1.0.sql",
          "docfile": "README.md",
-         "version": "2.0.0"
+         "version": "2.1.0"
       }
    },
    "prereqs": {
