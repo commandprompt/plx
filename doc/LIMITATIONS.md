@@ -233,7 +233,9 @@ immediately. `CREATE FUNCTION` then makes the checks plpgsql makes for its own
 functions. It rejects pseudo-type arguments and results that plpgsql does not
 allow, such as `cstring` or `internal`. When `check_function_bodies` is on (the
 default), it also compiles the generated plpgsql, which rejects syntax errors
-and trigger functions that declare arguments. `pg_restore` turns
-`check_function_bodies` off, as it does for plpgsql. Library calls and
+and trigger functions that declare arguments. This compile takes as long as
+the first call's compile would, which can be seconds for a very large
+function. `pg_restore` turns `check_function_bodies` off, as it does for
+plpgsql. Library calls and
 expressions passed through to SQL are checked for syntax only; names and types
 in them are not checked until the function runs.

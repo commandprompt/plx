@@ -284,7 +284,10 @@ $$;
 SELECT rb_hex();
 
 -- many distinct locals transpile in linear time, even after an over-long name
--- (which used to disable the index); a regression takes tens of seconds
+-- (which used to disable the index); a regression takes tens of seconds.
+-- check_function_bodies is off so that the time limit measures plx's
+-- transpile only, not plpgsql's compile of the generated function.
+SET check_function_bodies = off;
 SET statement_timeout = '20s';
 DO $d$ BEGIN
   EXECUTE 'CREATE FUNCTION rb_many_locals() RETURNS int LANGUAGE plxruby AS $b$'
@@ -295,6 +298,7 @@ END $d$;
 -- (not called: plpgsql's own compile of 60,000 variables is slow, and is not plx's)
 SELECT count(*) FROM pg_proc WHERE proname = 'rb_many_locals';
 RESET statement_timeout;
+RESET check_function_bodies;
 -- a case with no matching when and no else does nothing
 CREATE FUNCTION rb_case_noelse(x int) RETURNS int LANGUAGE plxruby AS $$
   r = 0
