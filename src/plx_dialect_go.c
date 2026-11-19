@@ -1230,6 +1230,25 @@ go_eat_semi(Go *g)
 		g->pos++;
 }
 
+/*
+ * Go's zero value for a declared type, as a SQL literal. NULL when SQL has no
+ * literal for it: a nil slice is already modelled by NULL, and a PostgreSQL
+ * type named in the body has no Go zero value.
+ */
+static const char *
+go_zero_value(const char *typ)
+{
+	if (strcmp(typ, "integer") == 0 || strcmp(typ, "smallint") == 0 ||
+		strcmp(typ, "bigint") == 0 || strcmp(typ, "real") == 0 ||
+		strcmp(typ, "double precision") == 0)
+		return "0";
+	if (strcmp(typ, "text") == 0)
+		return "''";
+	if (strcmp(typ, "boolean") == 0)
+		return "false";
+	return NULL;
+}
+
 /* declare a name with an inferred/explicit type and optional initializer */
 static void
 go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isconst, int ind)
@@ -1270,6 +1289,22 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 			appendStringInfo(&g->cx->out, "%s :=", name);
 			go_emit_range(g, e0, e1, &g->cx->out);
 			appendStringInfoString(&g->cx->out, ";\n");
+		}
+	}
+	else if (!isconst && l->typ)
+	{
+		/*
+		 * Go starts a variable declared without a value at its type's zero
+		 * value, and does so each time the declaration runs: a var inside a
+		 * loop body is reset on every iteration. So assign the zero value at
+		 * the declaration, not in the hoisted DECLARE.
+		 */
+		const char *zero = go_zero_value(l->typ);
+
+		if (zero)
+		{
+			plx_indent(&g->cx->out, ind);
+			appendStringInfo(&g->cx->out, "%s := %s;\n", name, zero);
 		}
 	}
 }

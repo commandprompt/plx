@@ -48,7 +48,7 @@ declarations are translated (see below).
 
 | Go | plpgsql |
 | --- | --- |
-| `var x int` | hoisted to `DECLARE x integer;` |
+| `var x int` | hoisted to `DECLARE x integer;`, plus `x := 0;` (Go's zero value) |
 | `var x int = 5` | `x integer;` plus `x := 5;` |
 | `var x = 5` / `x := 5` | type inferred (`integer`); `x := 5;` |
 | `var ( a int; b string )` | both hoisted |
@@ -58,6 +58,13 @@ declarations are translated (see below).
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
 | `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
+
+A `var` with no value starts at Go's zero value, as in Go: `0` for the
+integer and float types, `""` for `string`, and `false` for `bool`. plx assigns
+the zero value where the declaration stands, so a `var` inside a loop body is
+reset on every iteration. A slice declared without a value is `NULL`, which
+matches Go's nil slice (`len` of it is 0). Any other type, such as `time.Time`
+or a PostgreSQL type name, starts as `NULL`.
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
 literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
