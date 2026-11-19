@@ -1,2 +1,31 @@
 -- Regression tests for bugs found by the 2026-11-19 audit (fix_brace).
 -- Each case names its audit finding (A<n>).
+-- A13: a for-of / foreach over query() with no arguments is rejected, not a crash
+DO LANGUAGE plxjs $$ for (const r of query()) { } $$;
+ERROR:  plxjs: query requires a SQL argument
+DETAIL:  at plxjs source line 1
+DO LANGUAGE plxts $$ for (const r of query()) { } $$;
+ERROR:  plxts: query requires a SQL argument
+DETAIL:  at plxts source line 1
+DO LANGUAGE plxphp $$ foreach (query() as $r) { } $$;
+ERROR:  plxphp: query requires a SQL argument
+DETAIL:  at plxphp source line 1
+SELECT 'A13 backend still alive' AS ok;
+           ok            
+-------------------------
+ A13 backend still alive
+(1 row)
+
+-- N-pyquery: a Python for over query() with no arguments is rejected, not a crash
+DO LANGUAGE plxpython3 $$
+for r in query():
+    pass
+$$;
+ERROR:  plxpython3: query requires a SQL argument
+DETAIL:  at plxpython3 source line 2
+SELECT 'N-pyquery backend still alive' AS ok;
+              ok               
+-------------------------------
+ N-pyquery backend still alive
+(1 row)
+

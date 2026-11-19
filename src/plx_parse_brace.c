@@ -194,6 +194,8 @@ brace_query_loop(Ctx *cx, Tok *var, int ra, int rb, int ind)
 	cx->pos = ra;
 	n = plx_parse_args(cx, ra, sa, se, 16, &after);
 	cx->pos = savedpos;
+	if (n < 1)					/* sa[0]/se[0] are unset when n == 0 */
+		plx_err(cx, cx->t[ra].line, "query requires a SQL argument");
 	if (!plx_is_param(cx, var->s, var->len))
 	{
 		PlxLocal2  *l = plx_local_find(cx, var->s, var->len);

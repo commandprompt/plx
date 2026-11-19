@@ -207,6 +207,8 @@ parse_py_for(Ctx *cx, int ind)
 		int			as[16], ae[16], after, n;
 
 		n = plx_parse_args(cx, ia, as, ae, 16, &after);
+		if (n < 1)				/* as[0]/ae[0] are unset when n == 0 */
+			plx_err(cx, cx->t[ia].line, "query requires a SQL argument");
 		if (!plx_is_param(cx, cx->t[var].s, cx->t[var].len))
 		{
 			PlxLocal2  *l = plx_local_find(cx, cx->t[var].s, cx->t[var].len);
