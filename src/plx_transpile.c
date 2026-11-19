@@ -1844,31 +1844,47 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 
 /* ---------------------------------------------------------------- expr rewrite */
 
+static int	scan_string(const PlxSurface *surf, const char *s, int len, int i,
+						Tok *st, bool *plain);
+
+/*
+ * If a string starts at s[i] (a quote, or a Python f-string's f), return the
+ * index just after it; else -1. The scan understands interpolation, so a
+ * string nested in "#{...}", "${...}" or "{...}" does not end the outer one
+ * early and leave its contents to be read as code.
+ */
+static int
+skip_string(Ctx *cx, const char *s, int len, int i)
+{
+	Tok			st;
+	char		c = s[i];
+
+	if (c == '\'' || c == '"' || c == '`' ||
+		((c == 'f' || c == 'F') && cx->surf->fstrings && i + 1 < len &&
+		 (s[i + 1] == '\'' || s[i + 1] == '"') &&
+		 (i == 0 || !plx_is_ident(s[i - 1]))))
+		return scan_string(cx->surf, s, len, i, &st, &cx->interp_plain);
+	return -1;
+}
+
 /*
  * find a top-level ternary '?' (depth 0, not in a string). A backtick string
  * (a JS/TS template literal) is a string too: its ? and : are text. Returns
  * index or -1.
  */
 static int
-find_ternary_q(const char *s, int len)
+find_ternary_q(Ctx *cx, const char *s, int len)
 {
 	int			i, depth = 0;
 
 	for (i = 0; i < len; i++)
 	{
 		char		c = s[i];
+		int			e = skip_string(cx, s, len, i);
 
-		if (c == '\'' || c == '"' || c == '`')
+		if (e >= 0)
 		{
-			char		q = c;
-
-			i++;
-			while (i < len && s[i] != q)
-			{
-				if (s[i] == '\\')
-					i++;
-				i++;
-			}
+			i = e - 1;
 			continue;
 		}
 		if (c == '(' || c == '[')
@@ -1883,25 +1899,18 @@ find_ternary_q(const char *s, int len)
 
 /* find matching ':' for a ternary at depth 0 after position q */
 static int
-find_ternary_colon(const char *s, int len, int q)
+find_ternary_colon(Ctx *cx, const char *s, int len, int q)
 {
 	int			i, depth = 0, tern = 0;
 
 	for (i = q + 1; i < len; i++)
 	{
 		char		c = s[i];
+		int			e = skip_string(cx, s, len, i);
 
-		if (c == '\'' || c == '"' || c == '`')
+		if (e >= 0)
 		{
-			char		qq = c;
-
-			i++;
-			while (i < len && s[i] != qq)
-			{
-				if (s[i] == '\\')
-					i++;
-				i++;
-			}
+			i = e - 1;
 			continue;
 		}
 		if (c == '(' || c == '[')
@@ -2032,17 +2041,6 @@ note_name_ref(Ctx *cx, const char *s, int len, int i, int j)
  * the power is emitted as ((a) ^ (b)).
  */
 
-/* skip a quoted string starting at s[i]; returns the index after it */
-static int
-skip_quoted(const char *s, int len, int i)
-{
-	char		q = s[i];
-
-	for (i++; i < len && s[i] != q; i++)
-		if (s[i] == '\\' && i + 1 < len)
-			i++;
-	return (i < len) ? i + 1 : len;
-}
 
 /*
  * First ** operator outside strings, or -1 (not **= and not ***). With
@@ -2051,15 +2049,17 @@ skip_quoted(const char *s, int len, int i)
  * or a receiver such as (x ** 2).to_i is never split in two.
  */
 static int
-find_pow(const char *s, int len, bool top_only)
+find_pow(Ctx *cx, const char *s, int len, bool top_only)
 {
 	int			i, depth = 0;
 
 	for (i = 0; i + 1 < len; i++)
 	{
-		if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+		int			e = skip_string(cx, s, len, i);
+
+		if (e >= 0)
 		{
-			i = skip_quoted(s, len, i) - 1;
+			i = e - 1;
 			continue;
 		}
 		if (s[i] == '(' || s[i] == '[')
@@ -2083,15 +2083,17 @@ pow_word_char(char c)
 
 /* index of the bracket that closes the one at s[i], or -1 */
 static int
-group_close(const char *s, int len, int i)
+group_close(Ctx *cx, const char *s, int len, int i)
 {
 	int			depth = 0;
 
 	for (; i < len; i++)
 	{
-		if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+		int			e = skip_string(cx, s, len, i);
+
+		if (e >= 0)
 		{
-			i = skip_quoted(s, len, i) - 1;
+			i = e - 1;
 			continue;
 		}
 		if (s[i] == '(' || s[i] == '[' || s[i] == '{')
@@ -2173,7 +2175,7 @@ pow_left(const char *s, int p, bool dot_is_concat)
  * right-associative, any further ** and its operand.
  */
 static int
-pow_right(const char *s, int len, int i)
+pow_right(Ctx *cx, const char *s, int len, int i)
 {
 	for (;;)
 	{
@@ -2184,8 +2186,8 @@ pow_right(const char *s, int len, int i)
 						   s[i] == '~' || s[i] == '!'))
 			i++;
 		start = i;
-		if (i < len && (s[i] == '\'' || s[i] == '"' || s[i] == '`'))
-			i = skip_quoted(s, len, i);
+		if (i < len && skip_string(cx, s, len, i) >= 0)
+			i = skip_string(cx, s, len, i);
 		else
 			while (i < len && (pow_word_char(s[i]) ||
 							   (s[i] == '.' && i + 1 < len && s[i + 1] >= '0' &&
@@ -2203,9 +2205,11 @@ pow_right(const char *s, int len, int i)
 
 				do
 				{
-					if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+					int			e = skip_string(cx, s, len, i);
+
+					if (e >= 0)
 					{
-						i = skip_quoted(s, len, i);
+						i = e;
 						continue;
 					}
 					if (s[i] == '(' || s[i] == '[')
@@ -2259,14 +2263,14 @@ rewrite_pow(Ctx *cx, const char *s, int len, bool boolctx)
 	initStringInfo(&out);
 	for (;;)
 	{
-		int			p = find_pow(s, len, true);
+		int			p = find_pow(cx, s, len, true);
 		int			l, r;
 		char	   *pre, *a, *b;
 
 		if (p < 0)
 			break;
 		l = pow_left(s, p, cx->surf->concat_op == '.');
-		r = pow_right(s, len, p + 2);
+		r = pow_right(cx, s, len, p + 2);
 		if (l == p || r < 0)
 			break;				/* f(**kw) and the like: leave as before */
 		pre = plx_rewrite_expr(cx, s, l, boolctx);
@@ -2319,11 +2323,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 
 	/* ternary first */
 	{
-		int			q = find_ternary_q(s, len);
+		int			q = find_ternary_q(cx, s, len);
 
 		if (q >= 0)
 		{
-			int			c = find_ternary_colon(s, len, q);
+			int			c = find_ternary_colon(cx, s, len, q);
 
 			if (c > q)
 			{
@@ -2860,9 +2864,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		 */
 		if ((c == '(' || c == '[') && !names_fold_case(cx))
 		{
-			int			e = group_close(s, len, i);
+			int			e = group_close(cx, s, len, i);
 
-			if (e > i && find_pow(s + i + 1, e - i - 1, false) >= 0)
+			if (e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0)
 			{
 				char	   *inner = plx_rewrite_expr(cx, s + i + 1, e - i - 1,
 													 c == '(' ? boolctx : false);

@@ -421,6 +421,15 @@ $r = fetch_one("SELECT 'bob'::text AS name");
 return "{$r["name"]}!";
 $$;
 SELECT fe_a25_php();
+-- A25: ? : and ** inside a string nested in an interpolation are text
+CREATE FUNCTION fe_a25_text_rb(s text) RETURNS text LANGUAGE plxruby AS $$
+return "[#{"a?b:c"}] #{s} #{"x**y"}"
+$$;
+SELECT fe_a25_text_rb('q');
+CREATE FUNCTION fe_a25_tern_rb(n int) RETURNS text LANGUAGE plxruby AS $$
+return n > 0 ? "#{"p:#{n}"}" : "neg"
+$$;
+SELECT fe_a25_tern_rb(2), fe_a25_tern_rb(-1);
 -- A25: deeply nested interpolations stop with an error, not a crash
 \set VERBOSITY terse
 DO $d$ BEGIN
