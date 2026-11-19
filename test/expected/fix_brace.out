@@ -228,3 +228,43 @@ SELECT fb_sw5(5);
       4
 (1 row)
 
+-- N-swlabel: a switch arm may end with a labelled break or with continue
+CREATE FUNCTION fb_sw6(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+outer: for (let i = 0; i < n; i++) {
+  switch (i) {
+    case 2:
+      break outer;
+    default:
+      c = c + 1;
+      break;
+  }
+}
+return c;
+$$;
+SELECT fb_sw6(5);
+ fb_sw6 
+--------
+      2
+(1 row)
+
+CREATE FUNCTION fb_sw7(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n; i++) {
+  switch (i) {
+    case 2:
+      continue;
+    default:
+      c = c + 1;
+      break;
+  }
+  c = c + 10;
+}
+return c;
+$$;
+SELECT fb_sw7(5);
+ fb_sw7 
+--------
+     44
+(1 row)
+

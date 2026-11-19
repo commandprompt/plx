@@ -675,7 +675,9 @@ parse_switch_brace(Ctx *cx, int ind)
 
 				plx_skip_seps(cx);
 				st = &cx->t[cx->pos];
-				if (st->kind == T_KW && st->kw == KW_BREAK)
+				/* a bare break ends the arm; break with a label is a statement */
+				if (st->kind == T_KW && st->kw == KW_BREAK &&
+					cx->t[cx->pos + 1].kind != T_IDENT)
 				{
 					cx->pos++;
 					plx_skip_seps(cx);
@@ -693,7 +695,9 @@ parse_switch_brace(Ctx *cx, int ind)
 				}
 				if (st->kind == T_EOF)
 					plx_err(cx, line, "unterminated switch block");
-				terminated = (st->kind == T_KW && (st->kw == KW_RETURN || st->kw == KW_RAISE));
+				terminated = (st->kind == T_KW &&
+							  (st->kw == KW_RETURN || st->kw == KW_RAISE ||
+							   st->kw == KW_BREAK || st->kw == KW_NEXT));
 				parse_brace_stmt(cx, ind + 2, false);
 			}
 		}
