@@ -223,5 +223,11 @@ part of a function in whichever dialect expresses it best, or drop to a SQL
 statement inside any dialect (all of them pass SQL text through to `query`,
 `execute`, `RETURN QUERY`, and the like). A construct a dialect rejects is
 reported at `CREATE FUNCTION` time with a source line, so those gaps surface
-immediately. Library calls and expressions passed through to SQL are not
-checked until the function runs.
+immediately. `CREATE FUNCTION` then makes the checks plpgsql makes for its own
+functions. It rejects pseudo-type arguments and results that plpgsql does not
+allow, such as `cstring` or `internal`. When `check_function_bodies` is on (the
+default), it also compiles the generated plpgsql, which rejects syntax errors
+and trigger functions that declare arguments. `pg_restore` turns
+`check_function_bodies` off, as it does for plpgsql. Library calls and
+expressions passed through to SQL are checked for syntax only; names and types
+in them are not checked until the function runs.

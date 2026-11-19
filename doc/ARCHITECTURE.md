@@ -43,12 +43,19 @@ validator (in `plx_core.c`, `plx_generic_validator`):
 
 1. Reads the raw dialect body from `pg_proc.prosrc`.
 2. If the text already begins with the plx sentinel (`/*plx:v1:...*/`), it is
-   already plpgsql (a restore or a repeated validation), so it returns without
-   change. This makes the pass idempotent and keeps dump and restore correct.
+   already plpgsql (a restore or a repeated validation), so it skips step 3.
+   This makes the pass idempotent and keeps dump and restore correct.
 3. Otherwise it builds a `PlxFuncMeta` from the pg_proc row (argument names,
    types, and modes via `get_func_arg_info`; return type; `proretset`; prokind),
    calls the dialect's `transpile` function, and rewrites `pg_proc.prosrc` with
    the resulting plpgsql via `CatalogTupleUpdate`.
+4. Makes the checks `plpgsql_validator` makes. It cannot call that function,
+   because `CheckFunctionValidatorAccess` requires a validator to belong to
+   the function's language. It rejects pseudo-type arguments and results that
+   plpgsql does not allow; this check runs first, before step 1. When
+   `check_function_bodies` is on, it test-compiles the stored plpgsql with
+   `plpgsql_compile`, which it looks up in `plpgsql.so` with
+   `load_external_function`.
 
 The stored text is:
 
