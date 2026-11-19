@@ -2044,11 +2044,16 @@ skip_quoted(const char *s, int len, int i)
 	return (i < len) ? i + 1 : len;
 }
 
-/* first ** operator outside strings, or -1 (not **= and not ***) */
+/*
+ * First ** operator outside strings, or -1 (not **= and not ***). With
+ * top_only, a ** inside brackets is skipped: the group it is in is rewritten
+ * on its own (see rewrite_expr_inner), so that a call such as int(x ** 2)
+ * or a receiver such as (x ** 2).to_i is never split in two.
+ */
 static int
-find_pow(const char *s, int len)
+find_pow(const char *s, int len, bool top_only)
 {
-	int			i;
+	int			i, depth = 0;
 
 	for (i = 0; i + 1 < len; i++)
 	{
@@ -2057,6 +2062,12 @@ find_pow(const char *s, int len)
 			i = skip_quoted(s, len, i) - 1;
 			continue;
 		}
+		if (s[i] == '(' || s[i] == '[')
+			depth++;
+		else if ((s[i] == ')' || s[i] == ']') && depth > 0)
+			depth--;
+		if (top_only && depth > 0)
+			continue;
 		if (s[i] == '*' && s[i + 1] == '*' && (i == 0 || s[i - 1] != '*') &&
 			!(i + 2 < len && (s[i + 2] == '*' || s[i + 2] == '=')))
 			return i;
@@ -2068,6 +2079,27 @@ static bool
 pow_word_char(char c)
 {
 	return plx_is_ident(c) || c == '$' || c == '@';
+}
+
+/* index of the bracket that closes the one at s[i], or -1 */
+static int
+group_close(const char *s, int len, int i)
+{
+	int			depth = 0;
+
+	for (; i < len; i++)
+	{
+		if (s[i] == '\'' || s[i] == '"' || s[i] == '`')
+		{
+			i = skip_quoted(s, len, i) - 1;
+			continue;
+		}
+		if (s[i] == '(' || s[i] == '[' || s[i] == '{')
+			depth++;
+		else if ((s[i] == ')' || s[i] == ']' || s[i] == '}') && --depth == 0)
+			return i;
+	}
+	return -1;
 }
 
 /*
@@ -2227,7 +2259,7 @@ rewrite_pow(Ctx *cx, const char *s, int len, bool boolctx)
 	initStringInfo(&out);
 	for (;;)
 	{
-		int			p = find_pow(s, len);
+		int			p = find_pow(s, len, true);
 		int			l, r;
 		char	   *pre, *a, *b;
 
@@ -2821,6 +2853,27 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 			if (i + 1 < len && s[i] == '(' && s[i + 1] == ')')
 				i += 2;
 			continue;
+		}
+		/*
+		 * A bracketed group that holds a **: rewrite it on its own, since
+		 * rewrite_pow only splits an expression at a top-level power.
+		 */
+		if ((c == '(' || c == '[') && !names_fold_case(cx))
+		{
+			int			e = group_close(s, len, i);
+
+			if (e > i && find_pow(s + i + 1, e - i - 1, false) >= 0)
+			{
+				char	   *inner = plx_rewrite_expr(cx, s + i + 1, e - i - 1,
+													 c == '(' ? boolctx : false);
+
+				appendStringInfoChar(&out, c);
+				appendStringInfoString(&out, inner);
+				appendStringInfoChar(&out, s[e]);
+				pfree(inner);
+				i = e + 1;
+				continue;
+			}
 		}
 		/* operator runs */
 		if (strchr("=!<>+-*/%&|?:~^", c))

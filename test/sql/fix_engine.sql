@@ -105,6 +105,19 @@ return 2 ** -1;
 $$;
 SELECT fe_a7_pow_php();
 
+-- A7: a power inside a call or a parenthesized receiver stays inside it
+CREATE FUNCTION fe_a7_powcall_py(x int) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{int(x ** 0.5)} {str(x ** 2)} {float(x ** 2)}"
+$$;
+SELECT fe_a7_powcall_py(17);
+CREATE FUNCTION fe_a7_powrecv_rb(x int) RETURNS int LANGUAGE plxruby AS $$
+return (x ** 2).to_i + (x + 1) * (2 ** x)
+$$;
+SELECT fe_a7_powrecv_rb(3);
+CREATE FUNCTION fe_a7_powarg_js(x int) RETURNS numeric LANGUAGE plxjs AS $$
+return abs(-(x ** 2)) + greatest(1, x ** 3);
+$$;
+SELECT fe_a7_powarg_js(2);
 -- A8: chained assignment a = b = v is rejected, not compiled to a := (b = v)
 CREATE FUNCTION fe_a8_js() RETURNS text LANGUAGE plxjs AS $$
 let a = "x";
