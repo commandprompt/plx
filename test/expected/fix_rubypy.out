@@ -1,0 +1,2 @@
+-- Regression tests for bugs found by the 2026-11-19 audit (fix_rubypy).
+-- Each case names its audit finding (A<n>).
