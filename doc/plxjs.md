@@ -113,6 +113,9 @@ only when the result is the same:
   the step.
 - In a loop without `let`, the code after the loop does not read the loop
   variable before it assigns it again.
+- In a loop without `let` that is inside another loop, the outer loop does
+  not read the loop variable on its next pass before the `for` runs again:
+  not in its condition, and not in its body before the `for`.
 
 `CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
 

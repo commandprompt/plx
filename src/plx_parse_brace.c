@@ -46,6 +46,7 @@ typedef struct BraceBrk
 	int			loopdepth;		/* cx->loopdepth inside the construct */
 	int			fin_id;			/* try-with-finally frame of the construct */
 	int			start;			/* cx->out offset of the construct */
+	int			body_tok;		/* token index of a loop body's '{'; -1 for a switch */
 	char	   *label;			/* plpgsql label, or NULL while none is needed */
 	struct BraceBrk *outer;
 } BraceBrk;
@@ -61,6 +62,7 @@ brk_begin(Ctx *cx, BraceBrk *b, bool is_switch, int start)
 	b->loopdepth = cx->loopdepth + (is_switch ? 0 : 1);
 	b->fin_id = cx->fin ? cx->fin->id : 0;
 	b->start = start;
+	b->body_tok = is_switch ? -1 : cx->pos;
 	b->label = NULL;
 	b->user_label = false;
 	if (!is_switch && pending_label)
@@ -544,6 +546,105 @@ read_after_loop(Ctx *cx, int from, Tok *v)
 	return false;
 }
 
+/* the index of the token that closes the bracket opened at token i */
+static int
+match_close(Ctx *cx, int i, TokKind open, TokKind close)
+{
+	int			depth = 0;
+
+	for (; cx->t[i].kind != T_EOF; i++)
+	{
+		if (cx->t[i].kind == open)
+			depth++;
+		else if (cx->t[i].kind == close && --depth == 0)
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * Is the variable read in [from, to), the part of an enclosing loop's body
+ * that runs again before the for at to? A read counts unless an assignment
+ * at the body's own block level comes first. A counting for over the same
+ * variable nested deeper is skipped: it reads its own copy.
+ */
+static bool
+read_before_for(Ctx *cx, int from, int to, Tok *v)
+{
+	int			i, depth = 0;
+
+	for (i = from; i < to; i++)
+	{
+		Tok		   *t = &cx->t[i];
+		Tok		   *pv;
+		bool		nested_for;
+
+		if (t->kind == T_LBRACE)
+			depth++;
+		else if (t->kind == T_RBRACE)
+			depth = depth > 0 ? depth - 1 : 0;
+		if (!same_ident(t, v))
+			continue;
+		pv = &cx->t[i - 1];
+		nested_for = (pv->kind == T_LPAREN && i > from + 1 &&
+					  cx->t[i - 2].kind == T_KW && cx->t[i - 2].kw == KW_FOR &&
+					  plx_tok_is(&cx->t[i + 1], "="));
+		if (nested_for && depth > 0)
+		{
+			int			rp = match_close(cx, i - 1, T_LPAREN, T_RPAREN);
+			int			rb = (rp > 0 && cx->t[rp + 1].kind == T_LBRACE)
+				? match_close(cx, rp + 1, T_LBRACE, T_RBRACE) : -1;
+
+			if (rb < 0 || rb >= to)
+				return true;
+			i = rb;
+			continue;
+		}
+		if (depth == 0 &&
+			(nested_for || (pv->kind == T_KW && pv->kw == KW_AS) ||
+			 (plx_tok_is(&cx->t[i + 1], "=") &&
+			  (pv->kind == T_SEMI || pv->kind == T_NEWLINE ||
+			   pv->kind == T_LBRACE || pv->kind == T_RBRACE))))
+			return false;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Does a loop around the for at token for_tok read the variable on its next
+ * pass, before the for assigns it again: in the loop header, or in the body
+ * before the for? Each enclosing loop is checked on its own, because an
+ * assignment in an outer body does not run before an inner loop repeats.
+ */
+static bool
+read_by_enclosing_loop(Ctx *cx, int for_tok, Tok *v)
+{
+	BraceBrk   *b;
+
+	for (b = cur_brk; b && b->cx == cx; b = b->outer)
+	{
+		int			i, lp, depth = 0;
+
+		if (b->is_switch || b->body_tok < 1 || cx->t[b->body_tok - 1].kind != T_RPAREN)
+			continue;
+		/* the header: from the '(' that matches the ')' before the body */
+		for (lp = b->body_tok - 1; lp > 0; lp--)
+		{
+			if (cx->t[lp].kind == T_RPAREN)
+				depth++;
+			else if (cx->t[lp].kind == T_LPAREN && --depth == 0)
+				break;
+		}
+		for (i = lp; i < b->body_tok; i++)
+			if (same_ident(&cx->t[i], v))
+				return true;
+		if (read_before_for(cx, b->body_tok + 1, for_tok, v))
+			return true;
+	}
+	return false;
+}
+
 /* C-style counting for, or JS `for (v of query(...))` */
 static void
 parse_for_brace(Ctx *cx, int ind)
@@ -553,6 +654,7 @@ parse_for_brace(Ctx *cx, int ind)
 	int			s1 = -1, s2 = -1, of_at = -1, i, depth = 0;
 	int			line = cx->t[cx->pos].line;
 	int			start;
+	int			for_tok = cx->pos;
 	bool		has_let = false;
 
 	cx->pos++;
@@ -653,6 +755,8 @@ parse_for_brace(Ctx *cx, int ind)
 							cx->t[i].len, cx->t[i].s);
 			if (!has_let && cx->t[be].kind == T_RBRACE && read_after_loop(cx, be + 1, v))
 				plx_err(cx, line, "the loop variable \"%s\" is read after the for loop, but a counting for does not keep its final value; use a while loop", var);
+			if (!has_let && read_by_enclosing_loop(cx, for_tok, v))
+				plx_err(cx, line, "the loop variable \"%s\" is read again by an enclosing loop, but a counting for does not keep its final value; use a while loop", var);
 		}
 		start = o->len;
 		plx_indent(o, ind);

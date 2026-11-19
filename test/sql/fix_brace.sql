@@ -434,3 +434,32 @@ for ($i = 0; $i < $n; $i++) {
 return $c;
 $$;
 \set VERBOSITY default
+-- A17: a for whose variable an enclosing loop reads before the for is rejected
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv6() RETURNS int LANGUAGE plxjs AS $$
+let i = 0; let x = 0; let k = 0;
+while (k < 2) { x = x + i; for (i = 0; i < 3; i++) { } k = k + 1; }
+return x;
+$$;
+CREATE FUNCTION fb_rv7() RETURNS int LANGUAGE plxphp AS $$
+$i = 0; $x = 0; $k = 0;
+while ($k < 2) { $x = $x + $i; for ($i = 0; $i < 3; $i++) { } $k = $k + 1; }
+return $x;
+$$;
+CREATE FUNCTION fb_rv8() RETURNS int LANGUAGE plxjs AS $$
+let i = 0; let k = 0;
+while (i < 3 && k < 5) { for (i = 0; i < 3; i++) { } k = k + 1; }
+return k;
+$$;
+\set VERBOSITY default
+-- an enclosing loop that reads the variable only inside another counting for still compiles
+CREATE FUNCTION fb_rv9() RETURNS int LANGUAGE plxjs AS $$
+let x = 0; let k = 0; let i = 0;
+while (k < 2) {
+  if (k > 0) { for (i = 0; i < 3; i++) { x = x + i; } }
+  for (i = 0; i < 2; i++) { x = x + 10; }
+  k = k + 1;
+}
+return x;
+$$;
+SELECT fb_rv9();

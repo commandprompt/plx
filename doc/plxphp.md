@@ -114,6 +114,9 @@ only when the result is the same:
   the step.
 - The code after the loop does not read the loop variable before it assigns
   it again. A later `for ($i = ...)` assigns it.
+- When the `for` is inside another loop, that loop does not read the loop
+  variable on its next pass before the `for` runs again: not in its condition,
+  and not in its body before the `for`.
 
 `CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
 
