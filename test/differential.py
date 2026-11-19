@@ -234,6 +234,46 @@ def classify(got, expected, entry, call):
     return "unexplained"
 
 
+def compare(cases, results):
+    """Compare every dialect result with its reference result.
+
+    results maps (case name, call) to {tag: probe result}, as probe_all()
+    returns it. Returns (ncmp, nmatch, mismatches, documented, stale):
+    - mismatches: diverged, and nothing says it should
+    - documented: diverged exactly where a documented limitation says
+    - stale: a documented divergence that no longer happens
+    """
+    ncmp = nmatch = 0
+    mismatches = []
+    documented = []
+    stale = []
+    for case in cases:
+        known = case.get("documented", [])
+        for call in case["calls"]:
+            row = results.get((case["name"], call), {})
+            expected = row.get("ref")
+            if expected is None:
+                continue
+            for dialect in case["bodies"]:
+                tag = DIALECTS[dialect]
+                if tag not in row:
+                    continue
+                ncmp += 1
+                entry = find_exemption(known, dialect, call)
+                verdict = classify(row[tag], expected, entry, call)
+                if verdict == "match":
+                    nmatch += 1
+                elif verdict == "stale":
+                    stale.append((case["name"], dialect, call, entry["reason"]))
+                elif verdict == "documented":
+                    documented.append((case["name"], dialect, call,
+                                       entry["reason"]))
+                else:
+                    mismatches.append((case["name"], dialect, call,
+                                       expected, row[tag], entry))
+    return ncmp, nmatch, mismatches, documented, stale
+
+
 def check_exemptions(cases):
     """Every documented divergence must record its outcome for every call."""
     problems = []
@@ -277,6 +317,44 @@ def selftest():
             failures.append("classify(%r, %r, %s) gave %s, want %s"
                             % (got, expected, "exemption" if ent else "None",
                                verdict, want))
+
+    # compare() is the loop main() reports from, so test it as a whole: an
+    # exemption must not cover a result other than the one it documents.
+    case = {"name": "c", "calls": ["1", "2", "3"],
+            "bodies": {"plxruby": "", "plxjs": ""},
+            "documented": [
+                {"dialects": ["plxruby"], "calls": ["1", "2"], "reason": "rb",
+                 "outcome": '{"error" : "42883"}'},
+                {"dialects": ["plxjs"], "calls": ["1"], "reason": "js",
+                 "outcome": '"x"'}]}
+    results = {
+        ("c", "1"): {"ref": '"5"', "rb": '{"error" : "42883"}', "js": '"5"'},
+        ("c", "2"): {"ref": '"6"', "rb": '"wrong"', "js": '"6"'},
+        ("c", "3"): {"ref": '"7"', "rb": '"7"', "js": '"8"'},
+    }
+    ncmp, nmatch, mismatches, documented, stale = compare([case], results)
+    got = (ncmp, nmatch,
+           [(d, c) for _, d, c, _, _, _ in mismatches],
+           [(d, c) for _, d, c, _ in documented],
+           [(d, c) for _, d, c, _ in stale])
+    want = (6, 2, [("plxruby", "2"), ("plxjs", "3")], [("plxruby", "1")],
+            [("plxjs", "1")])
+    if got != want:
+        failures.append("compare() gave (comparisons, matches, unexplained, "
+                        "documented, stale) = %r, want %r" % (got, want))
+
+    # An exemption with no outcome, or no outcome for one of its calls,
+    # must be reported before any case runs.
+    bad = [{"name": "n", "documented": [
+               {"dialects": ["plxruby"], "calls": ["1"], "reason": "r"}]},
+           {"name": "p", "documented": [
+               {"dialects": ["plxjs"], "calls": ["1", "2"], "reason": "r",
+                "outcome": {"1": '"x"'}}]}]
+    got = check_exemptions(bad)
+    want = ["n: documented entry for plxruby has no outcome",
+            "p: documented entry for plxjs has no outcome for call (2)"]
+    if got != want:
+        failures.append("check_exemptions() gave %r, want %r" % (got, want))
     return failures
 
 
@@ -306,35 +384,7 @@ def main():
                 created_ok.add((case["name"], tag))
 
     results = probe_all(created_ok)
-
-    ncmp = nmatch = 0
-    mismatches = []       # diverged, and nothing says it should
-    documented = []       # diverged exactly where a documented limitation says
-    stale = []            # a documented divergence that no longer happens
-    for case in CASES:
-        known = case.get("documented", [])
-        for call in case["calls"]:
-            row = results.get((case["name"], call), {})
-            expected = row.get("ref")
-            if expected is None:
-                continue
-            for dialect in case["bodies"]:
-                tag = DIALECTS[dialect]
-                if tag not in row:
-                    continue
-                ncmp += 1
-                entry = find_exemption(known, dialect, call)
-                verdict = classify(row[tag], expected, entry, call)
-                if verdict == "match":
-                    nmatch += 1
-                elif verdict == "stale":
-                    stale.append((case["name"], dialect, call, entry["reason"]))
-                elif verdict == "documented":
-                    documented.append((case["name"], dialect, call,
-                                       entry["reason"]))
-                else:
-                    mismatches.append((case["name"], dialect, call,
-                                       expected, row[tag], entry))
+    ncmp, nmatch, mismatches, documented, stale = compare(CASES, results)
 
     print("plx differential test")
     print("  cases                : %d" % len(CASES))
