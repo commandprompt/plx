@@ -250,3 +250,33 @@ return "a\0b"
 $$;
 ERROR:  plxruby: a string cannot contain a NUL character (\0)
 DETAIL:  at plxruby source line 2
+-- A12: ? and : inside a template literal are text, not a ternary
+CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
+let s = `is it ${x}? yes: no`;
+return s;
+$$;
+SELECT fe_a12_js(1);
+    fe_a12_js     
+------------------
+ is it 1? yes: no
+(1 row)
+
+CREATE FUNCTION fe_a12_ts() RETURNS text LANGUAGE plxts AS $$
+return `a? b: c`;
+$$;
+SELECT fe_a12_ts();
+ fe_a12_ts 
+-----------
+ a? b: c
+(1 row)
+
+-- A12: a real ternary with template-literal branches still works
+CREATE FUNCTION fe_a12_tern_js(x int) RETURNS text LANGUAGE plxjs AS $$
+return x > 0 ? `pos? ${x}` : `neg: ${x}`;
+$$;
+SELECT fe_a12_tern_js(2), fe_a12_tern_js(-2);
+ fe_a12_tern_js | fe_a12_tern_js 
+----------------+----------------
+ pos? 2         | neg: -2
+(1 row)
+

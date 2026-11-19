@@ -1339,7 +1339,11 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 
 /* ---------------------------------------------------------------- expr rewrite */
 
-/* find a top-level ternary '?' (depth 0, not in string). Returns index or -1. */
+/*
+ * find a top-level ternary '?' (depth 0, not in a string). A backtick string
+ * (a JS/TS template literal) is a string too: its ? and : are text. Returns
+ * index or -1.
+ */
 static int
 find_ternary_q(const char *s, int len)
 {
@@ -1349,7 +1353,7 @@ find_ternary_q(const char *s, int len)
 	{
 		char		c = s[i];
 
-		if (c == '\'' || c == '"')
+		if (c == '\'' || c == '"' || c == '`')
 		{
 			char		q = c;
 
@@ -1382,7 +1386,7 @@ find_ternary_colon(const char *s, int len, int q)
 	{
 		char		c = s[i];
 
-		if (c == '\'' || c == '"')
+		if (c == '\'' || c == '"' || c == '`')
 		{
 			char		qq = c;
 

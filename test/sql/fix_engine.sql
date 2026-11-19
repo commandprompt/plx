@@ -143,3 +143,19 @@ $$;
 CREATE FUNCTION fe_a11_nul_rb() RETURNS text LANGUAGE plxruby AS $$
 return "a\0b"
 $$;
+
+-- A12: ? and : inside a template literal are text, not a ternary
+CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
+let s = `is it ${x}? yes: no`;
+return s;
+$$;
+SELECT fe_a12_js(1);
+CREATE FUNCTION fe_a12_ts() RETURNS text LANGUAGE plxts AS $$
+return `a? b: c`;
+$$;
+SELECT fe_a12_ts();
+-- A12: a real ternary with template-literal branches still works
+CREATE FUNCTION fe_a12_tern_js(x int) RETURNS text LANGUAGE plxjs AS $$
+return x > 0 ? `pos? ${x}` : `neg: ${x}`;
+$$;
+SELECT fe_a12_tern_js(2), fe_a12_tern_js(-2);
