@@ -77,7 +77,9 @@ else:
 ### Loops
 
 `for ... in range(...)` is an integer loop. `range(n)` is 0 to n-1, `range(a, b)`
-is a to b-1, `range(a, b, step)` adds a step.
+is a to b-1, `range(a, b, step)` adds a step. As in Python, the loop variable
+keeps its last value after the loop ends or after a `break`. If the range is
+empty, the variable keeps the value it had before the loop.
 
 ```sql
 for i in range(1, n + 1):
@@ -194,9 +196,15 @@ finally:
     perform("INSERT INTO log(msg) VALUES ('done')")
 ```
 
-`except Exception as e` maps to `WHEN OTHERS`. To catch a specific condition,
-name it with the `PG::` spelling (`except PG::UniqueViolation as e`), which maps
-to `unique_violation`. Accessors: `e.message` to `SQLERRM`, `e.sqlstate` to
+`except Exception as e` and a bare `except:` map to `WHEN OTHERS`. To catch a
+specific condition, name it with the `PG::` spelling (`except PG::UniqueViolation
+as e`), which maps to `unique_violation`. A tuple catches any of its classes:
+`except (PG::UniqueViolation, PG::CheckViolation) as e` maps to
+`WHEN unique_violation OR check_violation`. The known classes are
+`PG::UniqueViolation`, `PG::ForeignKeyViolation`, `PG::NotNullViolation`,
+`PG::CheckViolation`, `PG::NoDataFound`, `PG::RaiseException` and
+`ZeroDivisionError`. Any other class, such as `KeyError`, makes
+`CREATE FUNCTION` fail with `unsupported exception class`. Accessors: `e.message` to `SQLERRM`, `e.sqlstate` to
 `SQLSTATE`, and `e.detail`, `e.hint`, `e.constraint`, `e.column`, `e.table`,
 `e.schema`, `e.datatype` to the matching `GET STACKED DIAGNOSTICS` fields.
 
@@ -319,6 +327,8 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - `match`/`case`.
 - The conditional expression `a if c else b`.
 - The `\N{name}` string escape. Write `\u` or `\U` with the code point.
+- String prefixes other than `f`: raw strings (`r"..."`), byte strings
+  (`b"..."`), `u"..."`, and combined prefixes such as `rf"..."`.
 
 Not translated:
 

@@ -114,6 +114,10 @@ end
 `next` and `break` map to `CONTINUE` and `EXIT`, and accept a condition modifier
 (`next if i == 3`).
 
+As in Ruby, the variable of a `for` loop keeps its last value after the loop
+ends or after a `break`. If the range is empty, the variable keeps the value it
+had before the loop.
+
 ### Loop labels
 
 ```sql
@@ -152,6 +156,14 @@ end
 ```
 
 The loop variable must be annotated with its element type.
+
+`each_with_index do |v, i|` works on a query, an array and a range
+(`(1..n).each_with_index`). The index `i` is an integer that starts at 0. As
+in Ruby, the index exists only inside the block. A parameter or a variable
+with the same name is hidden inside the block
+and keeps its value after the loop. The value and
+the index must have different names. Without `each_with_index`, a block takes
+one variable: `each do |v, i|` is an error.
 
 ### Fetching one row
 

@@ -37,6 +37,7 @@ static void parse_block(Ctx *cx, int ind);
 static void parse_iter(Ctx *cx, int a, int do_pos, int e, int ind);
 static void parse_begin(Ctx *cx, int ind);
 static void parse_case(Ctx *cx, int ind);
+static char *capture_block(Ctx *cx, int ind);
 
 static void
 parse_stmt(Ctx *cx, int indent, bool toplevel)
@@ -158,6 +159,68 @@ parse_loop(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/*
+ * True when the variable of an integer for loop must keep its value outside
+ * the loop. A plpgsql integer FOR declares its own loop variable, which hides
+ * any variable of the same name, so after the loop the source variable would
+ * still hold its old value. That matters when the variable is a parameter, or
+ * when any token outside the loop's tokens [a, b) names it. A string token is
+ * checked too, because an interpolation inside it can name the variable. The
+ * match ignores case, so it may report a use that is not one; that only costs
+ * the hidden counter.
+ */
+static bool
+rb_loop_var_escapes(Ctx *cx, int var, int a, int b)
+{
+	const Tok  *v = &cx->t[var];
+	int			i;
+
+	if (plx_is_param(cx, v->s, v->len))
+		return true;
+	for (i = 0; cx->t[i].kind != T_EOF; i++)
+	{
+		const Tok  *t = &cx->t[i];
+
+		if (i >= a && i < b)
+			continue;
+		if (t->kind == T_IDENT && t->len == v->len &&
+			pg_strncasecmp(t->s, v->s, v->len) == 0)
+			return true;
+		if (t->kind == T_STRING)
+		{
+			int			j;
+
+			for (j = 0; j + v->len <= t->len; j++)
+				if (pg_strncasecmp(t->s + j, v->s, v->len) == 0 &&
+					(j == 0 || !plx_is_ident(t->s[j - 1])) &&
+					(j + v->len == t->len || !plx_is_ident(t->s[j + v->len])))
+					return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Declare the variable of a counted loop as an integer local (unless it is a
+ * parameter or already typed) and return the hidden counter's name.
+ */
+static char *
+rb_loop_counter(Ctx *cx, int var)
+{
+	const Tok  *v = &cx->t[var];
+
+	if (!plx_is_param(cx, v->s, v->len))
+	{
+		PlxLocal2  *l = plx_local_find(cx, v->s, v->len);
+
+		if (!l)
+			l = plx_local_add(cx, v->s, v->len);
+		if (!l->typ && !l->is_record)
+			l->typ = pstrdup("integer");
+	}
+	return psprintf("__plx_for_%d", cx->subq++);
+}
+
 /* integer for:  for V in LO..HI  |  for V in LO...HI */
 static void
 parse_for(Ctx *cx, int ind)
@@ -173,6 +236,8 @@ parse_for(Ctx *cx, int ind)
 	int			i;
 	char	   *lo, *hi;
 	int			hi_a, hi_b;
+	char	   *body;
+	char	   *ctr = NULL;
 
 	if (cx->t[p].kind != T_IDENT)
 		plx_err(cx, hd->line, "for loop expects a variable name");
@@ -205,25 +270,38 @@ parse_for(Ctx *cx, int ind)
 	hi = plx_rewrite_expr(cx, plx_span_text(cx, hi_a, hi_b),
 					  (int) strlen(plx_span_text(cx, hi_a, hi_b)), false);
 	plx_check_loop_var(cx, cx->t[var_a].s, cx->t[var_a].len);
-	plx_indent(o, ind);
-	if (exclusive)
-		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
-						 cx->t[var_a].len, cx->t[var_a].s, lo, hi);
-	else
-		appendStringInfo(o, "FOR %.*s IN %s..%s LOOP\n",
-						 cx->t[var_a].len, cx->t[var_a].s, lo, hi);
 	(void) var_b;
 	cx->pos = e;
 	/* skip the 'do' token if we trimmed it */
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_DO)
 		cx->pos++;
+	/* parse the body first: whether the variable escapes needs its end */
 	cx->loopdepth++;
-	parse_block(cx, ind + 1);
+	body = capture_block(cx, ind + 1);
 	cx->loopdepth--;
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_END)
 		cx->pos++;
 	else
 		plx_err(cx, hd->line, "unterminated for block");
+	if (rb_loop_var_escapes(cx, var_a, start, cx->pos))
+		ctr = rb_loop_counter(cx, var_a);
+	plx_indent(o, ind);
+	if (ctr)
+		appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", ctr, lo,
+						 exclusive ? "(" : "", hi, exclusive ? " - 1)" : "");
+	else if (exclusive)
+		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
+						 cx->t[var_a].len, cx->t[var_a].s, lo, hi);
+	else
+		appendStringInfo(o, "FOR %.*s IN %s..%s LOOP\n",
+						 cx->t[var_a].len, cx->t[var_a].s, lo, hi);
+	if (ctr)
+	{
+		plx_indent(o, ind + 1);
+		appendStringInfo(o, "%.*s := %s;\n", cx->t[var_a].len, cx->t[var_a].s, ctr);
+	}
+	appendStringInfoString(o, body);
+	pfree(body);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
 }
@@ -240,6 +318,40 @@ capture_block(Ctx *cx, int ind)
 	r = cx->out.data;
 	cx->out = saved;
 	return r;
+}
+
+/*
+ * each_with_index: open a nested block that declares the index as an integer
+ * set to -1; rb_index_step adds 1 at the top of each pass, and the caller
+ * closes the block with "END;" after END LOOP. In Ruby a block variable is
+ * local to the block, so the nested declaration must hide a parameter or an
+ * outer local of the same name only inside the loop, and leave it untouched.
+ */
+static void
+rb_index_init(Ctx *cx, int var1_a, int var2_a, int ind)
+{
+	const Tok  *v = &cx->t[var2_a];
+
+	if (v->len == cx->t[var1_a].len &&
+		pg_strncasecmp(v->s, cx->t[var1_a].s, v->len) == 0)
+		plx_err(cx, v->line, "each_with_index block variables must have different names");
+	/* the nested declaration hides a name plpgsql folds to the same: A5 */
+	plx_check_loop_var(cx, v->s, v->len);
+	plx_indent(&cx->out, ind);
+	appendStringInfoString(&cx->out, "DECLARE\n");
+	plx_indent(&cx->out, ind + 1);
+	appendStringInfo(&cx->out, "%.*s integer := -1;\n", v->len, v->s);
+	plx_indent(&cx->out, ind);
+	appendStringInfoString(&cx->out, "BEGIN\n");
+}
+
+static void
+rb_index_step(Ctx *cx, int var2_a, int ind)
+{
+	plx_indent(&cx->out, ind);
+	appendStringInfo(&cx->out, "%.*s := %.*s + 1;\n",
+					 cx->t[var2_a].len, cx->t[var2_a].s,
+					 cx->t[var2_a].len, cx->t[var2_a].s);
 }
 
 /* iterator block: query(...).each do |row| ... end  |  (LO..HI).each do |v| ... end */
@@ -279,6 +391,12 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 	}
 	if (cx->t[vp].kind != T_PIPE)
 		plx_err(cx, cx->t[a].line, "iterator block variable list not closed with |");
+	if (var2_a >= 0 && !with_index)
+		plx_err(cx, cx->t[a].line, "each takes one block variable; use each_with_index for an index");
+
+	if (with_index && var2_a < 0 &&
+		!(cx->t[a].kind == T_IDENT && plx_name_eq(&cx->t[a], "query")))
+		plx_err(cx, cx->t[a].line, "each_with_index requires |value, index|");
 
 	if (cx->t[a].kind == T_IDENT && plx_name_eq(&cx->t[a], "query") &&
 		cx->t[a + 1].kind == T_LPAREN)
@@ -298,17 +416,9 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		}
 		if (with_index)
 		{
-			PlxLocal2  *li;
-
 			if (var2_a < 0)
 				plx_err(cx, cx->t[a].line, "each_with_index requires |row, idx|");
-			li = plx_local_find(cx, cx->t[var2_a].s, cx->t[var2_a].len);
-			if (!li)
-				li = plx_local_add(cx, cx->t[var2_a].s, cx->t[var2_a].len);
-			if (!li->typ)
-				li->typ = pstrdup("integer");
-			plx_indent(o, ind);
-			appendStringInfo(o, "%.*s := -1;\n", cx->t[var2_a].len, cx->t[var2_a].s);
+			rb_index_init(cx, var1_a, var2_a, ind);
 		}
 		plx_indent(o, ind);
 		{
@@ -327,12 +437,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		cx->pos = e;
 		cx->loopdepth++;
 		if (with_index)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfo(o, "%.*s := %.*s + 1;\n",
-							 cx->t[var2_a].len, cx->t[var2_a].s,
-							 cx->t[var2_a].len, cx->t[var2_a].s);
-		}
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
@@ -360,6 +465,8 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		lo = plx_rewrite_expr(cx, lst, (int) strlen(lst), false);
 		hi = plx_rewrite_expr(cx, hst, (int) strlen(hst), false);
 		plx_check_loop_var(cx, cx->t[var1_a].s, cx->t[var1_a].len);
+		if (with_index)
+			rb_index_init(cx, var1_a, var2_a, ind);
 		plx_indent(o, ind);
 		if (excl)
 			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
@@ -369,6 +476,8 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 							 cx->t[var1_a].len, cx->t[var1_a].s, lo, hi);
 		cx->pos = e;
 		cx->loopdepth++;
+		if (with_index)
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
@@ -386,12 +495,16 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 			plx_err(cx, cx->t[a].line,
 					"foreach over an array requires the loop variable to be annotated with its element type before the loop, e.g. \"%.*s #:: int\"",
 					cx->t[var1_a].len, cx->t[var1_a].s);
+		if (with_index)
+			rb_index_init(cx, var1_a, var2_a, ind);
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
 						 cx->t[var1_a].len, cx->t[var1_a].s,
 						 arrx[0] == '[' ? "ARRAY" : "", arrx);
 		cx->pos = e;
 		cx->loopdepth++;
+		if (with_index)
+			rb_index_step(cx, var2_a, ind + 1);
 		parse_block(cx, ind + 1);
 		cx->loopdepth--;
 	}
@@ -403,6 +516,11 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		plx_err(cx, cx->t[a].line, "unterminated iterator block");
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
+	if (with_index)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+	}
 }
 
 /* begin [body] [rescue [Class] [=> e] handler]* [ensure body] end */
