@@ -210,6 +210,18 @@ SELECT fe_a7_xor_js();
             6
 (1 row)
 
+-- A7: Go ^ is XOR or NOT, not a power: plxgo rejects it
+CREATE FUNCTION fe_a7_xor_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
+return a ^ b
+$$;
+ERROR:  plxgo: the operators ^ and &^ are not supported (in SQL, ^ is the power operator)
+DETAIL:  at plxgo source line 2
+CREATE FUNCTION fe_a7_andnot_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
+a &^= b
+return a
+$$;
+ERROR:  plxgo: the operators ^ and &^ are not supported (in SQL, ^ is the power operator)
+DETAIL:  at plxgo source line 2
 -- A7: SQL gives ^, &, | and the shifts one precedence, so a mix that
 -- the dialect would group differently is rejected instead of computed wrong
 CREATE FUNCTION fe_a7_mix_py(a int, b int, c int) RETURNS int LANGUAGE plxpython3 AS $$

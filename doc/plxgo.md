@@ -120,6 +120,7 @@ $$;
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
 | `nil` | `NULL` |
+| `^`, `&^` | not supported: `CREATE FUNCTION` rejects them, because SQL's `^` is a power and SQL has no operator with Go's meaning and precedence for XOR, NOT or AND NOT |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded) |
 | `0755`, `0o755`, `0x1F`, `0b101`, `1_000` | decimal integer (`493`, `493`, `31`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |

@@ -315,6 +315,15 @@ go_lex(Go *g, const char *body)
 			}
 			continue;
 		}
+		/*
+		 * Go's ^ is XOR (binary) or bitwise NOT (unary), and binary ^ binds
+		 * like +. SQL's ^ is the power operator, and its XOR, #, binds looser
+		 * than +, so neither can stand in for it. &^ (AND NOT) has no SQL
+		 * operator at all. Reject them rather than compute something else.
+		 */
+		if (*p == '^' || (p[0] == '&' && p + 1 < end && p[1] == '^'))
+			plx_err(g->cx, line,
+					"the operators ^ and &^ are not supported (in SQL, ^ is the power operator)");
 		{
 			static const char *ops3[] = {"&^=", "<<=", ">>=", "...", NULL};
 			static const char *ops2[] = {
