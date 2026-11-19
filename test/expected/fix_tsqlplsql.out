@@ -130,3 +130,124 @@ SELECT fx45_xor(5, 3) AS xor_6, fx45_len('abc   ') AS len_3, fx45_len('  ab') AS
      6 |     3 |     4
 (1 row)
 
+-- A46: RAISERROR severity 10 or lower prints a notice, and WITH options are consumed
+CREATE FUNCTION fx46_progress(n int) RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @i int = 0;
+  WHILE @i < @n
+  BEGIN
+    RAISERROR('step', 0, 1) WITH NOWAIT;
+    SET @i += 1;
+  END
+  RETURN @i;
+$$;
+SELECT fx46_progress(3);
+NOTICE:  step
+NOTICE:  step
+NOTICE:  step
+ fx46_progress 
+---------------
+             3
+(1 row)
+
+CREATE FUNCTION fx46_info_try() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @r varchar(20) = 'no catch';
+  BEGIN TRY
+    RAISERROR('progress', 10, 1);
+  END TRY
+  BEGIN CATCH
+    SET @r = 'caught';
+  END CATCH
+  RETURN @r;
+$$;
+SELECT fx46_info_try();
+NOTICE:  progress
+ fx46_info_try 
+---------------
+ no catch
+(1 row)
+
+CREATE FUNCTION fx46_raise_nowait(n int) RETURNS int LANGUAGE plxtsql AS $$
+  IF @n = 0
+    RAISERROR('cannot be zero', 16, 1) WITH NOWAIT;
+  RETURN 100 / @n;
+$$;
+SELECT fx46_raise_nowait(4);
+ fx46_raise_nowait 
+-------------------
+                25
+(1 row)
+
+SELECT fx46_raise_nowait(0);
+ERROR:  cannot be zero
+CREATE FUNCTION fx46_sev(s int) RETURNS text LANGUAGE plxtsql AS $$
+  RAISERROR('sev', @s, 1);
+  RETURN 'continued';
+$$;
+SELECT fx46_sev(0);
+NOTICE:  sev
+ fx46_sev  
+-----------
+ continued
+(1 row)
+
+SELECT fx46_sev(16);
+ERROR:  sev
+SELECT fx46_sev(-1);
+ERROR:  sev
+SELECT fx46_sev(NULL);
+ERROR:  sev
+CREATE FUNCTION fx46_neg() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('neg', -5, 1);
+  RETURN 1;
+$$;
+SELECT fx46_neg();
+NOTICE:  neg
+ fx46_neg 
+----------
+        1
+(1 row)
+
+CREATE FUNCTION fx46_neg1() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('neg1', -1, 1);
+  RETURN 1;
+$$;
+SELECT fx46_neg1();
+ERROR:  neg1
+CREATE FUNCTION fx46_log() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('logged', 0, 1) WITH LOG, SETERROR;
+  RETURN 1;
+$$;
+SELECT position('RAISE LOG' in prosrc) > 0 AS has_log FROM pg_proc WHERE proname = 'fx46_log';
+ has_log 
+---------
+ t
+(1 row)
+
+SELECT fx46_log();
+NOTICE:  logged
+ fx46_log 
+----------
+        1
+(1 row)
+
+CREATE FUNCTION fx46_foo() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('x', 0, 1) WITH FOO;
+  RETURN 1;
+$$;
+ERROR:  plxtsql: unknown RAISERROR option: FOO
+CREATE FUNCTION fx46_rethrow() RETURNS int LANGUAGE plxtsql AS $$
+  BEGIN TRY
+    RAISERROR('inner', 16, 1);
+  END TRY
+  BEGIN CATCH
+    RAISERROR(ERROR_MESSAGE(), ERROR_SEVERITY(), ERROR_STATE());
+  END CATCH
+  RETURN 1;
+$$;
+SELECT fx46_rethrow();
+ERROR:  inner
+CREATE FUNCTION fx46_with() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('x', 0, 1) WITH;
+  RETURN 1;
+$$;
+ERROR:  plxtsql: expected option after WITH in RAISERROR

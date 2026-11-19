@@ -35,7 +35,8 @@ PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
 /*   - IF cond stmt|BEGIN..END [ELSE ...]  -> IF cond THEN ... END IF;       */
 /*   - WHILE cond stmt|BEGIN..END          -> WHILE cond LOOP ... END LOOP;  */
 /*   - BEGIN TRY..END TRY BEGIN CATCH..END CATCH -> BEGIN..EXCEPTION..END    */
-/*   - PRINT e -> RAISE NOTICE; RAISERROR/THROW -> RAISE EXCEPTION;          */
+/*   - PRINT e -> RAISE NOTICE; THROW -> RAISE EXCEPTION; RAISERROR ->       */
+/*     RAISE NOTICE (severity 10 or lower) or RAISE EXCEPTION;               */
 /*   - a library of type names (INT, NVARCHAR(n), DATETIME, ...) and         */
 /*     functions (ISNULL, LEN, GETDATE, IIF, CONVERT, ...).                  */
 /* Populates cx->locals + cx->out; the shared assemble path wraps it.       */
@@ -1370,30 +1371,92 @@ tq_return(Tq *tq, int ind)
 	tq_eat_semi(tq);
 }
 
-/* the message argument of RAISERROR(msg, sev, state, ...) or THROW n, msg, s */
+/* the message argument of RAISERROR(msg, sev, state, ...) or THROW n, msg, s,
+ * raised at level ("NOTICE", "LOG" or "EXCEPTION") */
 static void
-tq_raise_msg(Tq *tq, int msg0, int msg1, int ind)
+tq_raise_msg(Tq *tq, int msg0, int msg1, int ind, const char *level)
 {
 	plx_indent(&tq->cx->out, ind);
 	if (msg1 <= msg0)
 	{
-		appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION 'error';\n");
+		appendStringInfo(&tq->cx->out, "RAISE %s 'error';\n", level);
 		return;
 	}
-	appendStringInfoString(&tq->cx->out, "RAISE EXCEPTION '%',");
+	appendStringInfo(&tq->cx->out, "RAISE %s '%%',", level);
 	tq_emit_range(tq, msg0, msg1, &tq->cx->out);
 	appendStringInfoString(&tq->cx->out, ";\n");
 }
 
-/* RAISERROR ( msg , severity , state [, args] ) */
+/* how a RAISERROR severity argument [a,b) decides the RAISE level */
+typedef enum
+{
+	TQ_SEV_NOTICE,				/* literal 10 or lower (but not -1) */
+	TQ_SEV_EXCEPTION,			/* literal 11 or higher, -1, ERROR_SEVERITY() */
+	TQ_SEV_RUNTIME				/* any other expression: test it at run time */
+} TqSev;
+
+static TqSev
+tq_severity(Tq *tq, int a, int b)
+{
+	bool		neg = false;
+	long		v = 0;
+	int			k;
+
+	if (a >= b)
+		return TQ_SEV_EXCEPTION;		/* no severity (malformed): as before */
+
+	/* ERROR_SEVERITY(): only an error reaches a CATCH block, so the caught
+	 * severity is always 11 or higher (and PostgreSQL has no such function) */
+	if (b - a == 3 && tq_ci(&tq->t[a], "ERROR_SEVERITY") &&
+		tq->t[a + 1].kind == TQ_LP && tq->t[a + 2].kind == TQ_RP)
+		return TQ_SEV_EXCEPTION;
+
+	/* an integer literal with an optional unary minus */
+	if (tq->t[a].kind == TQ_OP && tq->t[a].len == 1 && tq->t[a].s[0] == '-')
+	{
+		neg = true;
+		a++;
+	}
+	if (b - a != 1 || tq->t[a].kind != TQ_NUM)
+		return TQ_SEV_RUNTIME;
+	for (k = 0; k < tq->t[a].len; k++)
+	{
+		char		c = tq->t[a].s[k];
+
+		if (c < '0' || c > '9')
+			return TQ_SEV_RUNTIME;
+		if (v < 1000000)		/* cap: only the comparison with 10 matters */
+			v = v * 10 + (c - '0');
+	}
+	if (neg)
+		v = -v;
+	/* -1 means the severity stored for the message, which plx cannot look
+	 * up, so it fails safe; any other negative counts as 0 */
+	if (v == -1)
+		return TQ_SEV_EXCEPTION;
+	return v <= 10 ? TQ_SEV_NOTICE : TQ_SEV_EXCEPTION;
+}
+
+/*
+ * RAISERROR ( msg , severity , state [, args] ) [WITH option [, ...]]
+ *
+ * As in SQL Server, a severity of 10 or lower is an informational message
+ * (RAISE NOTICE, which a CATCH block does not catch) and 11 or higher raises
+ * an error. WITH NOWAIT and WITH SETERROR need no translation; WITH LOG adds
+ * RAISE LOG.
+ */
 static void
 tq_raiserror(Tq *tq, int ind)
 {
 	int			lp,
 				close,
 				depth = 0,
-				comma = -1,
+				c1 = -1,
+				c2 = -1,
+				msg1,
 				j;
+	bool		want_log = false;
+	TqSev		sev;
 
 	tq->pos++;								/* RAISERROR */
 	lp = tq->pos;
@@ -1410,12 +1473,67 @@ tq_raiserror(Tq *tq, int ind)
 			depth--;
 		else if (tq->t[j].kind == TQ_COMMA && depth == 0)
 		{
-			comma = j;
-			break;
+			if (c1 < 0)
+				c1 = j;
+			else
+			{
+				c2 = j;
+				break;
+			}
 		}
 	}
-	tq_raise_msg(tq, lp + 1, comma > 0 ? comma : close, ind);
+	msg1 = c1 > 0 ? c1 : close;
+	sev = c1 > 0 ? tq_severity(tq, c1 + 1, c2 > 0 ? c2 : close) : TQ_SEV_EXCEPTION;
 	tq->pos = close + 1;
+
+	/* WITH NOWAIT | LOG | SETERROR [, ...]: never left as a stray statement */
+	if (tq_ci(tq_cur(tq), "WITH"))
+	{
+		tq->pos++;
+		for (;;)
+		{
+			TqTok	   *o = tq_cur(tq);
+
+			if (o->kind != TQ_WORD)
+				tq_err(tq, "expected option after WITH in RAISERROR");
+			if (tq_ci(o, "LOG"))
+				want_log = true;
+			else if (!tq_ci(o, "NOWAIT") && !tq_ci(o, "SETERROR"))
+				plx_err(tq->cx, o->line, "unknown RAISERROR option: %.*s",
+						o->len, o->s);
+			tq->pos++;
+			if (tq_cur(tq)->kind != TQ_COMMA)
+				break;
+			tq->pos++;
+		}
+	}
+
+	/* WITH LOG: the message expression is emitted (and evaluated) a second
+	 * time; harmless for the literals and variables RAISERROR takes */
+	if (want_log)
+		tq_raise_msg(tq, lp + 1, msg1, ind, "LOG");
+	if (sev == TQ_SEV_RUNTIME)
+	{
+		int			s0 = c1 + 1,
+					s1 = c2 > 0 ? c2 : close;
+
+		/* NULL fails both tests and raises, like -1 */
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "IF (");
+		tq_emit_range(tq, s0, s1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ") <= 10 AND (");
+		tq_emit_range(tq, s0, s1, &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ") <> -1 THEN\n");
+		tq_raise_msg(tq, lp + 1, msg1, ind + 1, "NOTICE");
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "ELSE\n");
+		tq_raise_msg(tq, lp + 1, msg1, ind + 1, "EXCEPTION");
+		plx_indent(&tq->cx->out, ind);
+		appendStringInfoString(&tq->cx->out, "END IF;\n");
+	}
+	else
+		tq_raise_msg(tq, lp + 1, msg1, ind,
+					 sev == TQ_SEV_NOTICE ? "NOTICE" : "EXCEPTION");
 	tq_eat_semi(tq);
 }
 
@@ -1456,9 +1574,9 @@ tq_throw(Tq *tq, int ind)
 			}
 		}
 		if (c1 >= 0 && c2 >= 0)
-			tq_raise_msg(tq, c1 + 1, c2, ind);
+			tq_raise_msg(tq, c1 + 1, c2, ind, "EXCEPTION");
 		else
-			tq_raise_msg(tq, e0, e1, ind);
+			tq_raise_msg(tq, e0, e1, ind, "EXCEPTION");
 	}
 	tq->pos = e1;
 	tq_eat_semi(tq);

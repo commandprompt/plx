@@ -87,3 +87,74 @@ CREATE FUNCTION fx45_len(s varchar) RETURNS int LANGUAGE plxtsql AS $$
   RETURN LEN(@s);
 $$;
 SELECT fx45_xor(5, 3) AS xor_6, fx45_len('abc   ') AS len_3, fx45_len('  ab') AS len_4;
+-- A46: RAISERROR severity 10 or lower prints a notice, and WITH options are consumed
+CREATE FUNCTION fx46_progress(n int) RETURNS int LANGUAGE plxtsql AS $$
+  DECLARE @i int = 0;
+  WHILE @i < @n
+  BEGIN
+    RAISERROR('step', 0, 1) WITH NOWAIT;
+    SET @i += 1;
+  END
+  RETURN @i;
+$$;
+SELECT fx46_progress(3);
+CREATE FUNCTION fx46_info_try() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @r varchar(20) = 'no catch';
+  BEGIN TRY
+    RAISERROR('progress', 10, 1);
+  END TRY
+  BEGIN CATCH
+    SET @r = 'caught';
+  END CATCH
+  RETURN @r;
+$$;
+SELECT fx46_info_try();
+CREATE FUNCTION fx46_raise_nowait(n int) RETURNS int LANGUAGE plxtsql AS $$
+  IF @n = 0
+    RAISERROR('cannot be zero', 16, 1) WITH NOWAIT;
+  RETURN 100 / @n;
+$$;
+SELECT fx46_raise_nowait(4);
+SELECT fx46_raise_nowait(0);
+CREATE FUNCTION fx46_sev(s int) RETURNS text LANGUAGE plxtsql AS $$
+  RAISERROR('sev', @s, 1);
+  RETURN 'continued';
+$$;
+SELECT fx46_sev(0);
+SELECT fx46_sev(16);
+SELECT fx46_sev(-1);
+SELECT fx46_sev(NULL);
+CREATE FUNCTION fx46_neg() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('neg', -5, 1);
+  RETURN 1;
+$$;
+SELECT fx46_neg();
+CREATE FUNCTION fx46_neg1() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('neg1', -1, 1);
+  RETURN 1;
+$$;
+SELECT fx46_neg1();
+CREATE FUNCTION fx46_log() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('logged', 0, 1) WITH LOG, SETERROR;
+  RETURN 1;
+$$;
+SELECT position('RAISE LOG' in prosrc) > 0 AS has_log FROM pg_proc WHERE proname = 'fx46_log';
+SELECT fx46_log();
+CREATE FUNCTION fx46_foo() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('x', 0, 1) WITH FOO;
+  RETURN 1;
+$$;
+CREATE FUNCTION fx46_rethrow() RETURNS int LANGUAGE plxtsql AS $$
+  BEGIN TRY
+    RAISERROR('inner', 16, 1);
+  END TRY
+  BEGIN CATCH
+    RAISERROR(ERROR_MESSAGE(), ERROR_SEVERITY(), ERROR_STATE());
+  END CATCH
+  RETURN 1;
+$$;
+SELECT fx46_rethrow();
+CREATE FUNCTION fx46_with() RETURNS int LANGUAGE plxtsql AS $$
+  RAISERROR('x', 0, 1) WITH;
+  RETURN 1;
+$$;

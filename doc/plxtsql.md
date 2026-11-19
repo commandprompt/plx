@@ -108,11 +108,27 @@ keyword or `BEGIN`); there is no `THEN` keyword in T-SQL.
 | T-SQL | plpgsql |
 | --- | --- |
 | `PRINT e` | `RAISE NOTICE '%', e;` |
-| `RAISERROR('msg', sev, state)` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 10 or lower | `RAISE NOTICE '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 11 or higher, `-1`, or `ERROR_SEVERITY()` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', @sev, state)` | `IF sev <= 10 AND sev <> -1 THEN RAISE NOTICE ... ELSE RAISE EXCEPTION ... END IF;` |
+| `RAISERROR(...) WITH LOG` | adds `RAISE LOG '%', 'msg';` before the message |
 | `THROW n, 'msg', s` | `RAISE EXCEPTION '%', 'msg';` |
 | `THROW;` (bare, in CATCH) | `RAISE;` (re-raise) |
 | `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
 | `ERROR_MESSAGE()` | `SQLERRM` |
+
+RAISERROR follows SQL Server's severity rule. A severity of 10 or lower is an
+informational message: the function prints it as a notice and continues, and a
+CATCH block does not catch it. A severity of 11 or higher raises an error. Two
+values always raise an error: -1, which in SQL Server means the severity stored
+for the message (plx cannot look that up), and ERROR_SEVERITY(), because only an
+error reaches a CATCH block. Any other negative severity counts as 0. When the
+severity is a variable, plx checks it at run time, and a NULL severity raises an
+error. After the closing parenthesis you can write WITH followed by NOWAIT,
+SETERROR or LOG, separated by commas. NOWAIT needs no translation because
+PostgreSQL sends every notice to the client at once. SETERROR has no effect
+because plxtsql does not support @@ERROR. LOG also writes the message to the
+server log. Any other option is an error when you create the function.
 
 `RAISERROR`'s format arguments (its `%d`/`%s` printf-style substitutions) are not
 applied; the message argument is emitted as-is.
