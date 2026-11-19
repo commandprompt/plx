@@ -211,8 +211,10 @@ string is one of:
 - `CAST` or `CONVERT` to one of those types;
 - `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
   `REPLACE`, `REPLICATE`, `CONCAT` or `STUFF`;
-- `ISNULL` or `COALESCE` whose first argument is a string variable or a string
-  literal.
+- `ISNULL` whose first argument is a string variable or a string literal;
+- `COALESCE` whose every argument is a known string. `COALESCE('1', 2)` is not
+  one: SQL Server and PostgreSQL both give it the type of the number, so
+  `COALESCE('1', 2) + '3'` adds and gives 4.
 
 `SET @s += e` becomes `s := s || (e)` only when `@s` is a string variable and
 `e` is a known string or a chain of them.

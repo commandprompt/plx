@@ -350,3 +350,44 @@ CREATE FUNCTION fxps_un_minus() RETURNS text LANGUAGE plxtsql AS $$
 $$;
 SELECT fxps_un_minus();  -- SQL Server: 9
 DROP TABLE fxps_t;
+-- review of 641976f: COALESCE is a known string only when every argument is one. SQL Server's COALESCE
+-- takes the type of its highest-precedence argument, and PostgreSQL resolves COALESCE('1', 2) to integer,
+-- so these add or fail; || would give 13 (51 for +=). SQL Server's answer is in each comment.
+CREATE FUNCTION fxco_int() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN COALESCE('1', 2) + '3';
+$$;
+SELECT fxco_int() AS r;  -- SQL Server: 4
+CREATE FUNCTION fxco_var() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @n int = 2;
+  RETURN COALESCE('1', @n) + '3';
+$$;
+SELECT fxco_var() AS r;  -- SQL Server: 4
+CREATE FUNCTION fxco_num() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN COALESCE('1', 2.5) + '3';
+$$;
+SELECT fxco_num() AS r;  -- SQL Server: 4.0
+CREATE FUNCTION fxco_n() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN COALESCE(N'1', 2) + N'3';
+$$;
+SELECT fxco_n() AS r;  -- SQL Server: 4
+CREATE TABLE fxco_t(qty int);
+INSERT INTO fxco_t VALUES (2);
+CREATE FUNCTION fxco_col() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @r varchar(10);
+  SELECT @r = COALESCE('1', qty) + '3' FROM fxco_t;
+  RETURN @r;
+$$;
+SELECT fxco_col() AS r;  -- SQL Server: 4
+DROP TABLE fxco_t;
+CREATE FUNCTION fxco_pe() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(10) = '5';
+  SET @s += COALESCE('1', 2);
+  RETURN @s;
+$$;
+SELECT fxco_pe() AS r;  -- SQL Server: 6
+-- COALESCE whose every argument is a known string still concatenates
+CREATE FUNCTION fxco_str() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @z varchar(10), @s varchar(10) = 'b';
+  RETURN COALESCE(@z, 'a', @s) + COALESCE(@s, @z) + COALESCE(@z, UPPER(@s) + 'c');
+$$;
+SELECT fxco_str() AS r;  -- SQL Server: abBc

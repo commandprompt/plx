@@ -624,8 +624,9 @@ tq_match_lp(Tq *tq, int lp, int limit)
  * has no expression types, so it classifies each operand of a chain
  * a + b + c from what it can see:
  *   TC_STR  a local or parameter declared with a string type, CAST or CONVERT
- *           to a string type, a string function, or ISNULL/COALESCE whose
- *           first argument is a string local or literal;
+ *           to a string type, a string function, ISNULL whose first
+ *           argument is a string local or literal, or COALESCE whose every
+ *           argument is a known string;
  *   TC_LIT  a string literal;
  *   TC_NUM  a number, a numeric local or parameter, CAST or CONVERT to a
  *           numeric type, or a product (a * b binds tighter than +);
@@ -718,6 +719,8 @@ tq_typetok_class(TqTok *tk)
 	return base ? tq_type_class(base) : TC_UNK;
 }
 
+static bool tq_known_str(Tq *tq, int a, int b);
+
 /* class of the call whose name is at i and whose ')' is at close */
 static TqCls
 tq_call_class(Tq *tq, int i, int close)
@@ -742,12 +745,37 @@ tq_call_class(Tq *tq, int i, int close)
 			return tq_typetok_class(&tq->t[close - 4]);
 		return TC_UNK;
 	}
-	if (tq_ci(tk, "ISNULL") || tq_ci(tk, "COALESCE"))
+	if (tq_ci(tk, "ISNULL"))
 	{
+		/* ISNULL takes the type of its first argument */
 		if (a1->kind == TQ_STR ||
 			(a1->kind == TQ_VAR && tq_var_class(tq, a1) == TC_STR))
 			return TC_STR;
 		return TC_UNK;
+	}
+	if (tq_ci(tk, "COALESCE"))
+	{
+		/*
+		 * COALESCE takes the type of its highest-precedence argument, and
+		 * PostgreSQL resolves COALESCE('1', 2) to integer: it is a known string
+		 * only when every argument is one.
+		 */
+		int			a = i + 2,
+					j;
+
+		for (j = a; j <= close; j++)
+		{
+			if (j == close || tq->t[j].kind == TQ_COMMA)
+			{
+				if (!tq_known_str(tq, a, j))
+					return TC_UNK;
+				a = j + 1;
+			}
+			else if (tq->t[j].kind == TQ_LP && tq->match[j] > j &&
+					 tq->match[j] < close)
+				j = tq->match[j];
+		}
+		return TC_STR;
 	}
 	for (k = 0; strfn[k]; k++)
 		if (tq_ci(tk, strfn[k]))
