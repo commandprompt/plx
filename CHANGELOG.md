@@ -88,6 +88,15 @@ other fixes need only the new build and a server restart (or new sessions).
   same-named function planted earlier on the path run in their place, with the
   definer's privileges for a `SECURITY DEFINER` function. Generated code now
   writes `<plx schema>.plx_strbuild` and `<plx schema>.plx_sb_append`.
+- **A type annotation could run code on entry.** A local variable's type is
+  spliced into the plpgsql `DECLARE` section, and plpgsql reads a declaration up
+  to its `;`. A type annotation could therefore carry an initializer or more
+  statements. For example, `x #:: int := f()` or `let x /*:: int DEFAULT f()
+  */;` ran `f()` on entry, while the source showed only a type, and in plxjs
+  only a comment. Every type that reaches `DECLARE` (annotations, plxts types,
+  plxgo and plxtsql declarations, the plxcobol `TYPE` clause) must now be a type
+  name accepted by the SQL type-name grammar, or `name%TYPE` / `name%ROWTYPE`.
+  Anything else is rejected at `CREATE FUNCTION`.
 
 ### Changed
 
@@ -154,6 +163,10 @@ The first two entries are breaking changes, and the third says how to upgrade.
   plpgsql `CASE` statement without `ELSE` does. It now does nothing, as in the
   source language. plxplsql keeps the error, which is also Oracle's behaviour.
 - plxgo `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
+- In plxjs and plxphp, a block annotation placed before an initializer
+  (`let n /*:: bigint */ = 3;`) silently dropped the initializer, so `n` was
+  NULL. That form is now rejected with a hint to write
+  `let n = 3 /*:: bigint */;`.
 
 ## [2.0.1] - 2026-08-25
 

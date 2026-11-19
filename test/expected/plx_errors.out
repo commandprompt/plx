@@ -334,3 +334,77 @@ return 0xFFFFFFFFFFFFFFFFFF;
 $$;
 ERROR:  plxjs: integer literal out of range: 0xFFFFFFFFFFFFFFFFFF
 DETAIL:  at plxjs source line 0
+-- a type annotation is spliced into DECLARE, so it must be a type name only;
+-- anything after the type would become an initializer or a new statement
+CREATE FUNCTION e_rb_ann_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: int := (SELECT 42)
+return x
+$$;
+ERROR:  plxruby: invalid type "int := (SELECT 42)" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+CREATE FUNCTION e_js_ann_default() RETURNS int LANGUAGE plxjs AS $$
+let x /*:: int DEFAULT 42 */;
+return x;
+$$;
+ERROR:  plxjs: invalid type "int DEFAULT 42" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+CREATE FUNCTION e_py_ann_stmt() RETURNS int LANGUAGE plxpython3 AS $$
+x #:: int; BEGIN RAISE NOTICE 'pwn'; END; DECLARE y int
+return 1
+$$;
+ERROR:  plxpython3: invalid type "int; BEGIN RAISE NOTICE 'pwn'; END; DECLARE y int" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+CREATE FUNCTION e_rb_ann_comment() RETURNS text LANGUAGE plxruby AS $$
+x #:: text --
+return x
+$$;
+ERROR:  plxruby: invalid type "text --" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+CREATE FUNCTION e_rb_ann_notnull() RETURNS int LANGUAGE plxruby AS $$
+x #:: int NOT NULL
+return 1
+$$;
+ERROR:  plxruby: invalid type "int NOT NULL" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+CREATE FUNCTION e_rb_ann_rowtype_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: pg_class%ROWTYPE := NULL
+return 1
+$$;
+ERROR:  plxruby: invalid type "pg_class%ROWTYPE := NULL" for local variable "x"
+HINT:  A type annotation must be a type name only, such as integer, numeric(10,2), text[] or tbl%ROWTYPE. Assign the initial value in the body.
+-- a block annotation before the initializer used to drop the initializer
+CREATE FUNCTION e_js_ann_before_init() RETURNS int LANGUAGE plxjs AS $$
+let n /*:: bigint */ = 3;
+return n;
+$$;
+ERROR:  plxjs: a type annotation must come after the value: write "n = value /*:: type */"
+DETAIL:  at plxjs source line 2
+CREATE FUNCTION e_php_ann_before_init() RETURNS int LANGUAGE plxphp AS $$
+$n /*:: bigint */ = 3;
+return $n;
+$$;
+ERROR:  plxphp: a type annotation must come after the value: write "$n = value /*:: type */"
+DETAIL:  at plxphp source line 2
+-- every type-name form plpgsql accepts still works
+CREATE FUNCTION ok_rb_ann_types() RETURNS text LANGUAGE plxruby AS $$
+a #:: double precision
+b #:: timestamp(3) with time zone
+c #:: numeric(10, 2)
+d #:: character varying(20)[]
+e #:: pg_class%ROWTYPE
+f #:: pg_catalog.pg_class.relname%TYPE
+g #:: "pg_catalog"."int8"
+h #:: int[][]
+i #:: interval day to second
+c = 1.005
+f = "rel"
+g = 7
+return "#{c} #{f} #{g}"
+$$;
+SELECT ok_rb_ann_types();
+ ok_rb_ann_types 
+-----------------
+ 1.01 rel 7
+(1 row)
+
+DROP FUNCTION ok_rb_ann_types();

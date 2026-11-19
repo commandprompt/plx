@@ -31,7 +31,8 @@ through to plpgsql and SQL unchanged.
 
 Assignment creates a local. plx infers the type from the first value when it is
 an integer, numeric, text, or boolean literal. Otherwise annotate the variable
-with a `/*:: type */` comment placed before the `;`.
+with a `/*:: type */` comment placed before the `;`. An annotation before an initializer
+(`$n /*:: bigint */ = 3;`) is rejected; write `$n = 3 /*:: bigint */;`.
 
 ```sql
 $n = 42;              // inferred integer
@@ -40,7 +41,9 @@ $amount /*:: numeric */;
 $amount = $principal * $rate;
 ```
 
-The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 $e /*:: emp%ROWTYPE */;

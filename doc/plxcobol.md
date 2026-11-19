@@ -62,7 +62,8 @@ WORKING-STORAGE SECTION.
 ```
 
 For types a PICTURE cannot express (`%TYPE`, `%ROWTYPE`, `RECORD`, `refcursor`),
-use a `TYPE` clause, whose text is emitted verbatim as the plpgsql type:
+use a `TYPE` clause, whose text becomes the plpgsql type (it must be a type name
+and nothing else):
 
 ```sql
 01 WS-EMP  TYPE emp%ROWTYPE.

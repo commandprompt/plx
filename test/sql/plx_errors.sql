@@ -294,3 +294,59 @@ END $outer$;
 CREATE FUNCTION e_js_hex_overflow() RETURNS numeric LANGUAGE plxjs AS $$
 return 0xFFFFFFFFFFFFFFFFFF;
 $$;
+
+-- a type annotation is spliced into DECLARE, so it must be a type name only;
+-- anything after the type would become an initializer or a new statement
+CREATE FUNCTION e_rb_ann_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: int := (SELECT 42)
+return x
+$$;
+CREATE FUNCTION e_js_ann_default() RETURNS int LANGUAGE plxjs AS $$
+let x /*:: int DEFAULT 42 */;
+return x;
+$$;
+CREATE FUNCTION e_py_ann_stmt() RETURNS int LANGUAGE plxpython3 AS $$
+x #:: int; BEGIN RAISE NOTICE 'pwn'; END; DECLARE y int
+return 1
+$$;
+CREATE FUNCTION e_rb_ann_comment() RETURNS text LANGUAGE plxruby AS $$
+x #:: text --
+return x
+$$;
+CREATE FUNCTION e_rb_ann_notnull() RETURNS int LANGUAGE plxruby AS $$
+x #:: int NOT NULL
+return 1
+$$;
+CREATE FUNCTION e_rb_ann_rowtype_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: pg_class%ROWTYPE := NULL
+return 1
+$$;
+
+-- a block annotation before the initializer used to drop the initializer
+CREATE FUNCTION e_js_ann_before_init() RETURNS int LANGUAGE plxjs AS $$
+let n /*:: bigint */ = 3;
+return n;
+$$;
+CREATE FUNCTION e_php_ann_before_init() RETURNS int LANGUAGE plxphp AS $$
+$n /*:: bigint */ = 3;
+return $n;
+$$;
+
+-- every type-name form plpgsql accepts still works
+CREATE FUNCTION ok_rb_ann_types() RETURNS text LANGUAGE plxruby AS $$
+a #:: double precision
+b #:: timestamp(3) with time zone
+c #:: numeric(10, 2)
+d #:: character varying(20)[]
+e #:: pg_class%ROWTYPE
+f #:: pg_catalog.pg_class.relname%TYPE
+g #:: "pg_catalog"."int8"
+h #:: int[][]
+i #:: interval day to second
+c = 1.005
+f = "rel"
+g = 7
+return "#{c} #{f} #{g}"
+$$;
+SELECT ok_rb_ann_types();
+DROP FUNCTION ok_rb_ann_types();
