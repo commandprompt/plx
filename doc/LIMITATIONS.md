@@ -67,11 +67,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   one NULL cannot swallow the message. And `plxcobol`'s `STRING-APPEND` does not
   propagate, because it builds its string through the `plx_strbuild`
   accumulator, whose append treats a NULL as nothing to append by design.
-- **The message fallback covers the message text only.** An interpolated NULL
-  in a `RAISE` option such as `detail:` or `hint:` makes the `RAISE` itself fail
-  with `RAISE statement option cannot be null`, which hides the error you meant
-  to raise. A NULL in an `assert` message replaces your message with plpgsql's
-  generic `assertion failed`. Wrap such values in `coalesce(x, '')`.
+- **A NULL errcode makes RAISE fail.** In plxruby, a NULL value in the
+  `detail:`, `hint:`, `column:` or `constraint:` option of `raise` becomes an
+  empty string, the same as in the message, so your error is still raised with
+  its own SQLSTATE. A NULL `errcode:` is not replaced, because plx will not make
+  up a SQLSTATE. The `raise` then fails with `RAISE statement option cannot be
+  null` (SQLSTATE 22004) instead of raising your error. A NULL in an `assert`
+  message replaces your message with plpgsql's generic `assertion failed`. Wrap
+  such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
   `+` is SQL numeric addition. Use the dialect's string form: interpolation
   (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL, T-SQL), or

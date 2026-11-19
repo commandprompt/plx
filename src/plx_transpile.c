@@ -1768,7 +1768,9 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			 * data, it is something a human has to read, and propagating NULL
 			 * would replace the whole message with nothing at the moment it is
 			 * most needed. In that position each value keeps the COALESCE so
-			 * the literal text of the message survives one NULL operand.
+			 * the literal text of the message survives one NULL operand. The
+			 * same holds for the text options of a raise (detail:, hint:,
+			 * column:, constraint:, message:), but not for errcode:.
 			 */
 			if (cx->diag_msg)
 				appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
@@ -4546,10 +4548,29 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 				}
 			}
 			vt = plx_span_text(cx, va, ve);
-			vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
 			if (using.len)
 				appendStringInfoString(&using, ", ");
-			appendStringInfo(&using, "%s = %s", opt, vv);
+
+			/*
+			 * plpgsql rejects a NULL option with "RAISE statement option
+			 * cannot be null", which would replace the error being raised.
+			 * Every text option therefore gets the message's fallback: each
+			 * interpolated value, and the whole value, become '' when NULL.
+			 * ERRCODE is left alone: plx does not make up a SQLSTATE, so a
+			 * NULL errcode still fails.
+			 */
+			if (strcmp(opt, "ERRCODE") == 0)
+			{
+				vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
+				appendStringInfo(&using, "%s = %s", opt, vv);
+			}
+			else
+			{
+				cx->diag_msg = true;
+				vv = plx_rewrite_expr(cx, vt, (int) strlen(vt), false);
+				cx->diag_msg = false;
+				appendStringInfo(&using, "%s = COALESCE((%s)::text, '')", opt, vv);
+			}
 			p2 = ve;
 		}
 	}

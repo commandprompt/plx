@@ -379,3 +379,37 @@ EXECUTE 'CREATE FUNCTION fe_a25_deep() RETURNS text LANGUAGE plxruby AS $b$' || 
 END $d$;
 \set VERBOSITY default
 SELECT 1 AS still_up;
+-- A9: a NULL in a raise option no longer replaces the error with 22004
+CREATE FUNCTION fe_a9_raise_opt(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user #{u} missing", errcode: "P0042", detail: "looked up #{u}", hint: "check #{u}"
+$$;
+CREATE FUNCTION fe_a9_raise_bare(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user missing", errcode: "P0042", detail: u, hint: u
+$$;
+CREATE FUNCTION fe_a9_raise_col(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: "P0042", column: u, constraint: u
+$$;
+CREATE FUNCTION fe_a9_raise_code(c text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: c
+$$;
+CREATE FUNCTION fe_a9_catch(f text, a text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  EXECUTE format('SELECT %I($1)', f) USING a;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT, d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN format('[%s|%s|%s|%s]', s, m, d, h);
+END $f$;
+SELECT fe_a9_catch('fe_a9_raise_opt', 'bob');
+SELECT fe_a9_catch('fe_a9_raise_opt', NULL);
+SELECT fe_a9_catch('fe_a9_raise_bare', NULL);
+SELECT fe_a9_catch('fe_a9_raise_col', NULL);
+-- A9: a NULL errcode still fails with 22004: plx does not make up a SQLSTATE
+SELECT fe_a9_catch('fe_a9_raise_code', NULL);
+SELECT fe_a9_catch('fe_a9_raise_code', '22023');
+\pset tuples_only on
+\pset format unaligned
+SELECT (regexp_match(prosrc, 'RAISE[^\n]*'))[1] FROM pg_proc WHERE proname = 'fe_a9_raise_opt';
+\pset format aligned
+\pset tuples_only off

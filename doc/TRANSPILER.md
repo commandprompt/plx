@@ -290,11 +290,11 @@ Surfaces: `raise "msg"` (→EXCEPTION); `raise LEVEL: "msg"` with `LEVEL∈{noti
   RAISE NOTICE '%', 'discount ' || COALESCE((pct)::text,'') || '%';
   ```
   This eliminates all `%`-ordering hazards. Literal-`%`-then-placeholder (`"done %#{n}"`) is safe under greedy literal-first parsing and may keep the `%`/arg form. A no-interpolation message with a literal `%` **still** escapes `%`→`%%` (else `too few parameters for RAISE`).
-- **USING option values** (`detail:`/`hint:`/`column:`/`constraint:`/`errcode:`/`message:`) are plain scalar expressions with **no** format substitution: interpolation in them lowers via the ordinary `||`+COALESCE concat path, never `%`-placeholders.
+- **USING option values** (`detail:`/`hint:`/`column:`/`constraint:`/`errcode:`) are plain scalar expressions with **no** format substitution: interpolation in them lowers via the `||` concat path with the diagnostic COALESCE on each value, never `%`-placeholders. Every option except errcode is also wrapped as a whole in COALESCE(..., ''), so a NULL value gives an empty field instead of aborting the RAISE.
   ```
-  RAISE EXCEPTION 'bad row'
-    USING DETAIL = 'value was ' || COALESCE((v)::text,''),
-          HINT   = 'id='        || COALESCE((id)::text,'');
+  RAISE EXCEPTION '%', 'bad row'
+    USING DETAIL = COALESCE(('value was ' || COALESCE((v)::text, ''))::text, ''),
+          HINT   = COALESCE(('id=' || COALESCE((id)::text, ''))::text, '');
   ```
 - **`message:` is mutually exclusive with a positional message** (plpgsql: `RAISE option already specified: MESSAGE`). Positional present + `message:` → reject. Only `message:` (no positional) → drive it through the format/`%` path as *the* message.
 - **Bare `raise`** → `RAISE;` (re-raise); legal only inside a rescue/EXCEPTION handler (`handler_depth > 0`), else a hard CREATE-time error mirroring plpgsql.

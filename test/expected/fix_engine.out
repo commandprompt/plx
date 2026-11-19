@@ -671,3 +671,68 @@ SELECT 1 AS still_up;
         1
 (1 row)
 
+-- A9: a NULL in a raise option no longer replaces the error with 22004
+CREATE FUNCTION fe_a9_raise_opt(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user #{u} missing", errcode: "P0042", detail: "looked up #{u}", hint: "check #{u}"
+$$;
+CREATE FUNCTION fe_a9_raise_bare(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user missing", errcode: "P0042", detail: u, hint: u
+$$;
+CREATE FUNCTION fe_a9_raise_col(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: "P0042", column: u, constraint: u
+$$;
+CREATE FUNCTION fe_a9_raise_code(c text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: c
+$$;
+CREATE FUNCTION fe_a9_catch(f text, a text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  EXECUTE format('SELECT %I($1)', f) USING a;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT, d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN format('[%s|%s|%s|%s]', s, m, d, h);
+END $f$;
+SELECT fe_a9_catch('fe_a9_raise_opt', 'bob');
+                   fe_a9_catch                    
+--------------------------------------------------
+ [P0042|user bob missing|looked up bob|check bob]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_opt', NULL);
+               fe_a9_catch               
+-----------------------------------------
+ [P0042|user  missing|looked up |check ]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_bare', NULL);
+      fe_a9_catch       
+------------------------
+ [P0042|user missing||]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_col', NULL);
+  fe_a9_catch  
+---------------
+ [P0042|bad||]
+(1 row)
+
+-- A9: a NULL errcode still fails with 22004: plx does not make up a SQLSTATE
+SELECT fe_a9_catch('fe_a9_raise_code', NULL);
+                   fe_a9_catch                   
+-------------------------------------------------
+ [22004|RAISE statement option cannot be null||]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_code', '22023');
+  fe_a9_catch  
+---------------
+ [22023|bad||]
+(1 row)
+
+\pset tuples_only on
+\pset format unaligned
+SELECT (regexp_match(prosrc, 'RAISE[^\n]*'))[1] FROM pg_proc WHERE proname = 'fe_a9_raise_opt';
+RAISE EXCEPTION '%', 'user ' || COALESCE((u)::text, '') || ' missing' USING ERRCODE = 'P0042', DETAIL = COALESCE(('looked up ' || COALESCE((u)::text, ''))::text, ''), HINT = COALESCE(('check ' || COALESCE((u)::text, ''))::text, '');
+\pset format aligned
+\pset tuples_only off

@@ -335,11 +335,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Interpolating a NULL propagates it, so `"x=#{v}"` is NULL when `v` is NULL,
   rather than the `'x='` that Ruby's `nil.to_s` would give. In a message being
   built for `raise` the value falls back to an empty string instead, so one
-  NULL cannot swallow the message. The fallback covers the message text only:
-  a NULL interpolated into a `detail:` or `hint:` option makes the `raise`
-  fail with `RAISE statement option cannot be null`, and a NULL in an `assert`
-  message replaces it with `assertion failed`. Wrap such values in
-  `coalesce(x, '')`.
+  NULL cannot swallow the message. The same fallback applies to the `detail:`,
+  `hint:`, `column:` and `constraint:` options of `raise`. A NULL `errcode:`
+  still makes the `raise` fail with `RAISE statement option cannot be null`. A
+  NULL in an `assert` message replaces it with `assertion failed`. Wrap such
+  values in `coalesce(x, '')`.
 - Comparisons use SQL type resolution, not Ruby's. `1 == "1"` compares an integer
   to a string literal, which SQL coerces and treats as equal; in Ruby it is
   false. Compare like-typed values.
