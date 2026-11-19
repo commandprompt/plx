@@ -869,8 +869,18 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 			call = i - 1;		/* the class-name token precedes '(' */
 			break;
 		}
-	if (call < 0)
+	/*
+	 * Only [new] Class(args) is supported: before the '(' a class name
+	 * (identifiers and PHP namespace backslashes), and nothing after the
+	 * ')'. Any other expression would lose everything but the first call's
+	 * first argument.
+	 */
+	if (call < p || cx->t[call].kind != T_IDENT)
 		plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
+	for (i = p; i < call; i++)
+		if (cx->t[i].kind != T_IDENT &&
+			!(cx->t[i].len == 1 && cx->t[i].s && cx->t[i].s[0] == '\\'))
+			plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
 	{
 		int			sa[16], se[16], after, n;
 		int			savedpos = cx->pos;
@@ -878,6 +888,8 @@ emit_php_throw(Ctx *cx, int a, int b, int ind)
 		cx->pos = call;
 		n = plx_parse_args(cx, call, sa, se, 16, &after);
 		cx->pos = savedpos;
+		if (after != b)
+			plx_err(cx, cx->t[a].line, "throw requires 'new Exception(...)'");
 		plx_indent(&cx->out, ind);
 		if (n >= 1)
 		{

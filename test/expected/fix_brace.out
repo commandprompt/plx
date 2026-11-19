@@ -481,3 +481,20 @@ SELECT fb_f10(3);
     106
 (1 row)
 
+-- A19: throw of anything but a constructor call is rejected, not cut to its first argument
+\set VERBOSITY terse
+DO LANGUAGE plxjs $$ throw upper("abc") + lower("XYZ"); $$;
+ERROR:  plxjs: throw requires 'new Exception(...)'
+CREATE FUNCTION fb_th1(x int) RETURNS int LANGUAGE plxjs AS $$
+throw `code ` + abs(x);
+$$;
+ERROR:  plxjs: throw requires 'new Exception(...)'
+DO LANGUAGE plxjs $$ throw new Error("x").foo(1); $$;
+ERROR:  plxjs: throw requires 'new Exception(...)'
+DO LANGUAGE plxphp $$ throw new \RuntimeException("php " . upper("ns")); $$;
+ERROR:  php NS
+DO LANGUAGE plxjs $$ throw new Error(`code ${abs(-7)}`); $$;
+ERROR:  code 7
+DO LANGUAGE plxjs $$ throw Error("plain"); $$;
+ERROR:  plain
+\set VERBOSITY default

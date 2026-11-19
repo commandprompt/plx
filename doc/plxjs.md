@@ -211,6 +211,11 @@ $$;
 throw new Error(`negative: ${v}`);
 ```
 
+`throw` takes a constructor call, such as `new Error(message)`, and raises its first
+argument as the error message. `CREATE FUNCTION` rejects any other thrown
+expression, such as `throw msg;` or `throw a + b(c);`. To throw a computed
+message, build it inside the call.
+
 The call form `raise("notice", "message")` emits a `RAISE` at the named level
 (`notice`, `warning`, `info`, `log`, `debug`, `exception`).
 

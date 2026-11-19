@@ -358,3 +358,14 @@ $i = 100;
 return $t + $i;
 $$;
 SELECT fb_f10(3);
+-- A19: throw of anything but a constructor call is rejected, not cut to its first argument
+\set VERBOSITY terse
+DO LANGUAGE plxjs $$ throw upper("abc") + lower("XYZ"); $$;
+CREATE FUNCTION fb_th1(x int) RETURNS int LANGUAGE plxjs AS $$
+throw `code ` + abs(x);
+$$;
+DO LANGUAGE plxjs $$ throw new Error("x").foo(1); $$;
+DO LANGUAGE plxphp $$ throw new \RuntimeException("php " . upper("ns")); $$;
+DO LANGUAGE plxjs $$ throw new Error(`code ${abs(-7)}`); $$;
+DO LANGUAGE plxjs $$ throw Error("plain"); $$;
+\set VERBOSITY default
