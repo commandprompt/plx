@@ -6,6 +6,12 @@ does so at upload time, which is after a release has been tagged and published.
 That is an expensive place to discover a typo, so the constraints are checked
 here instead.
 
+The checks cover required keys, unknown keys (only x_ custom keys may be
+added), the license identifiers, non-empty text fields, the meta-spec version,
+the prereqs structure and its version ranges, resources, provides, and tags.
+A self-test runs first: it breaks a valid document in known ways and requires
+each break to be reported.
+
 The rules mirror the v1 schemas at https://github.com/pgxn/meta. Note that a
 Tag and a Term are not the same: both exclude slash, backslash and control
 characters, but only a Term also excludes spaces, so "sql server" is a valid
@@ -28,6 +34,37 @@ SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
                     r"(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?"
                     r"(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$")
 RELEASE_STATUS = {"stable", "testing", "unstable"}
+
+# Keys a distribution may carry at the top level. Any other key must be a
+# custom key starting with x_ or X_ (distribution.schema.json sets
+# unevaluatedProperties to false).
+TOP_LEVEL = set(REQUIRED) | {"description", "generated_by", "tags", "no_index",
+                             "prereqs", "release_status", "resources"}
+CUSTOM = re.compile(r"^[xX]_.")
+LICENSES = {
+    "agpl_3", "apache_1_1", "apache_2_0", "artistic_1", "artistic_2", "bsd",
+    "freebsd", "gfdl_1_2", "gfdl_1_3", "gpl_1", "gpl_2", "gpl_3", "lgpl_2_1",
+    "lgpl_3_0", "mit", "mozilla_1_0", "mozilla_1_1", "openssl", "perl_5",
+    "postgresql", "qpl_1_0", "ssleay", "sun", "zlib", "open_source",
+    "restricted", "unrestricted", "unknown",
+}
+META_SPEC_VERSION = re.compile(r"^1\.0\.[0-9]+$")
+META_SPEC_URLS = {"https://pgxn.org/meta/spec.txt", "http://pgxn.org/meta/spec.txt"}
+PREREQ_PHASES = {"configure", "build", "test", "runtime", "develop"}
+PREREQ_RELATIONS = {"requires", "recommends", "suggests", "conflicts"}
+# version_range.schema.json: "0", or one or more comma-separated versions,
+# each with an optional comparison operator.
+_V = (r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+      r"(?:-(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)"
+      r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*)?"
+      r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?")
+_OP = r"(?:(?:[=!]=|[<>]=?)\s*)?"
+VERSION_RANGE = re.compile(r"^(?:" + _OP + "(?:" + _V + "|0))"
+                           r"(?:,\s*" + _OP + _V + ")*$", re.ASCII)
+EXTENSION_KEYS = {"file", "version", "abstract", "docfile", "docpath"}
+RESOURCE_KEYS = {"homepage": None,
+                 "bugtracker": {"web", "mailto"},
+                 "repository": {"url", "web", "type"}}
 
 
 def has_control(s):
@@ -63,14 +100,114 @@ def check_tag(value, label, errs):
         errs.append("%s %r must not contain control characters" % (label, value))
 
 
-def main():
-    try:
-        with open(META, encoding="utf-8") as fh:
-            m = json.load(fh)
-    except (OSError, ValueError) as exc:
-        sys.stderr.write("META.json could not be read as JSON: %s\n" % exc)
-        return 2
+def unknown_keys(obj, allowed, label, errs):
+    """Report keys of obj outside allowed that are not x_ custom keys."""
+    for key in obj:
+        if key not in allowed and not CUSTOM.match(key):
+            errs.append("%s has unknown key %r (custom keys must start "
+                        "with x_)" % (label, key))
 
+
+def check_text(m, field, errs):
+    """An optional field that, when present, must be a non-empty string."""
+    if field in m and not (isinstance(m[field], str) and m[field]):
+        errs.append("%s must be a non-empty string" % field)
+
+
+def check_license(lic, errs):
+    """A license: a known identifier, a list of them, or an object whose
+    values are links to license texts."""
+    if isinstance(lic, str):
+        if lic not in LICENSES:
+            errs.append("license %r is not a PGXN license identifier "
+                        "(for example mit or postgresql)" % lic)
+    elif isinstance(lic, list):
+        if not lic:
+            errs.append("license list must not be empty")
+        if len(set(map(json.dumps, lic))) != len(lic):
+            errs.append("license list must not repeat an entry")
+        for x in lic:
+            if x not in LICENSES:
+                errs.append("license %r is not a PGXN license identifier"
+                            % (x,))
+    elif isinstance(lic, dict):
+        if not lic:
+            errs.append("license object must not be empty")
+        for name, url in lic.items():
+            if not isinstance(url, str) or not url:
+                errs.append("license %r must map to the URL of its text"
+                            % name)
+    else:
+        errs.append("license must be a string, a list or an object")
+
+
+def check_prereqs(pre, errs):
+    """prereqs: phase -> relationship -> extension name -> version range."""
+    if not isinstance(pre, dict):
+        errs.append("prereqs must be an object")
+        return
+    unknown_keys(pre, PREREQ_PHASES, "prereqs", errs)
+    if not PREREQ_PHASES & set(pre):
+        errs.append("prereqs must name at least one phase (%s)"
+                    % ", ".join(sorted(PREREQ_PHASES)))
+    for phase in sorted(PREREQ_PHASES & set(pre)):
+        rels = pre[phase]
+        label = "prereqs/%s" % phase
+        if not isinstance(rels, dict):
+            errs.append("%s must be an object" % label)
+            continue
+        unknown_keys(rels, PREREQ_RELATIONS, label, errs)
+        if not PREREQ_RELATIONS & set(rels):
+            errs.append("%s must name at least one relationship (%s)"
+                        % (label, ", ".join(sorted(PREREQ_RELATIONS))))
+        for rel in sorted(PREREQ_RELATIONS & set(rels)):
+            exts = rels[rel]
+            rlabel = "%s/%s" % (label, rel)
+            if not isinstance(exts, dict) or not exts:
+                errs.append("%s must be a non-empty object" % rlabel)
+                continue
+            for name, rng in exts.items():
+                check_term(name, "%s key" % rlabel, errs)
+                ok = (rng == 0 and not isinstance(rng, bool)) or \
+                    (isinstance(rng, str) and VERSION_RANGE.match(rng))
+                if not ok:
+                    errs.append("%s/%s version %r is not a version range "
+                                "(for example 13.0.0 or >= 13.0.0, or 0)"
+                                % (rlabel, name, rng))
+
+
+def check_resources(res, errs):
+    if not isinstance(res, dict):
+        errs.append("resources must be an object")
+        return
+    unknown_keys(res, set(RESOURCE_KEYS), "resources", errs)
+    if not set(RESOURCE_KEYS) & set(res):
+        errs.append("resources must name homepage, bugtracker or repository")
+    if "homepage" in res and not (isinstance(res["homepage"], str)
+                                  and res["homepage"]):
+        errs.append("resources/homepage must be a URL")
+    for key in ("bugtracker", "repository"):
+        if key not in res:
+            continue
+        if not isinstance(res[key], dict):
+            errs.append("resources/%s must be an object" % key)
+            continue
+        unknown_keys(res[key], RESOURCE_KEYS[key], "resources/%s" % key, errs)
+    if isinstance(res.get("bugtracker"), dict) and \
+            not {"web", "mailto"} & set(res["bugtracker"]):
+        errs.append("resources/bugtracker must have web or mailto")
+    if isinstance(res.get("repository"), dict):
+        rep = res["repository"]
+        if "web" not in rep and not {"url", "type"} <= set(rep):
+            errs.append("resources/repository must have web, or both url "
+                        "and type")
+
+
+def validate(m, base):
+    """Return the list of ways the META.json document m breaks the spec.
+
+    base is the distribution directory that provides/*/file is relative to.
+    """
     errs = []
     for field in REQUIRED:
         if field not in m:
@@ -78,6 +215,16 @@ def main():
 
     if "name" in m:
         check_term(m["name"], "name", errs)
+
+    unknown_keys(m, TOP_LEVEL, "the distribution", errs)
+    for field in ("abstract", "description", "generated_by"):
+        check_text(m, field, errs)
+    if "license" in m:
+        check_license(m["license"], errs)
+    if "prereqs" in m:
+        check_prereqs(m["prereqs"], errs)
+    if "resources" in m:
+        check_resources(m["resources"], errs)
 
     if "version" in m and not SEMVER.match(str(m["version"])):
         errs.append("version %r is not a semantic version" % m["version"])
@@ -89,9 +236,24 @@ def main():
             errs.append("maintainer must be a string or a non-empty list")
         elif not all(isinstance(x, str) and x.strip() for x in mt):
             errs.append("every maintainer must be a non-empty string")
+        elif len(set(mt)) != len(mt):
+            errs.append("maintainer list must not repeat an entry")
 
-    if "meta-spec" in m and "version" not in (m["meta-spec"] or {}):
-        errs.append("meta-spec must carry a version")
+    if "meta-spec" in m:
+        ms = m["meta-spec"]
+        if not isinstance(ms, dict):
+            errs.append("meta-spec must be an object")
+        elif "version" not in ms:
+            errs.append("meta-spec must carry a version")
+        else:
+            if not (isinstance(ms["version"], str)
+                    and META_SPEC_VERSION.match(ms["version"])):
+                errs.append("meta-spec version %r must be 1.0.x"
+                            % (ms["version"],))
+            if "url" in ms and ms["url"] not in META_SPEC_URLS:
+                errs.append("meta-spec url %r must be %s"
+                            % (ms["url"], " or ".join(sorted(META_SPEC_URLS))))
+            unknown_keys(ms, {"version", "url"}, "meta-spec", errs)
 
     prov = m.get("provides")
     if not isinstance(prov, dict) or not prov:
@@ -102,9 +264,15 @@ def main():
             if not isinstance(ext, dict):
                 errs.append("provides/%s must be an object" % name)
                 continue
+            unknown_keys(ext, EXTENSION_KEYS, "provides/%s" % name, errs)
+            for field in ("abstract", "docpath"):
+                if field in ext and not (isinstance(ext[field], str)
+                                         and ext[field]):
+                    errs.append("provides/%s/%s must be a non-empty string"
+                                % (name, field))
             if "file" not in ext:
                 errs.append("provides/%s is missing file" % name)
-            elif not os.path.exists(os.path.join(os.path.dirname(META),
+            elif not os.path.exists(os.path.join(base,
                                                  ext["file"])):
                 errs.append("provides/%s names %s, which is not in the "
                             "distribution" % (name, ext["file"]))
@@ -128,6 +296,86 @@ def main():
         errs.append("release_status %r must be one of %s"
                     % (m["release_status"], ", ".join(sorted(RELEASE_STATUS))))
 
+    return errs
+
+
+# A document that satisfies the spec. The self-test breaks it one way at a
+# time and requires validate() to notice. Its provides file is this script,
+# relative to the distribution directory, so it always exists.
+GOOD = {
+    "name": "plx", "version": "1.0.0", "abstract": "a test distribution",
+    "maintainer": ["someone <someone@example.org>"], "license": "mit",
+    "provides": {"plx": {"file": "test/check_meta.py", "version": "1.0.0"}},
+    "meta-spec": {"version": "1.0.0", "url": "https://pgxn.org/meta/spec.txt"},
+    "x_custom": "custom keys are allowed",
+}
+
+# (description, change to GOOD, text the error must contain, or None when the
+# changed document is still valid)
+SELFTEST = [
+    ("license not in the list", {"license": "MIT License"}, "license"),
+    ("license empty list", {"license": []}, "license"),
+    ("license object with a non-string", {"license": {"MIT": 5}}, "license"),
+    ("license list", {"license": ["mit", "postgresql"]}, None),
+    ("license object", {"license": {"MIT": "https://opensource.org/license/mit"}}, None),
+    ("empty abstract", {"abstract": ""}, "abstract"),
+    ("empty description", {"description": ""}, "description"),
+    ("unknown top-level key", {"homepage": "https://example.org"}, "homepage"),
+    ("meta-spec version not 1.0.x", {"meta-spec": {"version": "banana"}}, "meta-spec"),
+    ("meta-spec unknown key", {"meta-spec": {"version": "1.0.0", "spec": "x"}}, "meta-spec"),
+    ("prereq version not a version", {"prereqs": {"runtime": {"requires":
+        {"PostgreSQL": "thirteen"}}}}, "thirteen"),
+    ("prereq unknown phase", {"prereqs": {"install": {"requires":
+        {"PostgreSQL": "13.0.0"}}}}, "install"),
+    ("prereq unknown relationship", {"prereqs": {"runtime": {"needs":
+        {"PostgreSQL": "13.0.0"}}}}, "needs"),
+    ("prereq version range", {"prereqs": {"runtime": {"requires":
+        {"PostgreSQL": ">= 13.0.0, < 19.0.0", "plpgsql": 0}}}}, None),
+    ("resources unknown key", {"resources": {"home": "https://example.org"}},
+        "resources"),
+    ("provides unknown key", {"provides": {"plx": {"file": "test/check_meta.py",
+        "version": "1.0.0", "docs": "README.md"}}}, "docs"),
+    ("duplicate maintainer", {"maintainer": ["a <a@example.org>",
+        "a <a@example.org>"]}, "maintainer"),
+]
+
+
+def selftest():
+    """Break a valid document in known ways. Returns a list of failures."""
+    base = os.path.join(HERE, os.pardir)
+    failures = []
+    errs = validate(dict(GOOD), base)
+    if errs:
+        failures.append("the valid sample document was rejected: %s"
+                        % "; ".join(errs))
+    for what, change, needle in SELFTEST:
+        doc = dict(GOOD)
+        doc.update(change)
+        errs = validate(doc, base)
+        if needle is None and errs:
+            failures.append("%s: rejected a valid document: %s"
+                            % (what, "; ".join(errs)))
+        elif needle is not None and not any(needle in e for e in errs):
+            failures.append("%s: not reported (errors: %s)"
+                            % (what, "; ".join(errs) or "none"))
+    return failures
+
+
+def main():
+    failures = selftest()
+    if failures:
+        sys.stderr.write("check_meta.py self-test failed:\n  %s\n"
+                         % "\n  ".join(failures))
+        return 2
+
+    try:
+        with open(META, encoding="utf-8") as fh:
+            m = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("META.json could not be read as JSON: %s\n" % exc)
+        return 2
+
+    errs = validate(m, os.path.dirname(META))
     if errs:
         print("META.json does not satisfy the PGXN Meta Spec v1:")
         for e in errs:
