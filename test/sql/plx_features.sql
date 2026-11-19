@@ -183,3 +183,79 @@ SET standard_conforming_strings = off;
 SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
 RESET standard_conforming_strings;
 SELECT lit_go(), lit_rb(), lit_php(), lit_tsql(), lit_plsql(), lit_cob();
+
+-- interpolation in a SQL argument: a value is bound (or quoted), never spliced
+-- as SQL text, wherever it sits; ident() quotes identifiers, literal() and raw()
+-- splice on request
+CREATE TABLE tpl_t (id int, name text);
+INSERT INTO tpl_t VALUES (1, 'alice'), (2, 'bob');
+CREATE TABLE "tpl Odd" (id int);
+INSERT INTO "tpl Odd" VALUES (7);
+CREATE TABLE tpl_log (m text);
+
+-- a value round-trips exactly in each position, in a planned statement ($n)
+-- and in a utility statement (quote_nullable), and nothing it contains runs
+CREATE FUNCTION tpl_roundtrip(v text) RETURNS text LANGUAGE plxjs AS $$
+  execute(`DELETE FROM tpl_log`);
+  execute(`INSERT INTO tpl_log VALUES (${v})`);
+  execute(`INSERT INTO tpl_log VALUES ('${v}')`);
+  execute(`INSERT INTO tpl_log VALUES ('<${v}>')`);
+  execute(`COMMENT ON TABLE tpl_log IS '${v}'`);
+  let r = fetch_one(`SELECT count(*) AS c FROM tpl_log
+                     WHERE m = $1 OR m = '<' || $1 || '>'`, v);
+  let d = fetch_one(`SELECT obj_description('tpl_log'::regclass) AS d`);
+  return `${r.c}|${d.d = v}`;
+$$;
+SELECT v, tpl_roundtrip(v) AS "rows|comment_ok"
+FROM (VALUES ($x$plain$x$), ($x$it's$x$), ($x$x'); DROP TABLE tpl_t; --$x$),
+             ($x$C:\$x$), ($x$a\'b$x$), ($x$$$; RAISE EXCEPTION 'boom'; $$$x$)) AS p(v);
+SET standard_conforming_strings = off;
+SELECT tpl_roundtrip($x$C:\'; DROP TABLE tpl_t; --$x$) AS "rows|comment_ok (scs off)";
+RESET standard_conforming_strings;
+SELECT count(*) AS tpl_t_survives FROM tpl_t;
+
+-- the generated SQL: values become $n after the call's own binds
+CREATE FUNCTION tpl_fetch(uname text, lim int) RETURNS text LANGUAGE plxruby AS $$
+  u = fetch_one("SELECT name FROM tpl_t WHERE name = '#{uname}' LIMIT $1", lim)
+  return u.name
+$$;
+SELECT tpl_fetch('bob', 1), tpl_fetch($x$x' OR name = 'bob$x$, 1) IS NULL AS injection_blocked;
+SELECT regexp_replace(prosrc, '^.*?BEGIN\n|END;\n/\*plx-orig.*$', '', 'gs')
+FROM pg_proc WHERE proname = 'tpl_fetch';
+
+-- static SQL: '#{x}' is the variable, not the literal text 'x'
+CREATE FUNCTION tpl_static(uname text) RETURNS int LANGUAGE plxpython3 AS $$
+u = fetch_one(f"SELECT id FROM tpl_t WHERE name = '{uname}'")
+return u.id
+$$;
+SELECT tpl_static('bob');
+
+-- ident() quotes an identifier (and makes the call dynamic); PHP spells it
+-- {ident($t)}
+CREATE FUNCTION tpl_ident(t text, minid int) RETURNS bigint LANGUAGE plxphp AS $$
+  $r = fetch_one("SELECT count(*) AS c FROM {ident($t)} WHERE id >= {$minid}");
+  return $r->c;
+$$;
+SELECT tpl_ident('tpl Odd', 7), tpl_ident('tpl_t', 2);
+
+-- raw() splices deliberately
+CREATE FUNCTION tpl_raw(ord text) RETURNS text LANGUAGE plxruby AS $$
+  s = ""
+  query("SELECT name FROM tpl_t ORDER BY #{raw(ord)}").each do |r|
+    s << r.name
+  end
+  return s
+$$;
+SELECT tpl_raw('name DESC');
+
+-- rejected: an interpolation inside a quoted identifier, ident() inside a string
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad1(t text) RETURNS void LANGUAGE plxjs AS $b$ execute(`SELECT * FROM "${t}"`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad2(t text) RETURNS void LANGUAGE plxjs AS $b$ execute(`SELECT '${ident(t)}'`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad3(c text) RETURNS void LANGUAGE plxjs AS $b$ execute(`COMMENT ON TABLE tpl_t IS 'x ${c}'`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DROP TABLE tpl_t, "tpl Odd", tpl_log;

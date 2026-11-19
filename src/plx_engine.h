@@ -164,6 +164,8 @@ void plx_emit_raise_call(Ctx *cx, int a, int ind);
 void plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out);
 int plx_parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after);
 char *plx_binds_text(Ctx *cx, int *as, int *ae, int nargs);
+bool plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
+				 char **sql, char **binds);
 bool plx_arg_is_string_literal(Ctx *cx, int as, int ae);
 const char *plx_exc_class_to_condition(const char *s, int len);
 char *plx_diag_prefix(int mask, int ind);
