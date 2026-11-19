@@ -237,7 +237,10 @@ assert($n > 0, "must be positive");
 ## Expressions
 
 - Interpolation: `"total is $amount"` and `"count {$n}"` splice the value.
-  Single-quoted strings do not interpolate.
+  As in PHP, the simple form also takes one property or element after the
+  name: `"$row->name"`, `"$a[1]"`, `"$a[$i]"`, and `"$row[name]"` (the same as
+  `{$row['name']}`). For anything longer, such as `$row->a->b`, use the braced
+  form. Single-quoted strings do not interpolate.
 - Concatenation: `$a . $b` maps to `$a || $b`.
 - Comparison: `==`, `===`, `!=`, `!==` map to `=` and `<>`. `$x == null` becomes
   `$x IS NULL`.

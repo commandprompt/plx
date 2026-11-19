@@ -279,3 +279,10 @@ end
 return 0
 $$;
 SELECT fe_a2_row_rb();
+-- A10: PHP "$r->prop" and "$a[key]" interpolate the property or element
+CREATE FUNCTION fe_a10_php(i int) RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'bob'::text AS name");
+$a = ARRAY['x', 'y'] /*:: text[] */;
+return "Hello $r->name! $r[name] $a[1] $a[$i] $r->name->x $r-> $a[";
+$$;
+SELECT fe_a10_php(2);

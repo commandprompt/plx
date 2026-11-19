@@ -1077,6 +1077,61 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 			*exs = s;
 			*exl = (int) (q - s);
 			*next = q;
+
+			/*
+			 * PHP's simple syntax also takes one ->prop or one [key] after
+			 * the name: "$r->name", "$a[1]", "$a[$i]", "$r[name]". An
+			 * unquoted key is a string, as in {$r['name']}. Anything else
+			 * after the name stays literal text.
+			 */
+			if (e - q >= 3 && q[0] == '-' && q[1] == '>' && plx_is_ident_start(q[2]))
+			{
+				q += 3;
+				while (q < e && plx_is_ident(*q))
+					q++;
+				*exl = (int) (q - s);
+				*next = q;
+			}
+			else if (q < e && q[0] == '[')
+			{
+				const char *k = q + 1,
+						   *ks = k;
+				bool		bare = false;
+
+				if (k < e && *k == '$' && k + 1 < e && plx_is_ident_start(k[1]))
+				{
+					k += 2;
+					while (k < e && plx_is_ident(*k))
+						k++;
+				}
+				else if (k < e && (isdigit((unsigned char) *k) ||
+								   (*k == '-' && k + 1 < e && isdigit((unsigned char) k[1]))))
+				{
+					k++;
+					while (k < e && isdigit((unsigned char) *k))
+						k++;
+				}
+				else if (k < e && plx_is_ident_start(*k))
+				{
+					bare = true;
+					while (k < e && plx_is_ident(*k))
+						k++;
+				}
+				if (k > ks && k < e && *k == ']')
+				{
+					if (bare)
+					{
+						char	   *x = psprintf("%.*s['%.*s']", (int) (q - s), s,
+												 (int) (k - ks), ks);
+
+						*exs = x;
+						*exl = (int) strlen(x);
+					}
+					else
+						*exl = (int) (k + 1 - s);
+					*next = k + 1;
+				}
+			}
 			return true;
 		}
 	}
