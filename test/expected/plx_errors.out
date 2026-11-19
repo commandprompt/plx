@@ -94,7 +94,7 @@ class C:
     pass
 return 1
 $$;
-ERROR:  plxpython3: def is not supported
+ERROR:  plxpython3: class is not supported
 DETAIL:  at plxpython3 source line 2
 -- plxpython3: match/case is not supported
 CREATE FUNCTION e_py_match(n int) RETURNS int LANGUAGE plxpython3 AS $$
@@ -333,7 +333,7 @@ CREATE FUNCTION e_js_hex_overflow() RETURNS numeric LANGUAGE plxjs AS $$
 return 0xFFFFFFFFFFFFFFFFFF;
 $$;
 ERROR:  plxjs: integer literal out of range: 0xFFFFFFFFFFFFFFFFFF
-DETAIL:  at plxjs source line 0
+DETAIL:  at plxjs source line 2
 -- a type annotation is spliced into DECLARE, so it must be a type name only;
 -- anything after the type would become an initializer or a new statement
 CREATE FUNCTION e_rb_ann_init() RETURNS int LANGUAGE plxruby AS $$
@@ -426,3 +426,20 @@ return c;
 $$;
 ERROR:  plxjs: constant "c" cannot use local variable "v": a constant's value is computed when the function starts
 DETAIL:  at plxjs source line 4
+-- A54: an overflowing hex literal reports its own source line, and a Python
+-- class statement is reported as class, not def
+CREATE FUNCTION e_a54_js_hex_line() RETURNS numeric LANGUAGE plxjs AS $$
+let a = 1;
+let b = 2;
+return 0xFFFFFFFFFFFFFFFFFF;
+$$;
+ERROR:  plxjs: integer literal out of range: 0xFFFFFFFFFFFFFFFFFF
+DETAIL:  at plxjs source line 4
+CREATE FUNCTION e_a54_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+class C:
+    pass
+return 1
+$$;
+ERROR:  plxpython3: class is not supported
+DETAIL:  at plxpython3 source line 3

@@ -365,3 +365,17 @@ v = "b";
 let c = `got ${v}` /*:: text const */;
 return c;
 $$;
+
+-- A54: an overflowing hex literal reports its own source line, and a Python
+-- class statement is reported as class, not def
+CREATE FUNCTION e_a54_js_hex_line() RETURNS numeric LANGUAGE plxjs AS $$
+let a = 1;
+let b = 2;
+return 0xFFFFFFFFFFFFFFFFFF;
+$$;
+CREATE FUNCTION e_a54_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+class C:
+    pass
+return 1
+$$;

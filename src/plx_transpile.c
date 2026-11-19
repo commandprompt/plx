@@ -1467,7 +1467,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				 * in the generated function body.
 				 */
 				if (ovf)
-					plx_err(cx, 0, "integer literal out of range: %.*s",
+					plx_err(cx, cx->t[cx->pos].line,
+							"integer literal out of range: %.*s",
 							i - start, s + start);
 				/* no digits (malformed): leave the source text untouched */
 				if (ndig == 0)

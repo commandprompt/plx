@@ -456,8 +456,8 @@ parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 			case KW_PASS:
 				cx->pos = plx_stmt_end(cx, cx->pos);
 				return;
-			case KW_DEF:
-				plx_err(cx, tk->line, "def is not supported");
+			case KW_DEF:		/* def, class and lambda: name the one used */
+				plx_err(cx, tk->line, "%.*s is not supported", tk->len, tk->s);
 				return;
 			case KW_CASE:
 				plx_err(cx, tk->line, "match/case is not supported (use if/elif)");
