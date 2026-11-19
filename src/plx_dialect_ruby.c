@@ -320,20 +320,26 @@ capture_block(Ctx *cx, int ind)
 }
 
 /*
- * each_with_index: declare the index as an integer local and set it to -1
- * before the loop; rb_index_step adds 1 at the top of each pass.
+ * each_with_index: open a nested block that declares the index as an integer
+ * set to -1; rb_index_step adds 1 at the top of each pass, and the caller
+ * closes the block with "END;" after END LOOP. In Ruby a block variable is
+ * local to the block, so the nested declaration must hide a parameter or an
+ * outer local of the same name only inside the loop, and leave it untouched.
  */
 static void
-rb_index_init(Ctx *cx, int var2_a, int ind)
+rb_index_init(Ctx *cx, int var1_a, int var2_a, int ind)
 {
-	PlxLocal2  *li = plx_local_find(cx, cx->t[var2_a].s, cx->t[var2_a].len);
+	const Tok  *v = &cx->t[var2_a];
 
-	if (!li)
-		li = plx_local_add(cx, cx->t[var2_a].s, cx->t[var2_a].len);
-	if (!li->typ)
-		li->typ = pstrdup("integer");
+	if (v->len == cx->t[var1_a].len &&
+		pg_strncasecmp(v->s, cx->t[var1_a].s, v->len) == 0)
+		plx_err(cx, v->line, "each_with_index block variables must have different names");
 	plx_indent(&cx->out, ind);
-	appendStringInfo(&cx->out, "%.*s := -1;\n", cx->t[var2_a].len, cx->t[var2_a].s);
+	appendStringInfoString(&cx->out, "DECLARE\n");
+	plx_indent(&cx->out, ind + 1);
+	appendStringInfo(&cx->out, "%.*s integer := -1;\n", v->len, v->s);
+	plx_indent(&cx->out, ind);
+	appendStringInfoString(&cx->out, "BEGIN\n");
 }
 
 static void
@@ -409,7 +415,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		{
 			if (var2_a < 0)
 				plx_err(cx, cx->t[a].line, "each_with_index requires |row, idx|");
-			rb_index_init(cx, var2_a, ind);
+			rb_index_init(cx, var1_a, var2_a, ind);
 		}
 		plx_indent(o, ind);
 		{
@@ -456,7 +462,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		lo = plx_rewrite_expr(cx, lst, (int) strlen(lst), false);
 		hi = plx_rewrite_expr(cx, hst, (int) strlen(hst), false);
 		if (with_index)
-			rb_index_init(cx, var2_a, ind);
+			rb_index_init(cx, var1_a, var2_a, ind);
 		plx_indent(o, ind);
 		if (excl)
 			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
@@ -486,7 +492,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 					"foreach over an array requires the loop variable to be annotated with its element type before the loop, e.g. \"%.*s #:: int\"",
 					cx->t[var1_a].len, cx->t[var1_a].s);
 		if (with_index)
-			rb_index_init(cx, var2_a, ind);
+			rb_index_init(cx, var1_a, var2_a, ind);
 		plx_indent(o, ind);
 		appendStringInfo(o, "FOREACH %.*s IN ARRAY %s%s LOOP\n",
 						 cx->t[var1_a].len, cx->t[var1_a].s,
@@ -506,6 +512,11 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 		plx_err(cx, cx->t[a].line, "unterminated iterator block");
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
+	if (with_index)
+	{
+		plx_indent(o, ind);
+		appendStringInfoString(o, "END;\n");
+	}
 }
 
 /* begin [body] [rescue [Class] [=> e] handler]* [ensure body] end */

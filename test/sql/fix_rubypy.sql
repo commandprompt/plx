@@ -226,3 +226,72 @@ end
 return i * 10 + t
 $$;
 SELECT fr_a20_rb_nested() AS rb_expect_16;
+-- A24: (review) the each_with_index index is local to the block
+CREATE FUNCTION fr_a24_arr_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+v #:: int
+[10, 20].each_with_index do |v, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_arr_param(7) AS rb_expect_701;
+CREATE FUNCTION fr_a24_rng_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+(1..2).each_with_index do |v, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_rng_param(7) AS rb_expect_701;
+CREATE FUNCTION fr_a24_qry_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+query("SELECT g FROM generate_series(1, 3) g").each_with_index do |r, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_qry_param(7) AS rb_expect_703;
+CREATE FUNCTION fr_a24_outer() RETURNS int LANGUAGE plxruby AS $$
+i = 42
+v #:: int
+t = 0
+[10, 20, 30].each_with_index do |v, i|
+  t = t + i
+end
+return i * 100 + t
+$$;
+SELECT fr_a24_outer() AS rb_expect_4203;
+CREATE FUNCTION fr_a24_outer_text() RETURNS text LANGUAGE plxruby AS $$
+i = "x"
+v #:: int
+t = 0
+[10, 20, 30].each_with_index do |v, i|
+  t = t + v + i
+end
+return "#{i}#{t}"
+$$;
+SELECT fr_a24_outer_text() AS rb_expect_x63;
+CREATE FUNCTION fr_a24_interp() RETURNS text LANGUAGE plxruby AS $$
+s = ""
+(5..6).each_with_index do |v, i|
+  s = "#{s}#{i}:#{v} "
+end
+return s
+$$;
+SELECT fr_a24_interp() AS rb_expect_0_5_1_6;
+\set VERBOSITY terse
+CREATE FUNCTION fr_a24_same() RETURNS int LANGUAGE plxruby AS $$
+t = 0
+(5..7).each_with_index do |v, v|
+  t = t + v
+end
+return t
+$$;
+\set VERBOSITY default
