@@ -1558,6 +1558,50 @@ go_emit_prec(Go *g, int a, int b, StringInfo out)
 	return true;
 }
 
+/*
+ * End (exclusive) of the operand of a unary operator that starts at i: any
+ * further unary operators, then a name, number, string or bracketed group,
+ * then any field selections, calls and subscripts. -1 when the tokens form no
+ * operand this recognises.
+ */
+static int
+go_unary_operand_end(Go *g, int i, int b)
+{
+	while (i < b && (go_op_is(&g->t[i], "-") || go_op_is(&g->t[i], "+") ||
+					 go_op_is(&g->t[i], "^") || go_op_is(&g->t[i], "!")))
+		i++;
+	if (i >= b)
+		return -1;
+	if (g->t[i].kind == GO_LP)
+	{
+		i = go_match(g, i, b);
+		if (i < 0)
+			return -1;
+		i++;
+	}
+	else if (g->t[i].kind == GO_WORD || g->t[i].kind == GO_NUM ||
+			 g->t[i].kind == GO_STR)
+		i++;
+	else
+		return -1;
+	while (i < b)
+	{
+		if (g->t[i].kind == GO_DOT && i + 1 < b && g->t[i + 1].kind == GO_WORD)
+			i += 2;
+		else if (g->t[i].kind == GO_LP || g->t[i].kind == GO_LBRACK)
+		{
+			int			m = go_match(g, i, b);
+
+			if (m < 0)
+				return -1;
+			i = m + 1;
+		}
+		else
+			break;
+	}
+	return i;
+}
+
 /* emit tokens [a,b) as a plpgsql expression, token by token */
 static void
 go_emit_tokens(Go *g, int a, int b, StringInfo out)
@@ -1717,8 +1761,24 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 			else if (tk->len == 1 && tk->s[0] == '^')
 			{
 				/* Go's XOR, or its unary bitwise NOT; SQL's ^ is a power */
+				bool		binary = (i > a && go_operand_end(&g->t[i - 1]));
+				int			pe = binary ? -1 : go_unary_operand_end(g, i + 1, b);
+
 				go_sp(out);
-				appendStringInfoChar(out, (i > a && go_operand_end(&g->t[i - 1])) ? '#' : '~');
+				if (pe > i + 1)
+				{
+					/*
+					 * Go's unary operators bind tighter than any binary one,
+					 * but SQL's prefix ~ binds looser than + and *, so
+					 * bracket ^x with its operand: ^5 + 1 is (~ 5) + 1.
+					 */
+					appendStringInfoString(out, "(~");
+					go_emit_range(g, i + 1, pe, out);
+					appendStringInfoChar(out, ')');
+					i = pe;
+					continue;
+				}
+				appendStringInfoChar(out, binary ? '#' : '~');
 			}
 			else if (tk->len == 2 && tk->s[0] == '&' && tk->s[1] == '^')
 			{

@@ -269,6 +269,20 @@ CREATE FUNCTION fg30_cond(n int) RETURNS int[] LANGUAGE plxgo AS $$
  return []int{0}
 $$;
 SELECT fg30_cond(3) AS go_2_6, fg30_cond(4) AS go_0;
+-- unary ^ binds tighter than any binary operator, as in Go
+CREATE FUNCTION fg30_unary(y int, a int[]) RETURNS text LANGUAGE plxgo AS $$
+ var s []int = a
+ var x int = ^y + 1
+ return fmt.Sprintf("%d %d %d %d %d", ^5 + 1, ^5 * 2, x, ^s[1] * 2, ^(y + 1) * 2)
+$$;
+SELECT fg30_unary(5, ARRAY[1,2]) AS go_m5_m12_m5_m6_m14;
+CREATE FUNCTION fg30_unary_field() RETURNS int LANGUAGE plxgo AS $$
+ for _, r := range query("SELECT 5 AS n") {
+   return ^r.n + 1
+ }
+ return 0
+$$;
+SELECT fg30_unary_field() AS go_m5;
 
 -- A31: int(x) and int64(x) of a float truncate toward zero, as in Go
 CREATE FUNCTION fg31_int(f float8) RETURNS int LANGUAGE plxgo AS $$ return int(f) $$;

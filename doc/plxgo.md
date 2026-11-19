@@ -142,7 +142,7 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
-| `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `~x`, `a & ~(b)` |
+| `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
@@ -177,7 +177,9 @@ beyond 2^53 can lose precision; convert such a value through a variable.
 SQL ranks `<<`, `>>`, `&` and `|` below `+` and `-`, while Go ranks `<<`, `>>`,
 `&` and `&^` with `*`, and `|` and `^` with `+`. When an expression uses a
 bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
-`(1 << 2) + 1`, which is 5, as in Go.
+`(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
+binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
+plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 
 ### Slices and indexing
 
