@@ -118,3 +118,28 @@ ok = x == 1 #:: boolean
 return ok
 $$;
 SELECT fe_a8_ok_rb(1);
+
+-- A11: escape sequences keep their meaning: \x41 is A, \v is a vertical tab
+CREATE FUNCTION fe_a11_js() RETURNS text LANGUAGE plxjs AS $$
+return "[\x41][\v][\b][\f][\u0042][\u{e9}]";
+$$;
+SELECT encode(convert_to(fe_a11_js(), 'UTF8'), 'hex') AS js;
+CREATE FUNCTION fe_a11_py() RETURNS text LANGUAGE plxpython3 AS $$
+return "[\x41][\a][\101][\u00e9][\q]"
+$$;
+SELECT encode(convert_to(fe_a11_py(), 'UTF8'), 'hex') AS py;
+CREATE FUNCTION fe_a11_rb() RETURNS text LANGUAGE plxruby AS $$
+return "[\x41][\e][\s][\101][\u{41 42}][\q]"
+$$;
+SELECT encode(convert_to(fe_a11_rb(), 'UTF8'), 'hex') AS rb;
+CREATE FUNCTION fe_a11_php() RETURNS text LANGUAGE plxphp AS $$
+return "[\x41][\e][\101][\u{41}][\q][\a][\$x]";
+$$;
+SELECT encode(convert_to(fe_a11_php(), 'UTF8'), 'hex') AS php;
+-- A11: a NUL character cannot be stored in text, so \0 is rejected
+CREATE FUNCTION fe_a11_nul_js() RETURNS text LANGUAGE plxjs AS $$
+return "a\0b";
+$$;
+CREATE FUNCTION fe_a11_nul_rb() RETURNS text LANGUAGE plxruby AS $$
+return "a\0b"
+$$;

@@ -920,6 +920,288 @@ interp_at(const PlxSurface *surf, bool fstr, bool sqlctx, const char *s, const c
 	return false;
 }
 
+/*
+ * Escape sequences in an interpolating (non-raw) string. Each dialect has its
+ * own alphabet, and dropping the backslash of one plx does not know turns
+ * "\x41" into "x41". decode_escape() reads one sequence at s (a backslash)
+ * and appends its value to lit in E'' literal form, setting *need_e when the
+ * value needs the E prefix. It returns the position after the sequence.
+ *
+ *            \a \b  \e  \s  \xHH       \nnn octal   \u          unknown \q
+ *   Ruby     yes yes yes yes byte(1-2) byte         XXXX {X..}  q
+ *   PHP      -   -   yes -   byte(1-2) byte         {X..}       \q
+ *   JS/TS    -   yes -   -   char(2)   (rejected)   XXXX {X..}  q
+ *   Python   yes yes -   -   char(2)   char         XXXX UXXXXXXXX  \q
+ *
+ * \n \t \r \v \f \\ and the quotes are common to all. A NUL (\0) is rejected:
+ * a PostgreSQL text value cannot hold one.
+ */
+typedef enum
+{
+	ESC_OTHER, ESC_RUBY, ESC_PHP, ESC_JS, ESC_PY
+} PlxEscStyle;
+
+static PlxEscStyle
+esc_style(const PlxSurface *surf)
+{
+	if (surf->fstrings)
+		return ESC_PY;
+	if (surf->interp_hashbrace)
+		return ESC_RUBY;
+	if (surf->interp_dollar)
+		return ESC_PHP;
+	if (surf->interp_dollarbrace)
+		return ESC_JS;
+	return ESC_OTHER;
+}
+
+static int
+esc_line(Ctx *cx)
+{
+	return cx->t ? cx->t[cx->pos].line : 0;
+}
+
+static int
+hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/* append code point cp to an E'' literal body */
+static void
+esc_put_char(Ctx *cx, StringInfo lit, bool *need_e, uint32 cp)
+{
+	if (cp == 0)
+		plx_err(cx, esc_line(cx), "a string cannot contain a NUL character (\\0)");
+	if (cp > 0x10FFFF)
+		plx_err(cx, esc_line(cx), "invalid Unicode escape: code point %X is out of range", cp);
+	if (cp == '\'')
+		appendStringInfoString(lit, "''");
+	else if (cp == '\\')
+	{
+		appendStringInfoString(lit, "\\\\");
+		*need_e = true;
+	}
+	else if (cp >= 0x20 && cp < 0x7F)
+		appendStringInfoChar(lit, (char) cp);
+	else if (cp < 0x80)
+	{
+		appendStringInfo(lit, "\\x%02X", cp);
+		*need_e = true;
+	}
+	else
+	{
+		/* PostgreSQL converts it to the server encoding, or rejects it */
+		appendStringInfo(lit, cp <= 0xFFFF ? "\\u%04X" : "\\U%08X", cp);
+		*need_e = true;
+	}
+}
+
+/* append one byte (Ruby and PHP \xHH and octal escapes are bytes) */
+static void
+esc_put_byte(Ctx *cx, StringInfo lit, bool *need_e, uint32 b)
+{
+	if (b < 0x80)
+		esc_put_char(cx, lit, need_e, b);
+	else
+	{
+		appendStringInfo(lit, "\\x%02X", b);
+		*need_e = true;
+	}
+}
+
+static const char *
+decode_escape(Ctx *cx, const char *s, const char *e, StringInfo lit, bool *need_e)
+{
+	PlxEscStyle st = esc_style(cx->surf);
+	char		c = s[1];
+	const char *p = s + 2;
+
+	switch (c)
+	{
+		case 'n': appendStringInfoString(lit, "\\n"); *need_e = true; return p;
+		case 't': appendStringInfoString(lit, "\\t"); *need_e = true; return p;
+		case 'r': appendStringInfoString(lit, "\\r"); *need_e = true; return p;
+		case '\\': appendStringInfoString(lit, "\\\\"); *need_e = true; return p;
+		case '"': appendStringInfoChar(lit, '"'); return p;
+		case '\'':
+			if (st == ESC_PHP)
+				break;			/* PHP keeps \' in a double-quoted string */
+			appendStringInfoString(lit, "''");
+			return p;
+		default:
+			break;
+	}
+	if (st == ESC_OTHER)
+	{
+		appendStringInfoChar(lit, c);	/* as before: drop the backslash */
+		return p;
+	}
+	switch (c)
+	{
+		case 'v': esc_put_char(cx, lit, need_e, 0x0B); return p;
+		case 'f': esc_put_char(cx, lit, need_e, 0x0C); return p;
+		case 'a':
+			if (st == ESC_RUBY || st == ESC_PY)
+			{
+				esc_put_char(cx, lit, need_e, 0x07);
+				return p;
+			}
+			break;
+		case 'b':
+			if (st != ESC_PHP)
+			{
+				esc_put_char(cx, lit, need_e, 0x08);
+				return p;
+			}
+			break;
+		case 'e':
+			if (st == ESC_RUBY || st == ESC_PHP)
+			{
+				esc_put_char(cx, lit, need_e, 0x1B);
+				return p;
+			}
+			break;
+		case 's':
+			if (st == ESC_RUBY)
+			{
+				esc_put_char(cx, lit, need_e, ' ');
+				return p;
+			}
+			break;
+		case '\n':
+			if (st != ESC_PHP)
+				return p;		/* line continuation */
+			break;
+		case '\r':
+			if (st != ESC_PHP)
+				return (p < e && *p == '\n') ? p + 1 : p;
+			break;
+		case 'x':
+			{
+				int			maxd = 2;
+				int			mind = (st == ESC_RUBY || st == ESC_PHP) ? 1 : 2;
+				uint32		v = 0;
+				int			nd = 0;
+
+				while (nd < maxd && p < e && hexval(*p) >= 0)
+				{
+					v = v * 16 + hexval(*p++);
+					nd++;
+				}
+				if (nd < mind)
+				{
+					if (st == ESC_PHP)
+						break;	/* PHP keeps a \x with no digits */
+					plx_err(cx, esc_line(cx), "invalid \\x escape in a string");
+				}
+				if (st == ESC_RUBY || st == ESC_PHP)
+					esc_put_byte(cx, lit, need_e, v);
+				else
+					esc_put_char(cx, lit, need_e, v);
+				return p;
+			}
+		case 'u':
+		case 'U':
+			{
+				uint32		v = 0;
+				int			nd = 0;
+
+				if (c == 'U' && st != ESC_PY)
+					break;
+				if (c == 'u' && p < e && *p == '{' && st != ESC_PY)
+				{
+					/* \u{X...}; Ruby allows several, separated by spaces */
+					p++;
+					for (;;)
+					{
+						while (p < e && *p == ' ' && st == ESC_RUBY)
+							p++;
+						if (p < e && *p == '}')
+							break;
+						v = 0;
+						nd = 0;
+						while (p < e && hexval(*p) >= 0 && nd < 8)
+						{
+							v = v * 16 + hexval(*p++);
+							nd++;
+						}
+						if (nd == 0 || nd > 6)
+							plx_err(cx, esc_line(cx), "invalid \\u{...} escape in a string");
+						esc_put_char(cx, lit, need_e, v);
+						if (st != ESC_RUBY)
+							break;
+					}
+					if (p >= e || *p != '}')
+						plx_err(cx, esc_line(cx), "invalid \\u{...} escape in a string");
+					return p + 1;
+				}
+				if (st == ESC_PHP)
+					break;		/* PHP has only \u{...} */
+				while (nd < (c == 'U' ? 8 : 4) && p < e && hexval(*p) >= 0)
+				{
+					v = v * 16 + hexval(*p++);
+					nd++;
+				}
+				if (nd < (c == 'U' ? 8 : 4))
+					plx_err(cx, esc_line(cx), "invalid \\%c escape in a string", c);
+				esc_put_char(cx, lit, need_e, v);
+				return p;
+			}
+		case '$':
+			if (st == ESC_PHP)
+			{
+				appendStringInfoChar(lit, '$');	/* "\$x" is not an interpolation */
+				return p;
+			}
+			break;
+		case 'N':
+			if (st == ESC_PY)
+				plx_err(cx, esc_line(cx), "the \\N{name} escape is not supported; use \\u or \\U");
+			break;
+		default:
+			if (c >= '0' && c <= '7')
+			{
+				uint32		v = 0;
+				int			nd = 0;
+
+				if (st == ESC_JS)
+				{
+					if (c == '0' && !(p < e && *p >= '0' && *p <= '9'))
+						esc_put_char(cx, lit, need_e, 0);	/* rejects NUL */
+					plx_err(cx, esc_line(cx), "octal escape sequences are not allowed in a string; use \\x or \\u");
+				}
+				p = s + 1;
+				while (nd < 3 && p < e && *p >= '0' && *p <= '7')
+				{
+					v = v * 8 + (*p++ - '0');
+					nd++;
+				}
+				if (st == ESC_PY)
+					esc_put_char(cx, lit, need_e, v);
+				else
+					esc_put_byte(cx, lit, need_e, v & 0xFF);
+				return p;
+			}
+			break;
+	}
+	/* not an escape in this dialect */
+	if (st == ESC_PHP || st == ESC_PY)
+	{
+		appendStringInfoString(lit, "\\\\");	/* the backslash stays */
+		*need_e = true;
+		return s + 1;			/* the next character is read normally */
+	}
+	appendStringInfoChar(lit, c);
+	return p;
+}
+
 /* Emit a dialect string token (with quotes) as a plpgsql value expression. */
 static void
 emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
@@ -1015,19 +1297,7 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 		}
 		if (!raw && s[0] == '\\' && s + 1 < e)
 		{
-			char		c = s[1];
-
-			s += 2;
-			switch (c)
-			{
-				case 'n': appendStringInfoString(&lit, "\\n"); need_e = true; break;
-				case 't': appendStringInfoString(&lit, "\\t"); need_e = true; break;
-				case 'r': appendStringInfoString(&lit, "\\r"); need_e = true; break;
-				case '\\': appendStringInfoString(&lit, "\\\\"); need_e = true; break;
-				case '\'': appendStringInfoString(&lit, "''"); break;
-				case '"': appendStringInfoChar(&lit, '"'); break;
-				default: appendStringInfoChar(&lit, c); break;
-			}
+			s = decode_escape(cx, s, e, &lit, &need_e);
 			continue;
 		}
 		if (s[0] == '\'')

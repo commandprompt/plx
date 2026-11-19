@@ -44,6 +44,10 @@ These follow from running as plpgsql and are not specific to any one dialect.
   a local or parameter `a`. Rename one of them. SQL folds an unquoted parameter
   name to lower case, so a parameter declared as `userId` may be written
   `userId` in the body, as long as the body always spells it the same way.
+- **No NUL character in a string.** A PostgreSQL text value cannot hold the
+  byte 0, so `CREATE FUNCTION` rejects a string escape that produces it, such as
+  `\0` or `\x00`. Other escapes keep the meaning they have in the dialect:
+  `"\x41"` is `A` and `"\v"` is a vertical tab.
 - **One assignment per statement.** In plxruby, plxphp, plxjs, plxts and
   plxpython3, `CREATE FUNCTION` rejects a chained assignment such as
   `a = b = 0` or `a += b = 1`. Assign each variable in its own statement.
@@ -163,6 +167,7 @@ fail when the function runs.
 - Tuples, lists, dicts, and sets as general values.
 - `match`/`case`, and the conditional expression `a if c else b`.
 - Floor division `//`; `/` on integers truncates toward zero.
+- The `\N{name}` string escape; write `\u` or `\U` with the code point.
 
 ### plxgo ([chapter](plxgo.md))
 

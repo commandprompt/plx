@@ -299,6 +299,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.
+- The `\N{name}` string escape. Write `\u` or `\U` with the code point.
 
 Not translated:
 
