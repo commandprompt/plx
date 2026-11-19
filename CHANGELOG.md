@@ -4,21 +4,437 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `3.0.0`).
 
-## [Unreleased]
+## [3.0.0] - unreleased
 
-Security fixes from a code audit, and extension version 3.0.0. Every
-security fix concerns input to `CREATE FUNCTION` or `DO`, which any role with
-USAGE on a plx language can send (the languages are trusted, so PUBLIC has
-USAGE by default).
+3.0.0 is a major release. It holds the fixes from a security audit and from a
+code audit of every dialect. Many fixes make a function compute what its
+source language computes, so a function can give a different result once you
+re-create it under 3.0.0. Other fixes reject code that 2.0.0 accepted. Read
+Breaking changes and Upgrading before you install this release.
 
-Install the new build, then run `ALTER EXTENSION plx UPDATE` in each database.
-The update changes no SQL objects; it records the extension as non-relocatable
-(see Changed). Run it straight after installing the build: until it runs, the
-new build already writes plx's schema into functions, but
-`ALTER EXTENSION plx SET SCHEMA` is still allowed and would break them. The
-other fixes need only the new build and a server restart (or new sessions).
+### Breaking changes
+
+Each entry below changes what a function computes, rejects code that 2.0.0
+accepted, or stops an operation that used to work. A function that already
+exists keeps the plpgsql it was created with. It behaves as before until you
+run its `CREATE FUNCTION` again (see Upgrading).
+
+#### All dialects
+
+- **`CREATE FUNCTION` makes plpgsql's own checks.** Every plx language now
+  rejects result and argument types that plpgsql does not allow, such as
+  `cstring` or `internal`. When `check_function_bodies` is on, it also
+  compiles the generated plpgsql. A body that plpgsql cannot parse, or a
+  trigger function that declares arguments, now fails at `CREATE FUNCTION`
+  instead of at every call. For a very large function this compile can take
+  seconds. `pg_restore` runs with `check_function_bodies` off, so it still
+  restores such functions.
+- **The extension is no longer relocatable** (`relocatable = false`).
+  Functions now store plx's schema name, so `ALTER EXTENSION plx SET SCHEMA`
+  would leave them pointing at the old schema. It now fails with
+  `extension "plx" does not support SET SCHEMA`. Choose the schema at
+  `CREATE EXTENSION plx SCHEMA ...` time. Existing functions keep the
+  unqualified names they were generated with until their DDL is run again.
+  For the same reason, a function that uses a string append and is restored
+  into a database where plx is in a different schema (a `pg_dump -n` of one
+  schema, say) fails when it runs, with `schema "..." does not exist`. Install
+  plx in the same schema in the target, or run the function's DDL again after
+  restoring. Functions without a string append are not affected.
+- **`CREATE FUNCTION` and `DO` in a plx language need USAGE on plpgsql.** A
+  role without that privilege now gets `permission denied for language
+  plpgsql`. See "Revoking plpgsql now revokes plx" under Security.
+- **A declared type must be a type name.** A type annotation or declared type
+  that is not a type name, `name%TYPE` or `name%ROWTYPE` is now rejected at
+  `CREATE FUNCTION`. See "A type annotation could run code on entry" under
+  Security.
+
+#### Several dialects
+
+Each entry names the dialects it affects.
+
+- **An interpolated value in a SQL argument is bound, never spliced as SQL.**
+  In `query`, `fetch_one`, `execute`, `open_cursor`, `return_query` and
+  `perform`, an interpolation in the SQL string (`#{x}`, `{$x}`, `${x}`,
+  f-string `{x}`) used to be concatenated into dynamic SQL unquoted, so data
+  could inject SQL. Adding a bind argument to a safe static call silently made
+  it injectable. Now a value becomes a `$n` parameter passed with `USING`
+  (after the call's own bind arguments). In a statement that takes no
+  parameters (`CREATE`, `ALTER`, `SET`, `COMMENT`, ...), the value is spliced
+  through `quote_nullable()`. `'#{x}'` is the value of `x` in static and
+  dynamic SQL alike (it used to be the literal text `'x'` in static SQL), and
+  an interpolation inside a longer literal concatenates the value. An
+  interpolation inside a quoted identifier is rejected. A body that
+  interpolated an identifier (`FROM #{t}`) or a SQL fragment on purpose fails
+  when re-created (`syntax error at or near "$1"`) until it uses `ident()` or
+  `raw()` (see Added). See doc/DYNAMIC-SQL.md.
+- **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
+  plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
+  `return` inside `try` left the function without running `finally`. The
+  finally body is now emitted once. An exit from the try (or from a catch arm)
+  records which exit is pending, leaves the block, runs the finally body, then
+  completes the exit. An error is caught, the finally body runs, and the error
+  is re-raised with its SQLSTATE, message, detail, hint and object names
+  (schema, table, column, constraint, type). A `return` or an error in the
+  finally body replaces the pending exit or error, as in the source languages.
+  Two differences remain. An error re-raised after `finally` carries the
+  location of the re-raise in its `CONTEXT`, not the original statement's.
+  When it names any object, the object names it does not have are sent as
+  empty fields rather than left out (psql shows them in verbose mode). As
+  before, the finally body does not run when the statement is cancelled (a
+  query cancel or `statement_timeout`) or an `assert` fails: `WHEN OTHERS` does
+  not catch those two errors.
+- **Appending a NULL to a string makes the string NULL** (plxruby, plxphp,
+  plxjs, plxts, plxpython3). `s << x`, `$s .= $x` and `s += x` on a string now
+  give the same result as `s := s || x`. If `x` is NULL, or `s` is already
+  NULL, `s` becomes NULL and stays NULL until you assign it again. Before, a
+  NULL value was skipped and a NULL string started again from empty, so
+  `$s .= "id:{$x} "` could drop a whole segment without any sign. In plxphp, a
+  variable whose first use is `.=` starts as an empty string, as in PHP.
+  plxcobol `STRING-APPEND` does not change. To treat a NULL as empty, append
+  `coalesce(x, '')`. A message built with appends and then raised now shows
+  `<NULL>` if any part was NULL.
+- **An append keeps a typed local's type** (plxruby, plxphp, plxjs, plxts,
+  plxpython3). An append (`<<`, `.=`, `+=`) no longer turns a local declared
+  `varchar(n)`, `char(n)`, `citext` or an array into a string builder. Such a
+  local keeps its type, so a length limit is enforced, and an append to a
+  `varchar(n)` local can now raise `value too long`. A NULL appended to such a
+  local makes it NULL, as SQL `||` does. Ruby `<<` on an array appends an
+  element, and PHP `.=` on an array is rejected at `CREATE FUNCTION`.
+- **A `switch` with no default arm does nothing when no arm matches.** This
+  covers `switch` (plxjs, plxts, plxphp), `case` (plxruby) and `EVALUATE`
+  (plxcobol). Before, it raised `case not found`, because a plpgsql `CASE`
+  statement without `ELSE` does. It now does nothing, as in the source
+  language. plxplsql keeps the error, which is also Oracle's behaviour.
+- **An interpolated string as a local's first value runs in place.** The first
+  top-level assignment of a string literal is folded into the `DECLARE`
+  section as the variable's initializer, which runs when the function starts.
+  An interpolating string (Ruby `"#{v}"`, PHP `"$v"`, JS `` `${v}` ``, Python
+  `f"{v}"`) was folded too, so it read its variables before the statements
+  above it had run: `v = "v0"; v = "v2"; s = "got #{v}"` returned `got v0`.
+  Such an assignment now runs in place. A plain literal is still folded.
+- **A constant may not read a local variable.** A constant becomes a plpgsql
+  `CONSTANT`, computed when the function starts, so
+  `v = 1; v = 2; c = v + 1 #:: int const` gave `c = 2`. A constant may now use
+  only literals, parameters and earlier constants. Reading another local is
+  rejected at `CREATE FUNCTION`.
+- **A block annotation before an initializer is rejected** (plxjs, plxphp).
+  `let n /*:: bigint */ = 3;` silently dropped the initializer, so `n` was
+  NULL. That form is now rejected with a hint to write
+  `let n = 3 /*:: bigint */;`.
+- **Names that differ only in case are rejected** (plxruby, plxphp, plxjs,
+  plxts, plxpython3, plxgo). `CREATE FUNCTION` now rejects a body that spells
+  one local or parameter two ways (`a` and `A`, or `N` beside parameter `n`).
+  plx used to merge them into one plpgsql variable, so a second declaration
+  overwrote the first and an assignment to `N` overwrote parameter `n`. A
+  counting-loop variable that spells an earlier local or parameter another
+  way, such as `for (let I = ...)` beside `let i`, is rejected too; before, it
+  hid the local. Rename one of the names.
+- **An integer literal with a leading zero is octal** (plxruby, plxphp,
+  plxjs), as in the source language, so `0755` is 493, not 755. plxpython3 and
+  plxts reject such a literal at `CREATE FUNCTION` and suggest `0o755`.
+- **`^` is bitwise XOR, and `**` binds as in the source language** (plxruby,
+  plxphp, plxjs, plxts, plxpython3). `^` now becomes SQL `#` instead of SQL
+  exponent, so `6 ^ 3` is 5, not 216. `**` is now right-associative and binds
+  tighter than unary minus, so `2 ** 3 ** 2` is 512 (was 64) and `-2 ** 2` is
+  -4 (was 4). A mix of bitwise operators that SQL would group differently from
+  the dialect, such as `a ^ b & c` or `a | b & c`, is now rejected at
+  `CREATE FUNCTION` with a request for parentheses; it used to compute a
+  different value. A mix that SQL groups the same way, such as `a & b | c`,
+  still works.
+- **A chained assignment is rejected** (plxruby, plxphp, plxjs, plxts,
+  plxpython3). `a = b = 0` used to compile to `a := b = 0`, leaving `b`
+  unchanged and giving `a` a boolean. It is now rejected at `CREATE FUNCTION`,
+  and so is a chain with a compound operator such as `a = b <<= 2`,
+  `a = b &= 3` or `a = b ??= 4`, which used to fail only when the function ran.
+- **String escapes keep their meaning** (plxruby, plxphp, plxjs, plxts,
+  plxpython3). `"\x41"` is `A` and `"\v"` is a vertical tab; they used to lose
+  the backslash and become literal letters. A NUL character (`\0`) is now
+  rejected at `CREATE FUNCTION`, because text cannot hold it. In plxphp and
+  plxpython3 an unknown escape such as `\q` keeps its backslash, as in those
+  languages.
+- **Adjacent string literals are concatenated** (plxruby, plxpython3).
+  `"a" "b"` is `ab`. They used to merge into one SQL literal with a quote
+  (`a'b`), and an escape string next to one ending in a backslash could
+  swallow the code after it. A plxpython3 triple-quoted string is now one
+  literal, so `"""hello"""` is `hello`, not `'hello'`, and quotes inside it
+  are text.
+- **A comment inside an expression is left out of the SQL** (plxphp, plxjs,
+  plxts, plxpython3, plxruby). A comment inside a multi-line expression used to
+  be copied into the generated SQL. PHP `$a # note` became SQL XOR and
+  returned a wrong value, a JS `//` comment containing `--` hid the rest of the
+  line, and an apostrophe in a comment opened a SQL string. A re-created PHP
+  function with a `#` comment inside an expression now computes the PHP
+  result.
+- **`int(x)` and `x.to_i` truncate toward zero** (plxpython3, plxruby), as
+  Python and Ruby do: `int(2.7)` is 2 and `int(-2.5)` is -2. Before, they
+  rounded, which is what a SQL cast to integer does. Ruby `"4.7".to_i` now
+  gives 4 instead of an error. In plxpython3, `int()` of a boolean that plx
+  cannot see is boolean, such as a function returning boolean, now fails with
+  `cannot cast type boolean to numeric`; write `int(f(x) == True)` instead. In
+  plxruby, `.to_i`, `.to_f` and `.to_s` on an interpolated string, such as
+  `"#{a}5".to_i`, now convert the whole string. Before, they converted only
+  its last literal piece, so `"#{a}5".to_i * 2` gave 110 for `a = 1` instead
+  of 30.
+- **A range loop variable keeps its last value** (plxpython3, plxruby).
+  plxpython3 `for i in range(...)` and plxruby `for i in lo..hi` now leave the
+  loop variable at its last value after the loop or after a `break`, as Python
+  and Ruby do. Before, the variable kept the value it had before the loop.
+- **A `catch` class catches only its own condition** (plxphp, plxjs, plxts).
+  Before, any class plx did not know (for example `PG::SerializationFailure`,
+  `DivisionByZeroError`, a typo, or `A | B`) caught every error, and in plxphp
+  so did a catch with no variable, such as `catch (PG::SerializationFailure)`.
+  Now `PG::CamelCase` maps to the plpgsql condition `camel_case`, `A | B`
+  catches both, and `Exception`, `Throwable` and `Error` still catch
+  everything. Any other class, with or without a variable, is rejected at
+  `CREATE FUNCTION`.
+- **`break` inside an `if` or `try` within a `switch` arm leaves the switch**
+  (plxjs, plxts, plxphp), as in JavaScript and PHP. Before, inside a loop it
+  left the loop (a wrong result with no error), and outside a loop it was
+  rejected with `break outside a loop`.
+- **A C-style `for` that is not a plain counting loop is rejected** (plxjs,
+  plxts, plxphp), with a hint to use `while`. Before, it was lowered to an
+  integer `FOR` that ignored a condition on another variable, ignored changes
+  the body made to the bound or loop variable, and lost the loop variable's
+  final value. Also rejected now: a counting `for` whose variable an enclosing
+  loop reads again before the `for` (in its condition, or earlier in its body),
+  and in plxjs and plxts a `for (var i ...)` whose variable is read after the
+  loop. Plain counting loops compile as before.
+- **`throw` of an expression that is not a constructor call is rejected**
+  (plxjs, plxts, plxphp), for example `throw a(x) + b(y)`. Before, it silently
+  raised only the first call's first argument.
+
+#### plxphp
+
+- **Properties and elements interpolate.** `"$row->name"`, `"$a[1]"`,
+  `"$a[$i]"` and `"$row[name]"` inside a double-quoted string interpolate the
+  property or element, as in PHP. Before, plx spliced the whole variable and
+  left `->name` or `[1]` as literal text.
+- **`break N` and `continue N` reach the Nth enclosing loop or `switch`**, as
+  in PHP. Before, the level was ignored and only the innermost loop was left.
+  A `break N` that leaves a `switch` or a labelled loop inside two or more
+  `try`/`finally` blocks runs every `finally` it leaves. A level of 0, a level
+  above the nesting depth, and a `continue N` that lands on a switch are
+  rejected. `continue` or `continue 1` inside a switch arm is rejected too:
+  PHP runs it as `break`, so write `break`, or `continue 2` to continue the
+  loop. plxjs and plxts reject a number after `break` or `continue`.
+
+#### plxruby
+
+- **`each_with_index do |v, i|` over an array or a range sets the index**,
+  counting from 0. Before, the index was never set, so the block read the
+  variable's old value or failed when called. The index exists only inside
+  its block, as in Ruby: a parameter or variable with the same name is no
+  longer hidden for the whole function or overwritten by the loop, and a read
+  of the index after the loop gets the outer variable, or fails if there is
+  none. Using the same name for the value and the index (`|v, v|`) is an
+  error, and so is `each do |v, i|` with two block variables.
+
+#### plxpython3
+
+- **`except` with an unknown class is rejected.** A class plx does not know
+  (such as `KeyError`, or a misspelt `PG::` name) now fails at
+  `CREATE FUNCTION` instead of silently catching every error. A tuple such as
+  `except (PG::UniqueViolation, PG::CheckViolation)` now catches only those
+  conditions; before, it caught every error.
+- **String prefixes other than `f` are rejected.** `r"..."`, `b"..."`,
+  `u"..."` and `rf"..."` now fail at `CREATE FUNCTION`. Before, `r"..."`
+  failed only when called.
+
+#### plxgo
+
+- **`var x T` starts at Go's zero value** (0, `""`, `false`) instead of NULL,
+  and a `var` inside a loop body is reset on every iteration. `var e [N]T`
+  starts as N zero elements (`var e [3]int` is `{0,0,0}`), not NULL.
+- **A three-clause `for` loop keeps Go's meaning.** Such loops now lower to
+  `WHILE` instead of an integer `FOR`. The condition is re-tested on every
+  pass, the body may change the loop variable, `for i = ...` updates an
+  existing variable, a float loop variable stays a float, and `continue` runs
+  the post statement in every three-clause loop (before, it could loop
+  forever). `for i := i; ...` starts at the outer `i`. A loop whose start value
+  is a function call (`for i := f(); ...`) or a row field is now rejected;
+  declare the variable first. A start value from an element of a slice
+  declared in the body (`for i := s[0]; ...`) is accepted.
+- **A `switch` runs `default` only when no case matches**, wherever `default`
+  stands. A leading `default` used to win always, and a middle `default`
+  failed with a syntax error. `break` inside a switch leaves the switch
+  instead of the enclosing loop.
+- **A tagged `switch` evaluates its tag once** and compares each case value as
+  a whole, so `switch nextval(...)` advances the sequence once and
+  `case a || b:` means tag == (a || b).
+- **Bitwise operators keep Go's meaning and precedence.** `^` is XOR (it was
+  SQL power, so `6 ^ 3` gave 216), unary `^x` and `&^` work, `1 << 2 + 1` is
+  5, and `<<=`, `>>=`, `&=`, `|=`, `^=` and `&^=` are accepted. Unary `^x`
+  binds tighter than `+` and `*`, so `^y + 1` gives `-y`.
+- **Integer conversions truncate.** `int(x)`, `int64(x)` and the other integer
+  conversions truncate a float toward zero, as Go does, instead of rounding
+  (`int(3.7)` is now 3). `int(x)` and `int64(x)` of a row field or an
+  expression stay exact for integers beyond 2^53, and `int(r.n)` of a text
+  field works.
+- **A `fmt.Sprintf` width pads but never truncates.** `%3d` of 12345 gave
+  `"123"`; it now gives the full value. An explicit argument index such as
+  `%[1]d` is rejected at `CREATE FUNCTION`, in `fmt.Sprintf` and
+  `fmt.Printf`, instead of producing garbled text or printing the values in
+  the wrong order.
+- **Literals keep their value.** String and rune literals decode every Go
+  escape (`\x`, octal, `\u`, `\U`, `\a` `\b` `\f` `\v`). A rune literal such
+  as `'\xe9'` or `'\351'` gives the character U+00E9, as in Go. An unknown
+  escape (such as `"\d"`), a NUL, or bytes that are not valid text are
+  rejected at `CREATE FUNCTION`. Hexadecimal, octal (`0o` and leading `0`),
+  binary and `_`-separated integer literals keep their value on every
+  supported PostgreSQL version (`017` was 17, `0o17` was 0, and on PostgreSQL
+  13 to 15 `0x1F` was 0). A number with letters glued to it is rejected.
+
+#### plxcobol
+
+- **`PERFORM VARYING ... BY 1 UNTIL v > b` no longer hides its control
+  variable.** After the loop, and after `EXIT PERFORM`, the variable holds the
+  COBOL value (for example N+1, not its old value). A `MOVE` to the variable or
+  to the bound inside the body now affects the loop, and a `PIC 9(18)` control
+  variable no longer fails with `integer out of range`.
+- **A character that COBOL does not use is rejected.** `!`, `$`, `@` or `|`
+  outside a string literal or comment now fails at `CREATE FUNCTION`. Before,
+  it was silently dropped, so `A != B` compiled to `a = b`, `$1` to the literal
+  1, and `@ A` to `a`. Bodies that used `||` now fail to create; use
+  `CONCAT(...)`.
+- **Stacked `WHEN` phrases share their statements.** In `EVALUATE TRUE`, and
+  for a `WHEN` stacked directly before `WHEN OTHER`, the stacked phrases now
+  share the statements that follow, as in COBOL. Before, the earlier `WHEN` got
+  an empty arm, so a matching value did nothing.
+- **A store into a numeric PICTURE item truncates.** `MOVE`, `COMPUTE`, `ADD`,
+  `SUBTRACT`, `MULTIPLY`, `DIVIDE`, the `PERFORM VARYING` step and a decimal
+  `VALUE` clause now truncate the excess fractional digits, as COBOL does.
+  `COMPUTE WS-I = 7.9` stores 7, not 8; 2.0 / 3 in `PIC 9(3)V99` stores 0.66,
+  not 0.67; `PIC 9(4) VALUE 2.5` starts at 2, not 3. `DIVIDE` into a numeric
+  PICTURE item keeps the quotient's fraction, so `DIVIDE 2 INTO 7 GIVING` a
+  `PIC 9V99` item stores 3.50, not 3.00. The `/` operator in `COMPUTE` still
+  follows SQL integer division. Write `ROUNDED` after the receiving field to
+  round half away from zero (`DIVIDE 4 INTO 3 ROUNDED` stores 1); it was
+  rejected before. `ROUNDED MODE` is not supported.
+- **`DISPLAY` shows a table element and rejects other expressions.**
+  `DISPLAY WS-ARR(2)` now shows element 2, not the whole array. A `DISPLAY`
+  operand that is not a data name, table element or literal (such as a
+  function call) is now rejected at `CREATE FUNCTION` instead of being
+  silently dropped.
+- **`DIVIDE a BY b` without `GIVING` is rejected** at `CREATE FUNCTION`, as
+  COBOL requires. Before, it overwrote the divisor `b` with `a / b`.
+
+#### plxtsql
+
+- **`SELECT @v = expr FROM ...` assigns once per row**, as in SQL Server. The
+  variable ends with the last row's value and keeps its old value when no row
+  matches. Before, it took the first row and became NULL when no row matched.
+  An assignment list that reads a variable it assigns (the accumulate idiom
+  `SELECT @t = @t + v FROM t`) is now rejected at `CREATE FUNCTION`, because
+  plx cannot compute it the way SQL Server does; use `SUM()` or
+  `string_agg()`. The error names the entry that reads the variable. A list
+  of more than 64 assignments is no longer split, and an entry with no `=` is
+  now an error instead of emitting invalid code.
+- **`[bracketed]` and `"quoted"` identifiers keep their quotes.** They become
+  PostgreSQL quoted identifiers, so `[user]` reads the column `user` instead of
+  returning `current_user`. A `[bracketed]` identifier is folded to lower case
+  and then quoted, so `[Orders]` still matches a table created as `orders`,
+  and `[Order Details]` works. A `"double-quoted"` identifier keeps its case,
+  so `"Name"` reads the column `"Name"` instead of `name`. An unterminated `[`
+  or `"` is now an error at `CREATE FUNCTION`.
+- **`^` is bitwise exclusive OR and `LEN()` ignores trailing spaces**, as in
+  SQL Server. `a ^ b` now becomes `a # b`. Before, it became PostgreSQL
+  exponentiation, so `5 ^ 3` gave 125 instead of 6. `LEN(x)` now becomes
+  `length(rtrim(x))`, so `LEN('abc   ')` gives 3 instead of 6. T-SQL `^`, `&`
+  and `|` bind as tightly as `+` and `-`, but PostgreSQL binds `#`, `&` and `|`
+  more loosely, so `1 ^ 2 + 3` gives 4 in plx, not 6. Write `(1 ^ 2) + 3`.
+- **`RAISERROR` with severity 10 or lower prints a notice and continues.** It
+  used to raise an error, so the progress-message idiom
+  `RAISERROR('step', 0, 1) WITH NOWAIT` stopped the function on its first run.
+  As in SQL Server, a severity of 10 or lower now gives `RAISE NOTICE`, and a
+  `CATCH` block does not catch it. A severity of 11 or higher, -1 or
+  `ERROR_SEVERITY()` still raises an error. A variable severity is checked at
+  run time, and a NULL severity raises an error. A trailing `WITH NOWAIT`,
+  `WITH SETERROR` or `WITH LOG` used to be emitted as a separate statement,
+  which failed at run time with `syntax error at end of input` whenever the
+  error did not fire. These options are now accepted, and `WITH LOG` also
+  writes the message to the server log. An unknown option is rejected at
+  `CREATE FUNCTION`. A function that used a severity of 10 or lower to stop on
+  purpose now continues; to keep the old behaviour, use severity 16 or
+  `THROW`.
+
+#### plxplsql
+
+- **`SELECT ... INTO` and `EXECUTE IMMEDIATE ... INTO` raise `NO_DATA_FOUND`
+  and `TOO_MANY_ROWS`**, as in Oracle. plx now emits `INTO STRICT`. Before, a
+  query with no row set the target to NULL, and a query with more than one row
+  kept the first row, so the Oracle exception handlers never ran. A function
+  that relied on the old NULL or first-row result now raises an error. plx
+  does not add `STRICT` to `WITH ... INSERT INTO`, to
+  `WITH ... UPDATE/DELETE ... RETURNING ... INTO`, or to an `INTO` that already
+  has `STRICT`.
+
+### Upgrading
+
+These steps are for a database administrator who upgrades plx from 2.0.0 to
+3.0.0. You need superuser access to the server and to each database that has
+the plx extension.
+
+1. Install the new build on the server.
+2. Restart the server, or start new sessions, so that they load the new build.
+   The transpiler fixes need only this step.
+
+   **Caution:** Until step 3 runs in a database, a function created there with
+   a string append fails when it is called, with
+   `function <schema>.plx_sb_append_strict(plx_strbuild, text) does not exist`.
+   `ALTER EXTENSION plx SET SCHEMA` is also still allowed, and it would break
+   the functions the new build creates. Run step 3 before anyone creates or
+   replaces a plx function.
+3. In each database that has plx, run:
+
+   ```sql
+   ALTER EXTENSION plx UPDATE;
+   ```
+
+   The update records the extension as non-relocatable. It adds binary send
+   and receive functions to `plx_strbuild` and makes it collatable, which
+   includes existing columns, domains and range types over it. It also adds
+   the function that string appends call in 3.0.0. A view created before the
+   update keeps no collation in its stored query until you re-create it.
+
+   To check the result, run
+   `SELECT extversion, extrelocatable FROM pg_extension WHERE extname = 'plx';`.
+   It returns `3.0.0` and `f`.
+4. List the plx functions in the database:
+
+   ```sql
+   SELECT p.oid::regprocedure AS function, l.lanname AS language
+     FROM pg_proc p
+     JOIN pg_language l ON l.oid = p.prolang
+    WHERE l.lanname LIKE 'plx%'
+    ORDER BY 1;
+   ```
+
+   Each of these keeps the plpgsql it was created with, so it behaves as it did
+   under 2.0.0 until you run its `CREATE FUNCTION` again.
+5. Find the functions that a breaking change affects. plx has no query that
+   does this exactly. Read each function's source with the `plx_source()`
+   helper in doc/DEBUGGING.md, and compare it with Breaking changes. To narrow
+   the list, search the source for the construct that a change concerns, for
+   example `^`:
+
+   ```sql
+   SELECT p.oid::regprocedure AS function
+     FROM pg_proc p
+     JOIN pg_language l ON l.oid = p.prolang
+    WHERE l.lanname LIKE 'plx%'
+      AND plx_source(p.oid) LIKE '%^%';
+   ```
+
+   The search matches text, so it also finds the construct inside strings and
+   comments.
+6. Re-create each function from its source with `CREATE OR REPLACE FUNCTION`,
+   then test it. The function then uses the 3.0.0 code.
 
 ### Security
+
+Every fix in this section concerns input to `CREATE FUNCTION` or `DO`, which
+any role with USAGE on a plx language can send (the languages are trusted, so
+PUBLIC has USAGE by default).
 
 - **Backend crash on a type annotation at the start of an expression.** A
   `/*:: T */` or `#:: T` annotation as the first token of an `if`/`while`
@@ -26,17 +442,20 @@ other fixes need only the new build and a server restart (or new sessions).
   from a NULL pointer, killing the backend with SIGSEGV (and resetting every
   session on the server). Affected plxjs, plxts, plxphp, plxruby, plxpython3,
   including DO blocks. Annotations are now skipped at span edges.
+- **Backend crash on a loop over `query()` with no arguments** (plxjs, plxts,
+  plxphp, plxpython3). `CREATE FUNCTION` or `DO` now fails with
+  `query requires a SQL argument`.
 - **Stack-overflow crash on deeply nested expressions in plxtsql, plxgo and
   plxcobol.** Their expression emitters recursed once per nested call,
   subscript or literal without `check_stack_depth()`, so a body like
   `ISNULL(ISNULL(...))` or `int(int(...))` some 50,000 levels deep crashed the
   backend. They now raise `expression nested too deeply`, like the shared
   rewriter already did.
-- **Exponential output from nested `finally`/`ensure`.** Each finally body is
+- **Exponential output from nested `finally`/`ensure`.** Each finally body was
   emitted once per exit path, so a finally nested inside a finally doubled the
   output per level: a 668-byte function stored a 94 MB body, and a slightly
   deeper one drove a backend to gigabytes of memory. The finally body is now
-  emitted once (see Changed), so output grows linearly with nesting.
+  emitted once (see Breaking changes), so output grows linearly with nesting.
 - **String literal escaping its quotes.** A dialect string that ended in a lone
   backslash, inside an interpolation (plxjs/plxts `${'...\'}`, plxpython3
   f-strings), was emitted with that backslash bare inside an `E'...'` literal,
@@ -62,6 +481,14 @@ other fixes need only the new build and a server restart (or new sessions).
   annotation lines are scanned once, and the lexer, rewriter and local table
   check for interrupts. (The same fix stops plxpython3 from
   counting blank lines twice in error line numbers.)
+- **Quadratic, uninterruptible transpile time in plxtsql and plxplsql.** A
+  plxtsql body with many unbalanced call parentheses (`f(f(f(...`), or a
+  plxplsql body with many unbalanced `DBMS_OUTPUT.PUT_LINE(` or
+  `RAISE_APPLICATION_ERROR(` calls, took quadratic time to transpile and could
+  not be interrupted, so any role could tie up a backend. So did deeply nested
+  `CONVERT`, `IIF`, `CHARINDEX` or `RAISE_APPLICATION_ERROR` calls with no
+  comma. These now transpile in linear time, and `statement_timeout` can
+  cancel the transpile.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.
@@ -80,14 +507,15 @@ other fixes need only the new build and a server restart (or new sessions).
   unaffected.
 - **Generated code names plx's own objects with plx's schema.** A string
   append (`s << x`, `$s .= x`, `s += x`, `STRING-APPEND`) declared the
-  variable as `plx_strbuild` and called `plx_sb_append(...)` unqualified, so
+  variable as `plx_strbuild` and called the append function unqualified, so
   they were resolved through `search_path` every time the function ran. That
   broke the standard hardening for a `SECURITY DEFINER` function
   (`SET search_path = pg_catalog`: `type "plx_strbuild" does not exist`), broke
   functions when plx was installed in a schema not on the path, and let a
   same-named function planted earlier on the path run in their place, with the
   definer's privileges for a `SECURITY DEFINER` function. Generated code now
-  writes `<plx schema>.plx_strbuild` and `<plx schema>.plx_sb_append`.
+  writes `<plx schema>.plx_strbuild` and qualifies the append function with
+  the same schema.
 - **A type annotation could run code on entry.** A local variable's type is
   spliced into the plpgsql `DECLARE` section, and plpgsql reads a declaration up
   to its `;`. A type annotation could therefore carry an initializer or more
@@ -98,91 +526,156 @@ other fixes need only the new build and a server restart (or new sessions).
   name accepted by the SQL type-name grammar, or `name%TYPE` / `name%ROWTYPE`.
   Anything else is rejected at `CREATE FUNCTION`.
 
+### Fixed
+
+Fixes that change a result or reject code are listed under Breaking changes,
+not here.
+
+#### All dialects
+
+- **`plx_strbuild` works in sorting, grouping and binary transfer.** The type
+  now has binary send and receive functions and is collatable like text.
+  Binary `COPY`, binary protocol results, `ORDER BY`, `DISTINCT`, `GROUP BY`
+  and `COLLATE` now work on it. These used to fail, for example when a string
+  built with an append operator was used in a query that sorts or removes
+  duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on existing
+  `plx_strbuild` columns and on range types over `plx_strbuild` (or a domain
+  over it), so their constructors and operators work.
+
+#### Several dialects
+
+- plxjs, plxts, plxphp, plxruby, plxpython3: a `finally`/`ensure` body that
+  raised an error on the normal path ran a second time from the error path.
+  It now runs once.
+- plxruby, plxphp, plxjs, plxts, plxpython3: `.to_s`, `.to_i` and `.to_f`
+  were rewritten as casts wherever the text appeared, so a field whose name
+  starts with one of them broke: `r.to_status` became `r::texttatus`. They
+  are now rewritten only as whole words, and `x.to_s()` with an empty argument
+  list works too.
+- plxruby, plxphp, plxjs, plxts, plxpython3: `ARRAY['x']` and a subscript on a
+  `jsonb`, `json` or `hstore` value (`j['a']`) are passed to SQL unchanged
+  instead of being rewritten to record field access (`ARRAY.x`, `j.a`), which
+  failed at run time. A record key that
+  is not a plain identifier, such as `row['a b']`, is now quoted as a column
+  name. In plxphp and plxruby, a record variable named `array` is no longer
+  read as the SQL `ARRAY` constructor, which silently returned a one-element
+  array. Such a variable still fails, because `array` is an SQL reserved word.
+- plxjs, plxts: a `?` and `:` inside a template literal are now text. They used
+  to be read as a ternary, which turned the literal into broken SQL and made
+  the function fail when it ran.
+- plxruby, plxpython3, plxjs, plxts, plxphp: a quote or brace inside an
+  interpolated expression no longer ends the string or the interpolation
+  early. The Ruby idiom `"#{s == "a" ? "A" : "other"}"` now works, Python
+  `f"{concat('}', x)}"` gives the right text, and `?`, `:` and `**` inside a
+  string nested in an interpolation, such as Ruby `"[#{"a?b:c"}]"`, are text.
+- plxjs, plxts, plxphp: a `switch` arm may now end with `continue` or with
+  `break label`. Before, valid code was rejected with
+  `switch fall-through is not supported` or
+  `switch body must consist of case/default labels`.
+- plxjs, plxphp, plxruby, plxpython3, plxts: an expression nested too deeply,
+  and an integer literal such as `0xFFFFFFFFFFFFFFFFFF` that overflows 64 bits,
+  now report the source line of their statement instead of line 0. plxpython3:
+  a `class` or `lambda` statement is now reported as `class is not supported`
+  or `lambda is not supported` instead of `def is not supported`.
+
+#### plxts
+
+- `catch (e: unknown)` (a catch variable with a type annotation) now binds
+  `e`, so `e.message` and `e.sqlstate` work. Before, the function failed at
+  run time with `missing FROM-clause entry for table e`.
+
+#### plxpython3
+
+- `call(f"...")` emitted an unterminated quoted identifier. An f-string
+  procedure name is now rejected.
+
+#### plxruby
+
+- A NULL in a `raise` option no longer replaces your error. Before, if a value
+  in `detail:`, `hint:`, `column:` or `constraint:` was NULL, either
+  interpolated (`detail: "looked up #{u}"`) or bare (`detail: u`), the `raise`
+  failed with `RAISE statement option cannot be null` (SQLSTATE 22004). Your
+  message, SQLSTATE, detail and hint were lost, and a handler for your
+  SQLSTATE did not run. These options now get the same fallback as the
+  message: each NULL value becomes an empty string. The generated SQL changes
+  for every `raise` that has options. Behaviour changes only for calls that
+  used to fail with 22004. A NULL `errcode:` still fails with 22004.
+- `raise message: "...", ...` now raises that message. Before, it compiled to a
+  syntax error. A `raise` with both a message and `message:` is rejected at
+  `CREATE FUNCTION` instead of failing when it runs.
+
+#### plxgo
+
+- `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
+
+#### plxcobol
+
+- `EXIT PERFORM CYCLE` inside a `PERFORM VARYING` with a step other than BY 1,
+  or with a compound `UNTIL`, now runs the step. Before, the loop never ended.
+- An `OCCURS` item with a `VALUE` clause now starts with every element set to
+  that value. Before, the function was created but failed at every call with
+  `malformed array literal`.
+- An `EVALUATE` whose only `WHEN` phrases are stacked directly before
+  `WHEN OTHER`, or that has only `WHEN OTHER` or no `WHEN` at all, no longer
+  fails at every call.
+- `DISPLAY` accepts `NO ADVANCING` without `WITH`. Before, `NO` and
+  `ADVANCING` were read as data names and the statement failed.
+
+#### plxtsql
+
+- A `CASE` expression works in `SET`, `RETURN`, `DECLARE` initializers, `IF`
+  and `WHILE` conditions, and `SELECT` assignment lists. Before, plx cut the
+  expression at the CASE's `ELSE` or `END`, and the function was rejected with
+  `unexpected END` or `unexpected keyword in statement position`. An `IF`
+  condition that holds `IIF(...)` now compiles too.
+
+#### Test suite
+
+- The differential test records the exact result each documented divergence
+  documents, and only that result is exempt. Before, a dialect could return
+  any wrong value for an exempted call and the check still passed. This
+  affects the exemptions for plxruby, plxphp, plxjs, plxts, plxpython3 and
+  plxcobol.
+- The differential test records each result as JSON. Before, a dialect that
+  returned the literal text `<NULL>`, `<EMPTY>` or `ERROR <code>` was counted
+  as matching a reference that returned NULL, returned an empty string or
+  raised. No current case was affected.
+- The fuzzer reports a statement cancelled at its timeout as a hang and an
+  out-of-memory error as a finding. Before, both counted as clean. It also
+  stops with an error when the plx languages are missing from the target
+  database; before, it silently tested nothing.
+- `make metacheck` checks `META.json` the way PGXN does at upload time:
+  license identifiers, unknown keys, empty text fields, the meta-spec version,
+  the prereqs structure and version ranges, `no_index`, the bugtracker and
+  repository value types, and full-string version patterns. Before, it passed
+  files that PGXN rejects. It reports a value of the wrong type as an error
+  instead of crashing.
+- `test/run_corpus.py` compares result rows and notices in order, and compares
+  psql output line by line. Before, it compared unordered token sets, so
+  swapped values, mispaired rows and reversed results passed. A value of `-`
+  or `+`, spaces inside a value or message, and the position of an empty row
+  now count too. This affects the plxruby and plxcobol corpus cases.
+
 ### Changed
 
-The first two entries are breaking changes, and the third says how to upgrade.
+- `make differentialcheck` also runs the self-tests of the fuzzer and of
+  `test/run_corpus.py`. Neither self-test needs a server.
+- `test/run_corpus.py` uses the `psql` on `PATH` (or `PLX_PSQL`) and the libpq
+  environment variables instead of a fixed `/usr/local/pgsql` path. Its
+  self-test runs before it touches the server.
 
-- **An interpolated value in a SQL argument is bound, never spliced as SQL.**
-  In `query`, `fetch_one`, `execute`, `open_cursor`, `return_query` and
-  `perform`, an interpolation in the SQL string (`#{x}`, `{$x}`, `${x}`,
-  f-string `{x}`) used to be concatenated into dynamic SQL unquoted, so data
-  could inject SQL; adding a bind argument to a safe static call silently made
-  it injectable. Now a value becomes a `$n` parameter passed with `USING`
-  (after the call's own bind arguments), or, in a statement that takes no
-  parameters (`CREATE`, `ALTER`, `SET`, `COMMENT`, ...), is spliced through
-  `quote_nullable()`. `'#{x}'` is the value of `x` in static and dynamic SQL
-  alike (it used to be the literal text `'x'` in static SQL), and an
-  interpolation inside a longer literal concatenates the value. An
-  interpolation inside a quoted identifier is rejected.
+### Added
+
 - **`ident()`, `literal()` and `raw()`** may wrap an interpolation in a SQL
   argument (plxphp: `{ident($t)}`): `ident(e)` splices `quote_ident(e)`,
   `literal(e)` splices `quote_nullable(e)`, and `raw(e)` splices `e` unquoted,
   for a trusted SQL fragment. Each makes the call dynamic.
-- Upgrading: a body that interpolated an identifier (`FROM #{t}`) or a SQL
-  fragment on purpose fails when re-created (`syntax error at or near "$1"`)
-  until it uses `ident()` or `raw()`. Stored functions are unaffected until
-  their DDL is run again. See doc/DYNAMIC-SQL.md.
-- **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
-  plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
-  `return` inside `try` left the function without running `finally`. The
-  finally body is now emitted once: an exit from the try (or from a catch arm)
-  records which exit is pending, leaves the block, runs the finally body, then
-  completes the exit; an error is caught, the finally body runs, and the error
-  is re-raised with its SQLSTATE, message, detail, hint and object names
-  (schema, table, column, constraint, type). A `return` or an error in the
-  finally body replaces the pending exit or error, as in the source languages.
-  Behaviour differences to be aware of: an error re-raised after `finally`
-  carries the location of the re-raise in its `CONTEXT`, not the original
-  statement's; when it names any object, the object names it does not have
-  are sent as empty fields rather than left out (psql shows them in verbose
-  mode). As before, the finally body does not run when the statement is
-  cancelled (a query cancel or `statement_timeout`) or an `assert` fails:
-  `WHEN OTHERS` does not catch those two errors. Only functions created or
-  replaced after upgrading are affected; stored functions keep the plpgsql
-  they were created with.
-- **The extension is no longer relocatable** (`relocatable = false`).
-  Functions now store plx's schema name, so `ALTER EXTENSION plx SET SCHEMA`
-  would leave them pointing at the old schema; it now fails with
-  `extension "plx" does not support SET SCHEMA`. Choose the schema at
-  `CREATE EXTENSION plx SCHEMA ...` time. Existing functions keep the
-  unqualified names they were generated with until their DDL is run again.
-  For the same reason, a function that uses a string append and is restored
-  into a database where plx is in a different schema (a `pg_dump -n` of one
-  schema, say) fails when it runs, with `schema "..." does not exist`: install
-  plx in the same schema in the target, or run the function's DDL again after
-  restoring. Functions without a string append are not affected.
-
-### Fixed
-
-- A `finally`/`ensure` body that raised an error on the normal path ran a
-  second time from the error path. It now runs once.
-- plxpython3 `call(f"...")` emitted an unterminated quoted identifier. An
-  f-string procedure name is now rejected.
-- A `switch` (plxjs, plxts, plxphp), `case` (plxruby) or `EVALUATE` (plxcobol)
-  with no default arm raised `case not found` when no arm matched, because a
-  plpgsql `CASE` statement without `ELSE` does. It now does nothing, as in the
-  source language. plxplsql keeps the error, which is also Oracle's behaviour.
-- plxgo `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
-- In plxjs and plxphp, a block annotation placed before an initializer
-  (`let n /*:: bigint */ = 3;`) silently dropped the initializer, so `n` was
-  NULL. That form is now rejected with a hint to write
-  `let n = 3 /*:: bigint */;`.
-- **An interpolated string as a local's first value read stale values.** The
-  first top-level assignment of a string literal is folded into the `DECLARE`
-  section as the variable's initializer, which runs when the function starts.
-  An interpolating string (Ruby `"#{v}"`, PHP `"$v"`, JS `` `${v}` ``, Python
-  `f"{v}"`) was folded too, so it read its variables before the statements
-  above it had run: `v = "v0"; v = "v2"; s = "got #{v}"` returned `got v0`. Such
-  an assignment now runs in place. A plain literal is still folded.
-- **A constant computed from a local variable read the variable's initial
-  value.** A constant becomes a plpgsql `CONSTANT`, computed when the function
-  starts, so `v = 1; v = 2; c = v + 1 #:: int const` gave `c = 2`. A constant
-  may now use only literals, parameters and earlier constants; reading another
-  local is rejected at `CREATE FUNCTION`.
-- `.to_s`, `.to_i` and `.to_f` were rewritten as casts wherever the text
-  appeared, so a field whose name starts with one of them broke:
-  `r.to_status` became `r::texttatus`. They are now rewritten only as whole
-  words, and `x.to_s()` with an empty argument list works too.
+- **`ROUNDED` in plxcobol.** Write `ROUNDED` after a receiving field to round
+  half away from zero instead of truncating. See the PICTURE entry under
+  Breaking changes.
+- **`WITH NOWAIT`, `WITH SETERROR` and `WITH LOG` on plxtsql `RAISERROR`.**
+  `WITH LOG` also writes the message to the server log. See the `RAISERROR`
+  entry under Breaking changes.
 
 ## [2.0.1] - 2026-08-25
 
