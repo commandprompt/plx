@@ -154,9 +154,16 @@ brace_loop_body(Ctx *cx, int ind, int start)
 }
 
 /*
+ * PHP treats a switch as a loop for continue, so continue (or continue N)
+ * whose target is a switch runs as break. plx rejects it rather than guess
+ * which one the author meant.
+ */
+#define PHP_CONTINUE_SWITCH_MSG \
+	"continue inside a switch runs as break in PHP; write break, or continue 2 to continue the loop"
+
+/*
  * break / continue with a number (a+1 is the T_INT). PHP counts the
- * enclosing loops and switches; continue that lands on a switch means break
- * in PHP, so it is rejected rather than guessed.
+ * enclosing loops and switches.
  */
 static void
 emit_leveled_exit(Ctx *cx, int a, int b, int ind)
@@ -194,13 +201,7 @@ emit_leveled_exit(Ctx *cx, int a, int b, int ind)
 		return;
 	}
 	if (n == 1 && !is_break)
-	{
-		/* continue 1 in a switch: the enclosing loop, as for a bare continue */
-		if (cx->loopdepth == 0)
-			plx_err(cx, kw->line, "continue outside a loop");
-		plx_emit_exit(cx, &cx->out, ind, PLX_EXIT_CONTINUE, NULL, NULL, NULL);
-		return;
-	}
+		plx_err(cx, kw->line, PHP_CONTINUE_SWITCH_MSG);
 	if (t->is_switch && !is_break)
 		plx_err(cx, kw->line, "continue %d targets a switch; write break %d", n, n);
 	plx_emit_exit(cx, &cx->out, ind, is_break ? PLX_EXIT_BREAK : PLX_EXIT_CONTINUE,
@@ -1142,6 +1143,11 @@ parse_brace_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		else if (tk->kind == T_KW && (tk->kw == KW_BREAK || tk->kw == KW_NEXT) &&
 				 cx->t[a + 1].kind == T_INT)
 			emit_leveled_exit(cx, a, b, ind);
+		else if (tk->kind == T_KW && tk->kw == KW_NEXT && b == a + 1 &&
+				 cx->surf->var_sigil == '$' &&
+				 cur_brk && cur_brk->cx == cx && cur_brk->is_switch &&
+				 cur_brk->loopdepth == cx->loopdepth)
+			plx_err(cx, tk->line, PHP_CONTINUE_SWITCH_MSG);
 		else if (tk->kind == T_KW && tk->kw == KW_BREAK && b == a + 1 &&
 				 cur_brk && cur_brk->cx == cx && cur_brk->is_switch &&
 				 cur_brk->loopdepth == cx->loopdepth)

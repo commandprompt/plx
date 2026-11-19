@@ -539,3 +539,40 @@ SELECT fb_rv2(3);
     111
 (1 row)
 
+-- A16: PHP continue or continue 1 whose target is a switch is rejected, since PHP runs it as break
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv3(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) { case 1: continue; default: break; }
+  $c = $c + 1;
+}
+return $c;
+$$;
+ERROR:  plxphp: continue inside a switch runs as break in PHP; write break, or continue 2 to continue the loop
+CREATE FUNCTION fb_rv4(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) { case 1: continue 1; default: break; }
+  $c = $c + 1;
+}
+return $c;
+$$;
+ERROR:  plxphp: continue inside a switch runs as break in PHP; write break, or continue 2 to continue the loop
+CREATE FUNCTION fb_rv5(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) {
+    case 1:
+      if ($n > 2) { continue; }
+      $c = $c + 100;
+      break;
+    default:
+      break;
+  }
+  $c = $c + 1;
+}
+return $c;
+$$;
+ERROR:  plxphp: continue inside a switch runs as break in PHP; write break, or continue 2 to continue the loop
+\set VERBOSITY default

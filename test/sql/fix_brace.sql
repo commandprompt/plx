@@ -400,3 +400,37 @@ for ($i = 0; $i < $n; $i++) {
 return $c * 100 + $f * 10 + $g;
 $$;
 SELECT fb_rv2(3);
+-- A16: PHP continue or continue 1 whose target is a switch is rejected, since PHP runs it as break
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv3(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) { case 1: continue; default: break; }
+  $c = $c + 1;
+}
+return $c;
+$$;
+CREATE FUNCTION fb_rv4(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) { case 1: continue 1; default: break; }
+  $c = $c + 1;
+}
+return $c;
+$$;
+CREATE FUNCTION fb_rv5(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n; $i++) {
+  switch ($i) {
+    case 1:
+      if ($n > 2) { continue; }
+      $c = $c + 100;
+      break;
+    default:
+      break;
+  }
+  $c = $c + 1;
+}
+return $c;
+$$;
+\set VERBOSITY default
