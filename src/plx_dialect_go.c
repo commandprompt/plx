@@ -14,6 +14,7 @@
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
@@ -129,6 +130,105 @@ go_asi_kind(GoTok *tk)
 		default:
 			return false;
 	}
+}
+
+/* value of a hex digit, or -1 */
+static int
+go_hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * A Go number literal st[0..len) as SQL text, or a plx error when Go would
+ * reject it. Integer literals in base 16 (0x), 8 (0o or a leading 0) and 2
+ * (0b) become decimal: PostgreSQL before 16 reads 0x1F as 0 followed by a
+ * column alias, and 017 as decimal. Digit separators (_) are dropped.
+ * Floats keep their text; hexadecimal floats and imaginary literals are not
+ * supported.
+ */
+static char *
+go_number(Go *g, const char *st, int len, int line)
+{
+	char	   *d = palloc(len + 1);
+	int			n = 0,
+				i,
+				base = 10,
+				from = 0;
+	uint64		v = 0;
+	bool		isfloat = false;
+
+	for (i = 0; i < len; i++)				/* drop digit separators */
+		if (st[i] != '_')
+			d[n++] = st[i];
+	d[n] = '\0';
+	if (n > 1 && d[0] == '0' && (d[1] == 'x' || d[1] == 'X'))
+		base = 16, from = 2;
+	else if (n > 1 && d[0] == '0' && (d[1] == 'o' || d[1] == 'O'))
+		base = 8, from = 2;
+	else if (n > 1 && d[0] == '0' && (d[1] == 'b' || d[1] == 'B'))
+		base = 2, from = 2;
+	else
+	{
+		for (i = 0; i < n; i++)
+			if (d[i] == '.' || d[i] == 'e' || d[i] == 'E')
+				isfloat = true;
+		if (isfloat)
+		{
+			/* digits, one '.', and an exponent with an optional sign */
+			bool		dot = false,
+						exp = false,
+						digit = false;
+
+			for (i = 0; i < n; i++)
+			{
+				char		c = d[i];
+
+				if (c >= '0' && c <= '9')
+					digit = true;
+				else if (c == '.' && !dot && !exp)
+					dot = true;
+				else if ((c == 'e' || c == 'E') && !exp && digit &&
+						 i + 1 < n)
+				{
+					exp = true;
+					if (d[i + 1] == '+' || d[i + 1] == '-')
+						i++;
+					if (i + 1 >= n)
+						break;
+				}
+				else
+					break;
+			}
+			if (i < n || !digit || (n > 0 && (d[n - 1] == 'e' || d[n - 1] == 'E' ||
+											  d[n - 1] == '+' || d[n - 1] == '-')))
+				plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+			return d;
+		}
+		if (n > 1 && d[0] == '0')
+			base = 8, from = 1;			/* legacy octal: 017 */
+	}
+	if (from >= n)
+		plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+	for (i = from; i < n; i++)
+	{
+		int			dv = go_hexval(d[i]);
+
+		if (dv < 0 || dv >= base)
+			plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+		if (v > (PG_UINT64_MAX - dv) / base)
+			plx_err(g->cx, line, "number literal \"%s\" is too large", pnstrdup(st, len));
+		v = v * base + dv;
+	}
+	if (base == 10)
+		return d;
+	return psprintf(UINT64_FORMAT, v);
 }
 
 static void
@@ -255,14 +355,22 @@ go_lex(Go *g, const char *body)
 		}
 		if (GODIGIT(*p))
 		{
+			/*
+			 * Take the whole run of letters, digits and dots, so that a
+			 * letter Go would reject (12abc) is an error rather than an
+			 * identifier glued to the number. A sign continues the literal
+			 * only after a decimal exponent: in 0x1e+2 the e is a digit.
+			 */
 			const char *st = p;
+			bool		hex = (p + 1 < end && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'));
+			char	   *txt;
 
-			while (p < end && (GODIGIT(*p) || *p == '.' || *p == '_' ||
-							   *p == 'x' || *p == 'X' ||
-							   ((*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) ||
-							   (( *p == '+' || *p == '-') && (p[-1] == 'e' || p[-1] == 'E'))))
+			while (p < end && (GOALPHA(*p) || GODIGIT(*p) || *p == '.' ||
+							   (!hex && (*p == '+' || *p == '-') &&
+								(p[-1] == 'e' || p[-1] == 'E'))))
 				p++;
-			GOPUSH(GO_NUM, st, (int) (p - st));
+			txt = go_number(g, st, (int) (p - st), line);
+			GOPUSH(GO_NUM, txt, (int) strlen(txt));
 			continue;
 		}
 		if (*p == '(')
@@ -372,15 +480,35 @@ go_lex(Go *g, const char *body)
 #undef GODIGIT
 }
 
-/* emit a Go string/rune literal as a SQL string literal */
+/* append one decoded byte to a SQL literal, doubling a quote */
 static void
-go_emit_str(GoTok *tk, StringInfo out)
+go_str_byte(Go *g, GoTok *tk, StringInfo out, unsigned int c)
+{
+	if (c == 0)
+		plx_err(g->cx, tk->line, "a string literal cannot contain a NUL character");
+	if (c == '\'')
+		appendStringInfoString(out, "''");
+	else
+		appendStringInfoChar(out, (char) c);
+}
+
+/*
+ * emit a Go string/rune literal as a SQL string literal, decoding every Go
+ * escape: \a \b \f \n \r \t \v \\ \' \", \xHH and \NNN (one byte each), and
+ * \uHHHH and \UHHHHHHHH (a Unicode code point, in the server encoding). Go
+ * rejects any other escape, and so does plx. A decoded quote is doubled, so
+ * an escape cannot end the SQL literal.
+ */
+static void
+go_emit_str(Go *g, GoTok *tk, StringInfo out)
 {
 	char		q = tk->s[0];
 	const char *s = tk->s + 1,
 			   *e = tk->s + tk->len - 1;
+	int			start;
 
 	appendStringInfoChar(out, '\'');
+	start = out->len;
 	if (q == '`')									/* raw: no escapes */
 	{
 		while (s < e)
@@ -404,10 +532,64 @@ go_emit_str(GoTok *tk, StringInfo out)
 					case 'n': appendStringInfoChar(out, '\n'); break;
 					case 't': appendStringInfoChar(out, '\t'); break;
 					case 'r': appendStringInfoChar(out, '\r'); break;
+					case 'a': appendStringInfoChar(out, '\a'); break;
+					case 'b': appendStringInfoChar(out, '\b'); break;
+					case 'f': appendStringInfoChar(out, '\f'); break;
+					case 'v': appendStringInfoChar(out, '\v'); break;
 					case '\\': appendStringInfoChar(out, '\\'); break;
 					case '\'': appendStringInfoString(out, "''"); break;
 					case '"': appendStringInfoChar(out, '"'); break;
-					default: appendStringInfoChar(out, *s); break;
+					case 'x':
+						if (s + 2 >= e || go_hexval(s[1]) < 0 || go_hexval(s[2]) < 0)
+							plx_err(g->cx, tk->line, "\\x in a string literal needs two hexadecimal digits");
+						go_str_byte(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
+						s += 2;
+						break;
+					case '0': case '1': case '2': case '3':
+					case '4': case '5': case '6': case '7':
+						{
+							unsigned int v;
+
+							if (s + 2 >= e || s[1] < '0' || s[1] > '7' ||
+								s[2] < '0' || s[2] > '7')
+								plx_err(g->cx, tk->line, "an octal escape in a string literal needs three octal digits");
+							v = (s[0] - '0') * 64 + (s[1] - '0') * 8 + (s[2] - '0');
+							if (v > 255)
+								plx_err(g->cx, tk->line, "octal escape value in a string literal is above 255");
+							go_str_byte(g, tk, out, v);
+							s += 2;
+						}
+						break;
+					case 'u':
+					case 'U':
+						{
+							int			n = (*s == 'u') ? 4 : 8,
+										k;
+							pg_wchar	cp = 0;
+							unsigned char buf[64];
+
+							if (s + n >= e)
+								plx_err(g->cx, tk->line, "\\u needs four and \\U eight hexadecimal digits");
+							for (k = 1; k <= n; k++)
+							{
+								if (go_hexval(s[k]) < 0)
+									plx_err(g->cx, tk->line, "\\u needs four and \\U eight hexadecimal digits");
+								cp = cp * 16 + go_hexval(s[k]);
+							}
+							if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+								plx_err(g->cx, tk->line, "invalid Unicode code point in a string literal");
+							if (cp < 0x80)
+								go_str_byte(g, tk, out, cp);
+							else
+							{
+								pg_unicode_to_server(cp, buf);
+								appendStringInfoString(out, (char *) buf);
+							}
+							s += n;
+						}
+						break;
+					default:
+						plx_err(g->cx, tk->line, "unknown escape sequence in a string literal");
 				}
 				s++;
 				continue;
@@ -418,6 +600,9 @@ go_emit_str(GoTok *tk, StringInfo out)
 				appendStringInfoChar(out, *s);
 			s++;
 		}
+		/* \x and octal escapes write single bytes; the result must still be text */
+		if (!pg_verifymbstr(out->data + start, out->len - start, true))
+			plx_err(g->cx, tk->line, "a string literal's escapes do not form valid text in the database encoding");
 	}
 	appendStringInfoChar(out, '\'');
 }
@@ -433,13 +618,13 @@ go_emit_str(GoTok *tk, StringInfo out)
  * format() at run time.
  */
 static void
-go_emit_format_str(GoTok *tk, StringInfo out)
+go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 {
 	StringInfoData raw;
 	int			i;
 
 	initStringInfo(&raw);
-	go_emit_str(tk, &raw);		/* a quoted SQL literal, escapes decoded */
+	go_emit_str(g, tk, &raw);	/* a quoted SQL literal, escapes decoded */
 
 	for (i = 0; i < raw.len; i++)
 	{
@@ -595,7 +780,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	}
 
 	initStringInfo(&raw);
-	go_emit_str(&g->t[lp + 1], &raw);		/* quoted, escapes decoded */
+	go_emit_str(g, &g->t[lp + 1], &raw);	/* quoted, escapes decoded */
 
 	/*
 	 * An explicit argument index (%[n]d) is not modelled: reject it rather
@@ -850,15 +1035,7 @@ go_infer_type(Go *g, int a, int b)
 		GoTok	   *tk = &g->t[a];
 
 		if (tk->kind == GO_NUM)
-		{
-			int			i;
-
-			for (i = 0; i < tk->len; i++)
-				if (tk->s[i] == '.' ||
-					((tk->s[i] == 'e' || tk->s[i] == 'E') && tk->len > 2 && tk->s[1] != 'x'))
-					return "double precision";
-			return "integer";
-		}
+			return go_num_is_float(tk) ? "double precision" : "integer";
 		if (tk->kind == GO_STR)
 			return "text";
 		if (go_ci(tk, "true") || go_ci(tk, "false"))
@@ -996,7 +1173,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 			}
 			go_sp(out);
 			appendStringInfoString(out, "format(");
-			go_emit_format_str(&g->t[lp + 1], out);
+			go_emit_format_str(g, &g->t[lp + 1], out);
 			if (lp + 2 < close)
 				go_emit_range(g, lp + 2, close, out);
 			appendStringInfoChar(out, ')');
@@ -1438,7 +1615,7 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 		if (tk->kind == GO_STR)
 		{
 			go_sp(out);
-			go_emit_str(tk, out);
+			go_emit_str(g, tk, out);
 			i++;
 			continue;
 		}

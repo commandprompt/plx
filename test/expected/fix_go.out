@@ -428,3 +428,57 @@ SELECT fg32_pad('ab') AS go_padded, fg32_pad('abcdefgh') AS go_whole, fg32_pad(N
 CREATE FUNCTION fg32_idx() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%[1]d", 5) $$;
 ERROR:  plxgo: fmt.Sprintf explicit argument indexes (%[n]) are not supported
 DETAIL:  at plxgo source line 1
+-- A33: every Go string escape keeps its value, and octal, hexadecimal and
+-- binary integer literals keep theirs
+CREATE FUNCTION fg33_esc() RETURNS text LANGUAGE plxgo AS $$ return "\u00e9|\U0001F600|\x41|\101|\b|\a\f\v|\x27\047\u0027" $$;
+SELECT fg33_esc() = E'\u00e9|\U0001F600|A|A|\b|\007\f\013|''''''' AS go_true,
+       length(fg33_esc()) AS go_len_17;
+ go_true | go_len_17 
+---------+-----------
+ t       |        17
+(1 row)
+
+CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return '\x41' $$;
+SELECT fg33_rune() AS go_a;
+ go_a 
+------
+ A
+(1 row)
+
+CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
+SELECT fg33_oct() AS go_15;
+ go_15 
+-------
+    15
+(1 row)
+
+CREATE FUNCTION fg33_oct2() RETURNS int LANGUAGE plxgo AS $$ return 0o17 + 0O1 $$;
+SELECT fg33_oct2() AS go_16;
+ go_16 
+-------
+    16
+(1 row)
+
+CREATE FUNCTION fg33_bases() RETURNS bigint LANGUAGE plxgo AS $$
+ x := 0XE
+ return int64(x) + 0x1F + 0b101 + 1_000 + 0xFF_FF
+$$;
+SELECT fg33_bases() AS go_66585;
+ go_66585 
+----------
+    66585
+(1 row)
+
+-- a literal Go rejects is rejected, not silently changed
+CREATE FUNCTION fg33_badesc() RETURNS text LANGUAGE plxgo AS $$ return "\q" $$;
+ERROR:  plxgo: unknown escape sequence in a string literal
+DETAIL:  at plxgo source line 1
+CREATE FUNCTION fg33_nul() RETURNS text LANGUAGE plxgo AS $$ return "a\x00b" $$;
+ERROR:  plxgo: a string literal cannot contain a NUL character
+DETAIL:  at plxgo source line 1
+CREATE FUNCTION fg33_badnum() RETURNS int LANGUAGE plxgo AS $$ return 09 $$;
+ERROR:  plxgo: invalid number literal "09"
+DETAIL:  at plxgo source line 1
+CREATE FUNCTION fg33_suffix() RETURNS int LANGUAGE plxgo AS $$ return 12abc $$;
+ERROR:  plxgo: invalid number literal "12abc"
+DETAIL:  at plxgo source line 1

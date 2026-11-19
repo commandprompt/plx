@@ -275,3 +275,25 @@ CREATE FUNCTION fg32_pad(s text) RETURNS text LANGUAGE plxgo AS $$
 $$;
 SELECT fg32_pad('ab') AS go_padded, fg32_pad('abcdefgh') AS go_whole, fg32_pad(NULL) IS NULL AS go_null;
 CREATE FUNCTION fg32_idx() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%[1]d", 5) $$;
+
+-- A33: every Go string escape keeps its value, and octal, hexadecimal and
+-- binary integer literals keep theirs
+CREATE FUNCTION fg33_esc() RETURNS text LANGUAGE plxgo AS $$ return "\u00e9|\U0001F600|\x41|\101|\b|\a\f\v|\x27\047\u0027" $$;
+SELECT fg33_esc() = E'\u00e9|\U0001F600|A|A|\b|\007\f\013|''''''' AS go_true,
+       length(fg33_esc()) AS go_len_17;
+CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return '\x41' $$;
+SELECT fg33_rune() AS go_a;
+CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
+SELECT fg33_oct() AS go_15;
+CREATE FUNCTION fg33_oct2() RETURNS int LANGUAGE plxgo AS $$ return 0o17 + 0O1 $$;
+SELECT fg33_oct2() AS go_16;
+CREATE FUNCTION fg33_bases() RETURNS bigint LANGUAGE plxgo AS $$
+ x := 0XE
+ return int64(x) + 0x1F + 0b101 + 1_000 + 0xFF_FF
+$$;
+SELECT fg33_bases() AS go_66585;
+-- a literal Go rejects is rejected, not silently changed
+CREATE FUNCTION fg33_badesc() RETURNS text LANGUAGE plxgo AS $$ return "\q" $$;
+CREATE FUNCTION fg33_nul() RETURNS text LANGUAGE plxgo AS $$ return "a\x00b" $$;
+CREATE FUNCTION fg33_badnum() RETURNS int LANGUAGE plxgo AS $$ return 09 $$;
+CREATE FUNCTION fg33_suffix() RETURNS int LANGUAGE plxgo AS $$ return 12abc $$;

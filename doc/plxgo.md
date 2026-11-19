@@ -145,7 +145,8 @@ $$;
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `~x`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
-| `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded) |
+| `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
+| `0x1F`, `0o17`, `017`, `0b101`, `1_000` | the decimal value (`31`, `15`, `15`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
@@ -153,6 +154,18 @@ $$;
 | `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `trunc(x)::integer` / `trunc(x)::bigint` / `(x)::double precision` / `(x)::text` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
+
+plx decodes every escape Go defines in an interpreted string or rune literal:
+`\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each), and
+`\uHHHH` and `\UHHHHHHHH` (a Unicode character, stored in the database
+encoding). As in Go, any other escape is an error. A literal that would contain
+a NUL character, or whose `\x` or octal bytes do not form valid text in the
+database encoding, is rejected, because PostgreSQL text cannot hold it.
+
+Integer literals in hexadecimal, octal and binary, and literals with `_`
+separators, become plain decimal numbers, so they mean the same on every
+supported PostgreSQL version. A number with letters Go does not allow (such as
+`12abc`), a hexadecimal float and an imaginary literal are rejected.
 
 A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
 3 and `int(-2.7)` is -2. A SQL cast would round instead, so plx calls `trunc`
