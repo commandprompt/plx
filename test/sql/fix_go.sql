@@ -412,3 +412,43 @@ CREATE FUNCTION fg33_badesc() RETURNS text LANGUAGE plxgo AS $$ return "\q" $$;
 CREATE FUNCTION fg33_nul() RETURNS text LANGUAGE plxgo AS $$ return "a\x00b" $$;
 CREATE FUNCTION fg33_badnum() RETURNS int LANGUAGE plxgo AS $$ return 09 $$;
 CREATE FUNCTION fg33_suffix() RETURNS int LANGUAGE plxgo AS $$ return 12abc $$;
+
+-- A5 (go-loopvar-case): a Go name that differs from a parameter only by case
+-- is the same name to plpgsql, so it is rejected, as in the other dialects.
+-- Before the fix, fg34_loop(100) returned 6 (Go gives 300).
+CREATE FUNCTION fg34_loop(i int) RETURNS int LANGUAGE plxgo AS $$ s := 0
+for I := 1; I <= 3; I++ { s += i }
+return s $$;
+CREATE FUNCTION fg34_range(i int) RETURNS int LANGUAGE plxgo AS $$ s := 0
+for I := range 3 { s += i }
+return s $$;
+CREATE FUNCTION fg34_short(i int) RETURNS int LANGUAGE plxgo AS $$ I := 5
+return i + I $$;
+CREATE FUNCTION fg34_multi(i int) RETURNS int LANGUAGE plxgo AS $$ I, j := 5, 6
+return i + I + j $$;
+CREATE FUNCTION fg34_var(i int) RETURNS int LANGUAGE plxgo AS $$ var I int = 5
+return i + I $$;
+CREATE FUNCTION fg34_const(i int) RETURNS int LANGUAGE plxgo AS $$ const I = 5
+return i + I $$;
+-- the parameter read before the declaration
+CREATE FUNCTION fg34_before(i int) RETURNS int LANGUAGE plxgo AS $$ var x int = i
+I := 5
+return x + I $$;
+-- a local read with a second spelling
+CREATE FUNCTION fg34_ref() RETURNS int LANGUAGE plxgo AS $$ a := 1
+return A + 1 $$;
+-- one spelling still works: a loop variable with the parameter's own name,
+-- and a local that is the only spelling of an unused parameter's name
+CREATE FUNCTION fg34_same(i int) RETURNS int LANGUAGE plxgo AS $$ s := 0
+for i := 1; i <= 3; i++ { s += i }
+return s $$;
+SELECT fg34_same(100) AS go_6;
+CREATE FUNCTION fg34_one(i int) RETURNS int LANGUAGE plxgo AS $$ var I int
+I = 5
+return I $$;
+SELECT fg34_one(100) AS go_5;
+-- a field name after a dot is not a variable
+CREATE FUNCTION fg34_field(n int) RETURNS int LANGUAGE plxgo AS $$
+ for _, r := range query("SELECT 2 AS N") { return n + r.N }
+ return n $$;
+SELECT fg34_field(1) AS go_3;

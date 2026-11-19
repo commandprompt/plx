@@ -109,6 +109,18 @@ go_ident(const char *s, int len)
 	return pnstrdup(s, len);
 }
 
+/*
+ * Go is case-sensitive, plpgsql is not: i and I are one name to plpgsql.
+ * Pass every name the body declares or reads through the engine's spelling
+ * check, which rejects a second spelling of a local or a parameter.
+ */
+static void
+go_check_name(Go *g, const char *s, int len)
+{
+	(void) plx_local_find(g->cx, s, len);
+	(void) plx_is_param(g->cx, s, len);
+}
+
 static void
 go_sp(StringInfo out)
 {
@@ -1722,6 +1734,8 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 				i++;
 				continue;
 			}
+			if (i == 0 || g->t[i - 1].kind != GO_DOT)
+				go_check_name(g, tk->s, tk->len);
 			go_sp(out);
 			appendBinaryStringInfo(out, tk->s, tk->len);
 			i++;
@@ -1979,7 +1993,10 @@ go_zero_value(const char *typ)
 static void
 go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isconst, int ind)
 {
-	PlxLocal2  *l = plx_local_add(g->cx, name, (int) strlen(name));
+	PlxLocal2  *l;
+
+	go_check_name(g, name, (int) strlen(name));
+	l = plx_local_add(g->cx, name, (int) strlen(name));
 
 	if (typ && typ->len)
 		l->typ = pstrdup(typ->data);
@@ -2650,6 +2667,7 @@ go_for(Go *g, int ind)
 
 			if (!rowname)
 				go_err(g, "range over query() needs a row variable (for _, row := range query(...))");
+			go_check_name(g, rowname, (int) strlen(rowname));
 			if (!plx_local_find(g->cx, rowname, (int) strlen(rowname)))
 			{
 				PlxLocal2  *l = plx_local_add(g->cx, rowname, (int) strlen(rowname));
@@ -2673,6 +2691,7 @@ go_for(Go *g, int ind)
 		/* single var: the index -> FOR i IN 0 .. n-1 (Go 1.22 integer range) */
 		if (idxname)
 		{
+			go_check_name(g, idxname, (int) strlen(idxname));
 			if (!plx_local_find(g->cx, idxname, (int) strlen(idxname)))
 			{
 				PlxLocal2  *l = plx_local_add(g->cx, idxname, (int) strlen(idxname));
@@ -2693,6 +2712,7 @@ go_for(Go *g, int ind)
 		/* range over a slice -> FOREACH v IN ARRAY e */
 		if (!valname)
 			go_err(g, "range needs a value variable (for _, v := range s)");
+		go_check_name(g, valname, (int) strlen(valname));
 		if (!plx_local_find(g->cx, valname, (int) strlen(valname)))
 		{
 			/* infer the element type from a plain slice local (var s []T) */
