@@ -486,3 +486,73 @@ SELECT fe_a10_php(2);
  Hello bob! bob x y bob->x (bob)-> {x,y}[
 (1 row)
 
+-- A18: a comment inside a multi-line expression is not copied into the SQL
+CREATE FUNCTION fe_a18_php(a int) RETURNS int LANGUAGE plxphp AS $$
+return $a # 3
+  + 1;
+$$;
+SELECT fe_a18_php(10);
+ fe_a18_php 
+------------
+         11
+(1 row)
+
+CREATE FUNCTION fe_a18_js(a int) RETURNS int LANGUAGE plxjs AS $$
+return a + // first -- x
+  1;
+$$;
+SELECT fe_a18_js(1);
+ fe_a18_js 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_ts(a int) RETURNS int LANGUAGE plxts AS $$
+return a /* it's */ + 1;
+$$;
+SELECT fe_a18_ts(1);
+ fe_a18_ts 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_py(a int) RETURNS int LANGUAGE plxpython3 AS $$
+return (a  # it's
+        + 1)
+$$;
+SELECT fe_a18_py(1);
+ fe_a18_py 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_rb(a int) RETURNS int LANGUAGE plxruby AS $$
+return a +   # don't
+  2
+$$;
+SELECT fe_a18_rb(1);
+ fe_a18_rb 
+-----------
+         3
+(1 row)
+
+-- A18: comment markers inside strings are kept
+CREATE FUNCTION fe_a18_str_js() RETURNS text LANGUAGE plxjs AS $$
+return `a // b ${
+  1}`;
+$$;
+SELECT fe_a18_str_js();
+ fe_a18_str_js 
+---------------
+ a // b 1
+(1 row)
+
+CREATE FUNCTION fe_a18_str_php() RETURNS text LANGUAGE plxphp AS $$
+return "a # b /* c */";
+$$;
+SELECT fe_a18_str_php();
+ fe_a18_str_php 
+----------------
+ a # b /* c */
+(1 row)
+

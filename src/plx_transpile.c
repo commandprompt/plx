@@ -2615,7 +2615,80 @@ plx_span_text(Ctx *cx, int a, int b)
 	en = cx->t[b - 1].s + cx->t[b - 1].len;
 	if (en < st)
 		return pstrdup("");
-	return pnstrdup(st, (int) (en - st));
+
+	/*
+	 * The text between two tokens is whatever the lexer skipped: blanks, a
+	 * variable sigil, and comments. A comment must not reach the generated
+	 * SQL, where PHP's "#" is XOR, "--" inside a "//" comment hides the rest
+	 * of the line and a quote opens a string. Rebuild the span from its
+	 * tokens and replace each comment in a gap with one space. Should the
+	 * tokens ever be out of source order, keep the raw slice.
+	 */
+	{
+		StringInfoData o;
+		const char *prev = st;
+		int			k;
+
+		for (k = a; k < b; k++)
+		{
+			const Tok  *tk = &cx->t[k];
+
+			if (tk->s == NULL)
+				continue;
+			if (tk->s < prev || tk->s + tk->len > en)
+				return pnstrdup(st, (int) (en - st));
+			prev = tk->s;
+		}
+		prev = st;
+		initStringInfo(&o);
+		for (k = a; k < b; k++)
+		{
+			const Tok  *tk = &cx->t[k];
+			const char *g;
+
+			if (tk->s == NULL)
+				continue;
+			/* copy the gap [prev, tk->s), dropping comments */
+			g = prev;
+			while (g < tk->s)
+			{
+				const char *ce = NULL;
+
+				if (cx->surf->cmt_hash && *g == '#')
+					ce = g;
+				else if (cx->surf->cmt_slash && g + 1 < tk->s && g[0] == '/' && g[1] == '/')
+					ce = g;
+				if (ce)
+				{
+					while (ce < tk->s && *ce != '\n')
+						ce++;
+					appendStringInfoChar(&o, ' ');
+					g = ce;
+					continue;
+				}
+				if (cx->surf->cmt_block && g + 1 < tk->s && g[0] == '/' && g[1] == '*')
+				{
+					ce = g + 2;
+					while (ce + 1 < tk->s && !(ce[0] == '*' && ce[1] == '/'))
+						ce++;
+					ce = (ce + 1 < tk->s) ? ce + 2 : tk->s;
+					appendStringInfoChar(&o, ' ');
+					g = ce;
+					continue;
+				}
+				appendStringInfoChar(&o, *g);
+				g++;
+			}
+			if (tk->s + tk->len > prev)
+			{
+				const char *from = Max(tk->s, prev);
+
+				appendBinaryStringInfo(&o, from, (int) (tk->s + tk->len - from));
+				prev = tk->s + tk->len;
+			}
+		}
+		return o.data;
+	}
 }
 
 /* ---------------------------------------------------------------- type infer */
