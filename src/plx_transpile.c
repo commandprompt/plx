@@ -1866,7 +1866,8 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			 * most needed. In that position each value keeps the COALESCE so
 			 * the literal text of the message survives one NULL operand. The
 			 * same holds for the text options of a raise (detail:, hint:,
-			 * column:, constraint:, message:), but not for errcode:.
+			 * column:, constraint:) and for message: given in place of the
+			 * message, but not for errcode:.
 			 */
 			if (cx->diag_msg)
 				appendStringInfo(out, "COALESCE((%s)::text, '')", rw);
@@ -4761,6 +4762,11 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 				break;
 			}
 	}
+	/* message: "m" in place of a positional message is the message */
+	if ((cx->t[p].kind == T_IDENT || cx->t[p].kind == T_KW) &&
+		p + 1 < b && plx_tok_is(&cx->t[p + 1], ":") &&
+		plx_name_eq(&cx->t[p], "message"))
+		p += 2;
 	mstart = p;
 	mend = b;
 	{
@@ -4807,6 +4813,10 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 			if (!opt)
 				plx_err(cx, cx->t[ka].line, "unknown raise option \"%.*s\"",
 						cx->t[ka].len, cx->t[ka].s);
+			/* plpgsql would fail at run time: RAISE option already specified */
+			if (strcmp(opt, "MESSAGE") == 0)
+				plx_err(cx, cx->t[ka].line,
+						"raise has a message and a message: option; give only one");
 			va = ka + 2;
 			ve = b;
 			for (i = va; i < b; i++)
@@ -4858,9 +4868,9 @@ emit_raise(Ctx *cx, int a, int b, int ind)
 /*
  * Reject an assignment inside the right-hand side [ra, rb), as in a = b = v,
  * a += b = v or a = b <<= 2. Any operator that ends in '=' assigns, except
- * the comparisons ==, !=, ===, !==, <= and >=. In every dialect that reaches here, a = b = v sets both a
- * and b. SQL reads the inner = as a comparison, so b would be left unchanged
- * and a would get a boolean.
+ * the comparisons ==, !=, ===, !==, <= and >=. In every dialect that reaches
+ * here, a = b = v sets both a and b. SQL reads the inner = as a comparison,
+ * so b would be left unchanged and a would get a boolean.
  */
 static void
 reject_chained_assignment(Ctx *cx, int ra, int rb, int line)

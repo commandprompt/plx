@@ -549,6 +549,16 @@ SELECT fe_a9_catch('fe_a9_raise_col', NULL);
 -- A9: a NULL errcode still fails with 22004: plx does not make up a SQLSTATE
 SELECT fe_a9_catch('fe_a9_raise_code', NULL);
 SELECT fe_a9_catch('fe_a9_raise_code', '22023');
+-- A9: message: as the first argument is the message, with the same NULL fallback
+CREATE FUNCTION fe_a9_raise_msgkey(u text) RETURNS void LANGUAGE plxruby AS $$
+raise message: "m #{u}", errcode: "P0042", detail: u
+$$;
+SELECT fe_a9_catch('fe_a9_raise_msgkey', 'bob');
+SELECT fe_a9_catch('fe_a9_raise_msgkey', NULL);
+-- A9: a message and message: together are rejected
+CREATE FUNCTION fe_a9_raise_twice() RETURNS void LANGUAGE plxruby AS $$
+raise "x", message: "y"
+$$;
 \pset tuples_only on
 \pset format unaligned
 SELECT (regexp_match(prosrc, 'RAISE[^\n]*'))[1] FROM pg_proc WHERE proname = 'fe_a9_raise_opt';

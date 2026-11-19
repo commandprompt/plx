@@ -221,7 +221,9 @@ raise exception: "negative: #{v}", errcode: "22023"
 ```
 
 Levels are `notice`, `warning`, `info`, `log`, `debug`, `exception`. Options are
-`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. The call form
+`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. `message:` takes
+the place of the message, as in `raise message: "bad #{v}", errcode: "22023"`;
+`CREATE FUNCTION` rejects a `raise` that has both. The call form
 `raise("notice", "message")` is also accepted.
 
 ### Handling
