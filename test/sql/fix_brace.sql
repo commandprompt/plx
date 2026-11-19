@@ -513,3 +513,39 @@ return x
 $$;
 SELECT fb_rv17(-2);
 \set VERBOSITY default
+-- A14: a union of classes that does not match the error lets it through
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv18(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::UniqueViolation | PG::SerializationFailure $e) {
+  return "union";
+}
+$$;
+SELECT fb_rv18(0);
+\set VERBOSITY default
+-- A14: a comment inside a catch class name is not part of the class
+CREATE FUNCTION fb_rv19(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG:: /* SQLSTATE 22012 */ DivisionByZero $e) {
+  return "div";
+}
+$$;
+SELECT fb_rv19(0);
+-- A14: a union with a catch-all member catches every error
+CREATE FUNCTION fb_rv20(d int) RETURNS text LANGUAGE plxphp AS $$
+$r = 0;
+try {
+  $r = 10 / $d;
+  return "ok $r";
+} catch (PG::UniqueViolation | Exception $e) {
+  return "any";
+}
+$$;
+SELECT fb_rv20(0);
+SELECT prosrc LIKE '%WHEN OTHERS THEN%' AS plain_others FROM pg_proc WHERE proname = 'fb_rv20';
