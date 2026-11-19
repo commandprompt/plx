@@ -94,19 +94,19 @@ SELECT acc_rb(5);
  12345
 (1 row)
 
--- the lowered plpgsql uses plx_strbuild + plx_sb_append
+-- the lowered plpgsql uses plx_strbuild + plx_sb_append_strict
 SELECT regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g') FROM pg_proc WHERE proname = 'acc_rb';
-                   regexp_replace                   
-----------------------------------------------------
- /*plx:v1:plxruby:9849bb14*/                       +
- DECLARE                                           +
-   s public.plx_strbuild := '';                    +
- BEGIN                                             +
-   FOR i IN 1..n LOOP                              +
-     s := public.plx_sb_append(s, (i::text)::text);+
-   END LOOP;                                       +
-   RETURN s;                                       +
- END;                                              +
+                      regexp_replace                       
+-----------------------------------------------------------
+ /*plx:v1:plxruby:9849bb14*/                              +
+ DECLARE                                                  +
+   s public.plx_strbuild := '';                           +
+ BEGIN                                                    +
+   FOR i IN 1..n LOOP                                     +
+     s := public.plx_sb_append_strict(s, (i::text)::text);+
+   END LOOP;                                              +
+   RETURN s;                                              +
+ END;                                                     +
  
 (1 row)
 

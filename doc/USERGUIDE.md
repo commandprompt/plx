@@ -694,12 +694,13 @@ Points to keep in mind:
   its interpolated values are concatenated exactly as in `execute`: do not mix
   interpolation with binds.
 - Functions that use the string-append operators reference the extension's
-  `plx_strbuild` type and `plx_sb_append` function unqualified, so both are
-  looked up through `search_path` each time the function runs. The extension's
+  `plx_strbuild` type and `plx_sb_append_strict` (plxcobol: `plx_sb_append`)
+  function unqualified, so both are looked up through `search_path` each time
+  the function runs. The extension's
   schema must therefore be on the function's path, including any
   `SET search_path` clause. It also means that a role able to create objects in
-  a schema that comes earlier on the path can put its own `plx_sb_append` there,
-  and a `SECURITY DEFINER` function would run it with the owner's privileges.
+  a schema that comes earlier on the path can put its own
+  `plx_sb_append_strict` there, and a `SECURITY DEFINER` function would run it with the owner's privileges.
   Pin the path on every `SECURITY DEFINER` function, listing only trusted
   schemas, the extension's schema among them, and `pg_temp` last, as the
   PostgreSQL manual advises:

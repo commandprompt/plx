@@ -259,6 +259,9 @@ for (const row of query(`SELECT name FROM t ORDER BY id`)) {
 return s;
 ```
 
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
+
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature). Note that `+=` is treated as string append only when the variable is a

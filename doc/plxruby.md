@@ -284,6 +284,9 @@ end
 return s
 ```
 
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
+
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature). Alternatively, assemble text in SQL with `string_agg` when the pieces

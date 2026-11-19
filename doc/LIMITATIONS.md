@@ -48,11 +48,17 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `off`, ...) is silently accepted, and anything else raises `invalid input
   syntax for type boolean`. Always write an explicit comparison.
   Interpolating a NULL propagates it: the value is concatenated as-is, so the
-  whole string becomes NULL the way SQL `||` does. Two exceptions. A message
-  being built for `RAISE` keeps each interpolated value as an empty string, so
-  one NULL cannot swallow the message. And `plxcobol`'s `STRING-APPEND` does not
-  propagate, because it builds its string through the `plx_strbuild`
-  accumulator, whose append treats a NULL as nothing to append by design.
+  whole string becomes NULL the way SQL `||` does. A message being built for
+  `RAISE` is an exception: it keeps each interpolated value as an empty string,
+  so one NULL cannot swallow the message. The append operators follow the same
+  rule. `s << x`, `$s .= $x` and `s += x` give NULL when x or s is NULL, as
+  `s := s || x` does. This differs from PHP, where `.=` treats null as an empty
+  string, and from JavaScript, where it appends the text "null". Use
+  `coalesce(x, '')` to treat a NULL as empty. A PHP variable whose first use is
+  `.=` starts as an empty string. A message built with appends is not covered
+  by the RAISE exception: if a part was NULL, the raised message is `<NULL>`.
+  plxcobol's `STRING-APPEND` does not follow the append rule: it treats a NULL
+  as nothing to append, because COBOL has no NULL.
 - **The message fallback covers the message text only.** An interpolated NULL
   in a `RAISE` option such as `detail:` or `hint:` makes the `RAISE` itself fail
   with `RAISE statement option cannot be null`, which hides the error you meant
@@ -74,7 +80,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
 - **The string builder must be on the search path.** Functions that use the
   append operators reference the extension's `plx_strbuild` type and
-  `plx_sb_append` function unqualified, so the extension's schema must be on the
+  `plx_sb_append` or `plx_sb_append_strict` function unqualified, so the
+  extension's schema must be on the
   function's `search_path` at run time, including any `SET search_path` clause
   on the function. Otherwise the function is created but fails when called with
   `type "plx_strbuild" does not exist`. Because the lookup goes through the
@@ -223,5 +230,13 @@ part of a function in whichever dialect expresses it best, or drop to a SQL
 statement inside any dialect (all of them pass SQL text through to `query`,
 `execute`, `RETURN QUERY`, and the like). A construct a dialect rejects is
 reported at `CREATE FUNCTION` time with a source line, so those gaps surface
-immediately. Library calls and expressions passed through to SQL are not
-checked until the function runs.
+immediately. `CREATE FUNCTION` then makes the checks plpgsql makes for its own
+functions. It rejects pseudo-type arguments and results that plpgsql does not
+allow, such as `cstring` or `internal`. When `check_function_bodies` is on (the
+default), it also compiles the generated plpgsql, which rejects syntax errors
+and trigger functions that declare arguments. This compile takes as long as
+the first call's compile would, which can be seconds for a very large
+function. `pg_restore` turns `check_function_bodies` off, as it does for
+plpgsql. Library calls and
+expressions passed through to SQL are checked for syntax only; names and types
+in them are not checked until the function runs.

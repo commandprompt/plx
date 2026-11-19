@@ -261,6 +261,11 @@ foreach (query("SELECT name FROM t ORDER BY id") as $row) {
 return $s;
 ```
 
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
+
+A variable whose first use is `.=` starts as an empty string, as in PHP.
+
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature).

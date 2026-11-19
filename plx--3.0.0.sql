@@ -14,12 +14,21 @@ CREATE FUNCTION plx_sb_in(cstring) RETURNS plx_strbuild
 	AS '$libdir/plx', 'plx_sb_in' LANGUAGE C IMMUTABLE STRICT;
 CREATE FUNCTION plx_sb_out(plx_strbuild) RETURNS cstring
 	AS '$libdir/plx', 'plx_sb_out' LANGUAGE C IMMUTABLE STRICT;
+CREATE FUNCTION plx_sb_recv(internal) RETURNS plx_strbuild
+	AS '$libdir/plx', 'plx_sb_recv' LANGUAGE C IMMUTABLE STRICT;
+CREATE FUNCTION plx_sb_send(plx_strbuild) RETURNS bytea
+	AS '$libdir/plx', 'plx_sb_send' LANGUAGE C IMMUTABLE STRICT;
 
+-- Collatable like text, so sorting, DISTINCT and GROUP BY can use text's
+-- operators with a collation.
 CREATE TYPE plx_strbuild (
 	INPUT = plx_sb_in,
 	OUTPUT = plx_sb_out,
+	RECEIVE = plx_sb_recv,
+	SEND = plx_sb_send,
 	LIKE = text,
-	STORAGE = extended
+	STORAGE = extended,
+	COLLATABLE = true
 );
 
 CREATE FUNCTION plx_sb_append_support(internal) RETURNS internal
@@ -27,6 +36,12 @@ CREATE FUNCTION plx_sb_append_support(internal) RETURNS internal
 
 CREATE FUNCTION plx_sb_append(plx_strbuild, text) RETURNS plx_strbuild
 	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE
+	SUPPORT plx_sb_append_support;
+
+-- The same C function declared STRICT: a NULL operand gives NULL, as || does.
+-- The append operators of every dialect except plxcobol call this one.
+CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
+	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE STRICT
 	SUPPORT plx_sb_append_support;
 
 -- plx_strbuild is implicitly usable as text (so it works in RETURN, string

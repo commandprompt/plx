@@ -279,6 +279,9 @@ On PostgreSQL 18 this is amortized O(1) per append; on PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature).
 
+STRING-APPEND treats a NULL value as nothing to append, and a NULL target as
+empty. The other dialects' append operators make the string NULL instead.
+
 ## Errors
 
 ### Raising
