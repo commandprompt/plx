@@ -177,6 +177,27 @@ CREATE FUNCTION fg28_twodefaults(x int) RETURNS text LANGUAGE plxgo AS $$
    return "b"
  }
 $$;
+-- a tagless switch also runs default last, wherever it stands
+CREATE FUNCTION fg28_tagless(x int) RETURNS text LANGUAGE plxgo AS $$
+ switch {
+ default:
+   return "d"
+ case x == 1:
+   return "one"
+ }
+$$;
+SELECT fg28_tagless(1) AS go_one, fg28_tagless(5) AS go_d;
+CREATE FUNCTION fg28_tagless_mid(x int) RETURNS text LANGUAGE plxgo AS $$
+ switch {
+ case x == 1:
+   return "one"
+ default:
+   return "d"
+ case x == 2:
+   return "two"
+ }
+$$;
+SELECT fg28_tagless_mid(2) AS go_two, fg28_tagless_mid(1) AS go_one, fg28_tagless_mid(9) AS go_d;
 
 -- A29: a switch tag is evaluated once, and each case value is compared as a
 -- whole
