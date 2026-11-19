@@ -215,6 +215,8 @@ fail when the function runs.
 - Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`).
 - Calling a stored procedure by name; only `EXEC('<sql>')` dynamic SQL.
 - `+` for string concatenation (use `||` or `CONCAT(...)`).
+- `SELECT @t = @t + v FROM t`, where the assignment list reads a variable it
+  assigns; use an aggregate such as `SUM(v)` or `string_agg(...)`.
 
 ## Working around a gap
 

@@ -60,6 +60,7 @@ typedef struct
 	Ctx		   *cx;
 	TqTok	   *t;
 	int			nt, pos;
+	int			nsel;			/* hidden SELECT-assignment loop records */
 } Tq;
 
 static void tq_stmt(Tq *tq, int ind);
@@ -1019,6 +1020,13 @@ tq_set(Tq *tq, int ind)
 	tq_eat_semi(tq);
 }
 
+/* qsort/bsearch comparator for an array of C strings */
+static int
+tq_cmp_name(const void *a, const void *b)
+{
+	return strcmp(*(char *const *) a, *(char *const *) b);
+}
+
 /* SELECT @x = e [, ...] [FROM ...] | SELECT ... (query) */
 static void
 tq_select(Tq *tq, int ind)
@@ -1031,10 +1039,11 @@ tq_select(Tq *tq, int ind)
 		tq->t[tq->pos + 1].kind == TQ_OP && tq->t[tq->pos + 1].len == 1 &&
 		tq->t[tq->pos + 1].s[0] == '=')
 	{
-		char	   *names[64];
-		int			estart[64],
-					eend[64],
+		int			cap = 8,
 					nassign = 0;
+		char	  **names = palloc(sizeof(char *) * cap);
+		int		   *estart = palloc(sizeof(int) * cap),
+				   *eend = palloc(sizeof(int) * cap);
 		int			frompos = -1;
 
 		for (;;)
@@ -1044,8 +1053,19 @@ tq_select(Tq *tq, int ind)
 						e0,
 						e1;
 
-			if (v->kind != TQ_VAR || nassign >= 64)
-				break;
+			/* each list entry must be "@v =": a VAR is never the EOF token, so
+			 * the token after it exists */
+			if (v->kind != TQ_VAR ||
+				!(tq->t[tq->pos + 1].kind == TQ_OP && tq->t[tq->pos + 1].len == 1 &&
+				  tq->t[tq->pos + 1].s[0] == '='))
+				tq_err(tq, "expected @variable = expression in the SELECT assignment list");
+			if (nassign >= cap)
+			{
+				cap *= 2;
+				names = repalloc(names, sizeof(char *) * cap);
+				estart = repalloc(estart, sizeof(int) * cap);
+				eend = repalloc(eend, sizeof(int) * cap);
+			}
 			names[nassign] = tq_ident(v->s, v->len);
 			tq->pos += 2;				/* @v = */
 			e0 = tq->pos;
@@ -1088,22 +1108,66 @@ tq_select(Tq *tq, int ind)
 		}
 		if (frompos >= 0)
 		{
+			/*
+			 * T-SQL runs the assignments once per row: the variables end up
+			 * holding the last row, and keep their values when no row
+			 * matches. A plpgsql FOR loop over the query that assigns the
+			 * variables in its body does exactly that, where SELECT INTO
+			 * would take the first row and set NULL on no row. An expression that reads
+			 * one of the assigned variables (the accumulate idiom
+			 * SELECT @t = @t + v) cannot be lowered this way, because the
+			 * query sees the values from before the loop; reject it rather
+			 * than compute a different result.
+			 */
 			int			k,
+						j,
 						rend = tq_value_end(tq, frompos);
+			char	   *rec;
+			char	  **sorted = palloc(sizeof(char *) * nassign);
 
+			/* sorted copy of the targets, so each @ref is one bsearch */
+			memcpy(sorted, names, sizeof(char *) * nassign);
+			qsort(sorted, nassign, sizeof(char *), tq_cmp_name);
+			for (k = 0; k < nassign; k++)
+				for (j = estart[k]; j < eend[k]; j++)
+				{
+					char	   *ref;
+
+					if (tq->t[j].kind != TQ_VAR)
+						continue;
+					ref = tq_ident(tq->t[j].s, tq->t[j].len);
+					if (bsearch(&ref, sorted, nassign, sizeof(char *), tq_cmp_name))
+						plx_err(tq->cx, tq->t[j].line,
+								"SELECT @%s = ... FROM reads @%s in its own assignment list; use an aggregate such as SUM() or string_agg() instead",
+								ref, ref);
+					pfree(ref);
+				}
+			pfree(sorted);
+
+			/* loop over a hidden record (the quoted mixed-case name cannot
+			 * clash with a lower-cased @variable) and assign in the body: a
+			 * plpgsql FOR loop sets its own target to NULL when no row comes
+			 * back, so the T-SQL variables must not be the loop target */
+			rec = psprintf("\"TqSel%d\"", ++tq->nsel);
+			plx_local_add(tq->cx, rec, (int) strlen(rec))->is_record = true;
 			plx_indent(&tq->cx->out, ind);
-			appendStringInfoString(&tq->cx->out, "SELECT");
+			appendStringInfo(&tq->cx->out, "FOR %s IN SELECT", rec);
 			for (k = 0; k < nassign; k++)
 			{
 				if (k)
 					appendStringInfoChar(&tq->cx->out, ',');
 				tq_emit_range(tq, estart[k], eend[k], &tq->cx->out);
+				appendStringInfo(&tq->cx->out, " AS c%d", k + 1);
 			}
-			appendStringInfoString(&tq->cx->out, " INTO");
-			for (k = 0; k < nassign; k++)
-				appendStringInfo(&tq->cx->out, "%s %s", k ? "," : "", names[k]);
 			tq_emit_range(tq, frompos, rend, &tq->cx->out);
-			appendStringInfoString(&tq->cx->out, ";\n");
+			appendStringInfoString(&tq->cx->out, " LOOP\n");
+			for (k = 0; k < nassign; k++)
+			{
+				plx_indent(&tq->cx->out, ind + 1);
+				appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
+			}
+			plx_indent(&tq->cx->out, ind);
+			appendStringInfoString(&tq->cx->out, "END LOOP;\n");
 			tq->pos = rend;
 		}
 		else

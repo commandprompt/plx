@@ -64,7 +64,14 @@ type names in `DECLARE` are translated (see below).
 | `SET @x += e` | `x := x + (e);` (also `-=`, `*=`, `/=`, `%=`) |
 | `SELECT @x = e` (no `FROM`) | `x := e;` |
 | `SELECT @x = a, @y = b` | `x := a; y := b;` |
-| `SELECT @x = col FROM t ...` | `SELECT col INTO x FROM t ...;` |
+| `SELECT @x = col FROM t ...` | `FOR r IN SELECT col AS c1 FROM t ... LOOP x := r.c1; END LOOP;` |
+
+`SELECT @x = col FROM t ...` assigns once per row, as in SQL Server. After the
+statement, `@x` holds the value from the last row. When no row matches, `@x`
+keeps the value it had before. An expression in the list that reads one of the
+variables the same `SELECT` assigns, such as `SELECT @t = @t + v FROM t`, is
+rejected when you create the function. Use an aggregate instead, for example
+`SELECT @t = SUM(v) FROM t` or `SELECT @s = string_agg(name, ',') FROM t`.
 
 ### Control flow
 
@@ -202,6 +209,11 @@ session option.
   procedure; plxgo does not.
 - Calling a stored procedure by name (`EXEC procname`); only `EXEC('<sql>')`
   dynamic SQL is supported.
+- A `SELECT @v = ... FROM ...` assignment list that reads a variable it assigns,
+  such as the accumulate idiom `SELECT @t = @t + v FROM t`. plx cannot run the
+  expression once per row with the updated value, so it rejects the function
+  rather than return a different result. Use an aggregate such as `SUM(v)` or
+  `string_agg(name, ',')`.
 - String concatenation with `+`. T-SQL overloads `+` for both numeric addition
   and string concatenation; plx cannot tell which is meant without type
   information, so it leaves `+` as `+`. Use `||` or `CONCAT(...)` for string

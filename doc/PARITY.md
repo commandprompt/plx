@@ -35,7 +35,7 @@ transaction control is reachable through Go surface syntax. See
 it restructures rather than renames: `@x` variables hoist to the `DECLARE` block,
 `IF`/`WHILE` bodies written as `BEGIN ... END` become `THEN ... END IF` /
 `LOOP ... END LOOP`, `SET @x = e` becomes `x := e`, `SELECT @x = c FROM t`
-becomes `SELECT c INTO x FROM t`, `PRINT`/`RAISERROR`/`THROW` become `RAISE`, and
+becomes a `FOR` loop over the query that assigns `x` once per row, `PRINT`/`RAISERROR`/`THROW` become `RAISE`, and
 `TRY`/`CATCH` becomes an `EXCEPTION` block. So most plpgsql constructs are
 reachable through T-SQL surface syntax rather than a one-to-one keyword map;
 the exceptions are cursors and transaction control, which plxtsql does not
