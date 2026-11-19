@@ -597,6 +597,27 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	initStringInfo(&raw);
 	go_emit_str(&g->t[lp + 1], &raw);		/* quoted, escapes decoded */
 
+	/*
+	 * An explicit argument index (%[n]d) is not modelled: reject it rather
+	 * than consume '[' as the verb and print the rest as text.
+	 */
+	for (i = 1; i + 1 < raw.len; i++)
+	{
+		int			j = i + 1;
+
+		if (raw.data[i] != '%')
+			continue;
+		if (raw.data[j] == '%')
+		{
+			i++;
+			continue;
+		}
+		while (j + 1 < raw.len && strchr("-+ #0123456789.", raw.data[j]))
+			j++;
+		if (raw.data[j] == '[')
+			go_err(g, "fmt.Sprintf explicit argument indexes (%[n]) are not supported");
+	}
+
 	/* count directives so a mismatch can fall back before emitting anything */
 	for (i = 1; i + 1 < raw.len; i++)
 	{
@@ -686,16 +707,36 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			appendStringInfoString(out, " || ");
 		if (diag)
 			appendStringInfoString(out, "COALESCE(");
-		if (wlen > 0)
-			appendStringInfoString(out, dash ? "rpad(" : "lpad(");
-		appendStringInfoChar(out, '(');
-		go_emit_range(g, as[ai], ae[ai], out);
-		appendStringInfoString(out, ")::text");
-		if (wlen > 0)
+		if (wlen == 0)
 		{
-			appendStringInfoString(out, ", ");
+			appendStringInfoChar(out, '(');
+			go_emit_range(g, as[ai], ae[ai], out);
+			appendStringInfoString(out, ")::text");
+		}
+		else if (ae[ai] - as[ai] == 1 && g->t[as[ai]].kind != GO_LP)
+		{
+			/*
+			 * A Go width is a minimum and never cuts, but lpad/rpad cut a
+			 * longer string to the width, so pad to greatest(width, length).
+			 * A single-token operand can safely be written twice.
+			 */
+			appendStringInfoString(out, dash ? "rpad((" : "lpad((");
+			go_emit_range(g, as[ai], ae[ai], out);
+			appendStringInfoString(out, ")::text, greatest(");
 			appendBinaryStringInfo(out, raw.data + wstart, wlen);
-			appendStringInfoChar(out, ')');
+			appendStringInfoString(out, ", length((");
+			go_emit_range(g, as[ai], ae[ai], out);
+			appendStringInfoString(out, ")::text)))");
+		}
+		else
+		{
+			/* any other operand is evaluated once, in a subquery */
+			appendStringInfoString(out, dash ? "(SELECT rpad(__plx_v, greatest("
+								   : "(SELECT lpad(__plx_v, greatest(");
+			appendBinaryStringInfo(out, raw.data + wstart, wlen);
+			appendStringInfoString(out, ", length(__plx_v))) FROM (VALUES ((");
+			go_emit_range(g, as[ai], ae[ai], out);
+			appendStringInfoString(out, ")::text)) AS __plx_w(__plx_v))");
 		}
 		if (diag)
 			appendStringInfoString(out, ", '')");

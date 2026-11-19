@@ -263,3 +263,15 @@ CREATE FUNCTION fg31_big(n bigint) RETURNS bigint LANGUAGE plxgo AS $$
  return int64(n) - int64(m) + int64(n)
 $$;
 SELECT fg31_big(9007199254740993) AS go_9007199254740993;
+
+-- A32: a fmt.Sprintf width pads but never truncates, and an explicit
+-- argument index (%[n]) is rejected rather than mangled
+CREATE FUNCTION fg32_w() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("[%3d]", 12345) $$;
+SELECT fg32_w() AS go_12345;
+CREATE FUNCTION fg32_wp() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("[%5.1f]", 3.14159) $$;
+SELECT fg32_wp() AS go_untruncated;
+CREATE FUNCTION fg32_pad(s text) RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("[%6s|%-6s|%2s]", s, strings.ToLower(s), upper(s))
+$$;
+SELECT fg32_pad('ab') AS go_padded, fg32_pad('abcdefgh') AS go_whole, fg32_pad(NULL) IS NULL AS go_null;
+CREATE FUNCTION fg32_idx() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%[1]d", 5) $$;

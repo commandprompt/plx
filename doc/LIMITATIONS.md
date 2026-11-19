@@ -167,7 +167,8 @@ fail when the function runs.
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.
 - `fmt.Sprintf` renders every operand in its SQL text form. A `-` flag and a
-  width are kept, so `%-8d` still pads. Go's other flags and its precision field
+  width are kept, so `%-8d` still pads; as in Go, a longer operand prints in
+  full. An explicit argument index (`%[1]d`) is rejected. Go's other flags and its precision field
   are dropped, so `%.2f` prints the operand in full rather than rounding it. The
   verbs that change an operand's representation rather than its padding do not
   do so either: `%x`, `%o`, `%b`, `%e` and `%q` all produce the operand's text,
