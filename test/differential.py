@@ -9,9 +9,11 @@ a dialect variant and the reference is a transpiler defect (or a limitation
 worth recording).
 
 Each variant is called with the same argument lists. A call either produces a
-value or raises, and both outcomes are compared: values by their text form
-(NULL is distinguished from the empty string), errors by SQLSTATE, so that a
-dialect is required to fail the same way the reference fails.
+value or raises, and both outcomes are compared: values by their text form,
+encoded as JSON so that NULL, the empty string and an error can never be
+confused with a returned value, errors by SQLSTATE, so that a dialect is
+required to fail the same way the reference fails. A self-test of the
+encoding runs before the cases.
 
 A case may document a known divergence for some dialects and calls. Each such
 entry records the exact outcome it documents ("outcome"), and only that
@@ -64,20 +66,85 @@ LANGUAGE plpgsql AS $probe$
 DECLARE r text;
 BEGIN
   EXECUTE 'SELECT (' || q || ')::text' INTO r;
+  /* One probe is one JSON value on one line: null for SQL NULL, a JSON
+   * string for a value, {"error": sqlstate} for an error. JSON escapes
+   * quotes, backslashes and control characters, so no value can look
+   * like NULL or an error, and no value can span two lines. */
   IF r IS NULL THEN
-    RETURN '<NULL>';
+    RETURN 'null';
   END IF;
-  IF r = '' THEN
-    RETURN '<EMPTY>';
-  END IF;
-  /* One probe must occupy exactly one output line: an embedded newline, or a
-   * value that is blank, would shift every later result onto the wrong probe. */
-  RETURN replace(replace(r, E'\r', '\\r'), E'\n', '\\n');
+  RETURN to_json(r)::text;
 EXCEPTION WHEN OTHERS THEN
-  RETURN 'ERROR ' || SQLSTATE;
+  RETURN json_build_object('error', SQLSTATE)::text;
 END;
 $probe$;
 """
+
+
+# Probe encodings the self-test checks. Each pair below must probe to two
+# different results: on the left a NULL, an error, an empty string or a
+# newline, on the right a value whose text could be mistaken for it.
+PROBE_PAIRS = [
+    ("NULL::text", "'<NULL>'::text"),
+    ("(1/0)::text", "'ERROR 22012'::text"),
+    ("''::text", "'<EMPTY>'::text"),
+    ("E'a\\nb'", "'a\\\\nb'"),
+]
+# Exact results the probe must give.
+PROBE_EXACT = [
+    ("NULL::text", 'null'),
+    ("(1/0)::text", '{"error" : "22012"}'),
+    ("''::text", '""'),
+    ("'<NULL>'::text", '"<NULL>"'),
+    ("E'a\\nb'", '"a\\nb"'),
+    ("42", '"42"'),
+]
+
+
+def split_probe_output(out):
+    """Split psql output into one string per probe.
+
+    Do not use str.splitlines(): it also breaks at U+0085, U+2028 and U+2029,
+    which to_json leaves unescaped. psql ends each row with a plain newline,
+    and no JSON result is empty, so the rstrip cannot drop a real result.
+    """
+    return out.rstrip("\n").split("\n")
+
+
+def probe_selftest():
+    """Check the probe encoding against the server. Returns a list of failures.
+
+    This uses the same psql() call and split_probe_output() as probe_all(),
+    so it covers the real path.
+    """
+    failures = []
+    exprs = []
+    for a, b in PROBE_PAIRS:
+        exprs += [a, b]
+    exprs += [e for e, _ in PROBE_EXACT]
+    out, err, _ = psql("".join("SELECT plxdiff_probe($plxq$%s$plxq$);\n" % e
+                               for e in exprs))
+    lines = split_probe_output(out)
+    if len(lines) != len(exprs):
+        return ["probe self-test: %d results for %d probes\n%s"
+                % (len(lines), len(exprs), err)]
+    got = dict(zip(exprs, lines))
+    for a, b in PROBE_PAIRS:
+        if got[a] == got[b]:
+            failures.append("probe self-test: %s and %s both probe as %r"
+                            % (a, b, got[a]))
+    for e, want in PROBE_EXACT:
+        if got[e] != want:
+            failures.append("probe self-test: %s probes as %r, want %r"
+                            % (e, got[e], want))
+    # Pure Python, so it does not depend on the server encoding: only a
+    # newline may end a probe, not U+2028 or U+0085.
+    sample = '"a b"\n"c\x85d"\n"e"\n'
+    want = ['"a b"', '"c\x85d"', '"e"']
+    if split_probe_output(sample) != want:
+        failures.append("probe self-test: split_probe_output(%r) gave %r, "
+                        "want %r" % (sample, split_probe_output(sample), want))
+    return failures
 
 
 def fname(case, variant):
@@ -119,7 +186,7 @@ def probe_all(created_ok):
     if not selects:
         return {}
     out, err, _ = psql("\n".join(s + ";" for s in selects))
-    lines = out.splitlines()
+    lines = split_probe_output(out)
     if len(lines) != len(keys):
         sys.stderr.write("probe count mismatch: %d results for %d probes\n%s\n"
                          % (len(lines), len(keys), err))
@@ -190,20 +257,20 @@ def selftest():
     """Check the comparison logic on made-up results. Returns a list of failures."""
     failures = []
     entry = {"dialects": ["plxruby"], "calls": ["1"], "reason": "r",
-             "outcome": "ERROR 42883"}
+             "outcome": '{"error" : "42883"}'}
     checks = [
         # (got, expected, entry, want)
-        ("5", "5", None, "match"),
-        ("6", "5", None, "unexplained"),
-        ("5", "5", entry, "stale"),
-        ("ERROR 42883", "5", entry, "documented"),
+        ('"5"', '"5"', None, "match"),
+        ('"6"', '"5"', None, "unexplained"),
+        ('"5"', '"5"', entry, "stale"),
+        ('{"error" : "42883"}', '"5"', entry, "documented"),
         # A documented divergence exempts only the outcome it documents.
-        ("wrong", "5", entry, "unexplained"),
-        ("ERROR 42P01", "5", entry, "unexplained"),
+        ('"wrong"', '"5"', entry, "unexplained"),
+        ('{"error" : "42P01"}', '"5"', entry, "unexplained"),
     ]
-    per_call = dict(entry, outcome={"1": "x"})
-    checks += [("x", "5", per_call, "documented"),
-               ("y", "5", per_call, "unexplained")]
+    per_call = dict(entry, outcome={"1": '"x"'})
+    checks += [('"x"', '"5"', per_call, "documented"),
+               ('"y"', '"5"', per_call, "unexplained")]
     for got, expected, ent, want in checks:
         verdict = classify(got, expected, ent, "1")
         if verdict != want:
@@ -223,6 +290,12 @@ def main():
     _, err, rc = psql(PROBE + SETUP, stop_on_error=True)
     if rc != 0:
         sys.stderr.write("setup failed:\n%s\n" % err)
+        return 2
+
+    failures = probe_selftest()
+    if failures:
+        sys.stderr.write("differential.py self-test failed:\n  %s\n"
+                         % "\n  ".join(failures))
         return 2
 
     create_errors = create_variants()
