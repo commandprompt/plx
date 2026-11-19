@@ -313,6 +313,12 @@ CREATE FUNCTION fg33_bases() RETURNS bigint LANGUAGE plxgo AS $$
  return int64(x) + 0x1F + 0b101 + 1_000 + 0xFF_FF
 $$;
 SELECT fg33_bases() AS go_66585;
+-- a hexadecimal literal with an E digit is an integer, so / divides as integers
+CREATE FUNCTION fg33_hexe() RETURNS text LANGUAGE plxgo AS $$
+ x := 0XE
+ return x / 4
+$$;
+SELECT fg33_hexe() AS go_3;
 -- a literal Go rejects is rejected, not silently changed
 CREATE FUNCTION fg33_badesc() RETURNS text LANGUAGE plxgo AS $$ return "\q" $$;
 CREATE FUNCTION fg33_nul() RETURNS text LANGUAGE plxgo AS $$ return "a\x00b" $$;

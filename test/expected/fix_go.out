@@ -500,6 +500,17 @@ SELECT fg33_bases() AS go_66585;
     66585
 (1 row)
 
+-- a hexadecimal literal with an E digit is an integer, so / divides as integers
+CREATE FUNCTION fg33_hexe() RETURNS text LANGUAGE plxgo AS $$
+ x := 0XE
+ return x / 4
+$$;
+SELECT fg33_hexe() AS go_3;
+ go_3 
+------
+ 3
+(1 row)
+
 -- a literal Go rejects is rejected, not silently changed
 CREATE FUNCTION fg33_badesc() RETURNS text LANGUAGE plxgo AS $$ return "\q" $$;
 ERROR:  plxgo: unknown escape sequence in a string literal
