@@ -213,3 +213,38 @@ CREATE FUNCTION fg29_nomatch(x int) RETURNS text LANGUAGE plxgo AS $$
  return r
 $$;
 SELECT fg29_nomatch(1) AS go_small, fg29_nomatch(7) AS go_none;
+
+-- A30: Go's bitwise operators keep Go's meaning and precedence
+CREATE FUNCTION fg30_xor() RETURNS int LANGUAGE plxgo AS $$ return 5 ^ 3 $$;
+SELECT fg30_xor() AS go_6;
+CREATE FUNCTION fg30_shl() RETURNS int LANGUAGE plxgo AS $$ return 1 << 2 + 1 $$;
+SELECT fg30_shl() AS go_5;
+CREATE FUNCTION fg30_ops(a int, b int) RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("%d %d %d %d %d %d %d", a & b + 1, a | b + 1, ^a, a &^ b, a >> 1 * 2, (a + b) << 1, foo(a ^ b))
+$$;
+CREATE FUNCTION foo(x int) RETURNS int LANGUAGE sql AS $$ SELECT x $$;
+SELECT fg30_ops(12, 10) AS go_9_15_m13_4_12_44_6;
+CREATE FUNCTION fg30_assign() RETURNS text LANGUAGE plxgo AS $$
+ a := 6
+ a &= 3
+ b := 1
+ b <<= 4
+ c := 5
+ c ^= 1
+ d := 8
+ d >>= 2
+ e := 4
+ e |= 1
+ f := 15
+ f &^= 5
+ return fmt.Sprintf("%d %d %d %d %d %d", a, b, c, d, e, f)
+$$;
+SELECT fg30_assign() AS go_2_16_4_2_5_10;
+-- a bitwise test inside a condition and a slice literal
+CREATE FUNCTION fg30_cond(n int) RETURNS int[] LANGUAGE plxgo AS $$
+ if n & 1 == 1 && n | 2 > 2 {
+   return []int{n ^ 1, n << 1}
+ }
+ return []int{0}
+$$;
+SELECT fg30_cond(3) AS go_2_6, fg30_cond(4) AS go_0;

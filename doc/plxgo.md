@@ -54,7 +54,7 @@ declarations are translated (see below).
 | `var ( a int; b string )` | both hoisted |
 | `const pi = 3.14` | `pi CONSTANT double precision := 3.14;` |
 | `x = e` | `x := e;` |
-| `x += e` (also `-= *= /= %=`) | `x := x + (e);` |
+| `x += e` (also `-= *= /= %= <<= >>= &= \|= ^= &^=`) | `x := x + (e);` (`^=` uses `#`, `&^=` uses `& ~`) |
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
 | `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
@@ -142,6 +142,8 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
+| `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `~x`, `a & ~(b)` |
+| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
@@ -151,6 +153,11 @@ $$;
 | `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` / `::bigint` / `::double precision` / `::text` |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
+
+SQL ranks `<<`, `>>`, `&` and `|` below `+` and `-`, while Go ranks `<<`, `>>`,
+`&` and `&^` with `*`, and `|` and `^` with `+`. When an expression uses a
+bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
+`(1 << 2) + 1`, which is 5, as in Go.
 
 ### Slices and indexing
 

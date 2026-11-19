@@ -1011,9 +1011,276 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	return false;
 }
 
-/* emit tokens [a,b) as a plpgsql expression */
+/* token ends an operand, so an operator after it is binary */
+static bool
+go_operand_end(const GoTok *tk)
+{
+	return tk->kind == GO_WORD || tk->kind == GO_NUM || tk->kind == GO_STR ||
+		tk->kind == GO_RP || tk->kind == GO_RBRACK || tk->kind == GO_RBRACE;
+}
+
+static bool
+go_op_is(const GoTok *tk, const char *op)
+{
+	int			l = (int) strlen(op);
+
+	return tk->kind == GO_OP && tk->len == l && strncmp(tk->s, op, l) == 0;
+}
+
+/* Go precedence of a binary operator token (5 binds tightest); 0 if none */
+static int
+go_binop_prec(const GoTok *tk)
+{
+	static const char *const p5[] = {"*", "/", "%", "<<", ">>", "&", "&^", NULL};
+	static const char *const p4[] = {"+", "-", "|", "^", NULL};
+	static const char *const p3[] = {"==", "!=", "<", "<=", ">", ">=", NULL};
+	int			k;
+
+	for (k = 0; p5[k]; k++)
+		if (go_op_is(tk, p5[k]))
+			return 5;
+	for (k = 0; p4[k]; k++)
+		if (go_op_is(tk, p4[k]))
+			return 4;
+	for (k = 0; p3[k]; k++)
+		if (go_op_is(tk, p3[k]))
+			return 3;
+	if (go_op_is(tk, "&&"))
+		return 2;
+	if (go_op_is(tk, "||"))
+		return 1;
+	return 0;
+}
+
+static bool
+go_is_bitop(const GoTok *tk)
+{
+	return go_op_is(tk, "<<") || go_op_is(tk, ">>") || go_op_is(tk, "&") ||
+		go_op_is(tk, "|") || go_op_is(tk, "^") || go_op_is(tk, "&^");
+}
+
+/*
+ * True when [a,b) uses a binary bitwise operator outside any bracket. SQL
+ * ranks << >> & | below + and -, while Go ranks << >> & &^ with * and | ^
+ * with +; such a range is emitted fully parenthesized (go_emit_prec).
+ */
+static bool
+go_needs_prec(Go *g, int a, int b)
+{
+	int			i,
+				depth = 0;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && i > a && go_is_bitop(&g->t[i]) &&
+				 go_operand_end(&g->t[i - 1]))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * SQL precedence class of a Go binary operator. Operators of one class
+ * associate to the left in SQL as in Go, so a run of them needs no brackets
+ * of its own. 'c' (comparison) never chains in SQL, so it gets brackets each
+ * time.
+ */
+static char
+go_sql_class(const GoTok *tk)
+{
+	if (go_op_is(tk, "*") || go_op_is(tk, "/") || go_op_is(tk, "%"))
+		return 'm';
+	if (go_op_is(tk, "+") || go_op_is(tk, "-"))
+		return 'a';
+	if (go_op_is(tk, "&&"))
+		return 'A';
+	if (go_op_is(tk, "||"))
+		return 'O';
+	if (go_binop_prec(tk) == 3)
+		return 'c';
+	return 'o';					/* << >> & &^ | ^: SQL's "other" operators */
+}
+
+/*
+ * Emit operands lo..hi of a split binary expression, nesting by Go
+ * precedence: os/oe bound each operand's tokens and op[k] is the operator
+ * between operands k and k+1. Each Go level goes in brackets, with an inner
+ * bracket wherever the SQL class changes, since Go ranks + - | ^ alike but
+ * SQL does not: a | b + c becomes ((a | b) + c). Each level recurses only into
+ * tighter levels, so the recursion is at most five deep per bracket.
+ */
 static void
-go_emit_range_inner(Go *g, int a, int b, StringInfo out)
+go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int hi,
+			   StringInfo out)
+{
+	int			minp = 99,
+				k,
+				m = 0,
+				j;
+	int		   *sp;
+	bool	   *brk;
+
+	if (lo == hi)
+	{
+		go_emit_range(g, os[lo], oe[lo], out);
+		return;
+	}
+	for (k = lo; k < hi; k++)
+		minp = Min(minp, go_binop_prec(&g->t[op[k]]));
+	sp = palloc(sizeof(int) * (hi - lo));
+	brk = palloc(sizeof(bool) * (hi - lo));
+	for (k = lo; k < hi; k++)
+		if (go_binop_prec(&g->t[op[k]]) == minp)
+			sp[m++] = k;
+	go_sp(out);
+	appendStringInfoChar(out, '(');
+	for (j = 1; j < m; j++)
+	{
+		char		c = go_sql_class(&g->t[op[sp[j]]]);
+
+		brk[j] = (c == 'c' || c != go_sql_class(&g->t[op[sp[j - 1]]]));
+		if (brk[j])
+			appendStringInfoChar(out, '(');
+	}
+	go_emit_binary(g, os, oe, op, lo, sp[0], out);
+	for (j = 0; j < m; j++)
+	{
+		GoTok	   *o = &g->t[op[sp[j]]];
+		bool		andnot = go_op_is(o, "&^");
+
+		if (j > 0 && brk[j])
+			appendStringInfoChar(out, ')');
+		go_sp(out);
+		if (go_op_is(o, "=="))
+			appendStringInfoChar(out, '=');
+		else if (go_op_is(o, "!="))
+			appendStringInfoString(out, "<>");
+		else if (go_op_is(o, "&&"))
+			appendStringInfoString(out, "AND");
+		else if (go_op_is(o, "||"))
+			appendStringInfoString(out, "OR");
+		else if (go_op_is(o, "^"))
+			appendStringInfoChar(out, '#');		/* XOR: SQL's ^ is a power */
+		else if (andnot)
+			appendStringInfoString(out, "& ~(");	/* AND NOT */
+		else
+			appendBinaryStringInfo(out, o->s, o->len);
+		go_emit_binary(g, os, oe, op, sp[j] + 1, j + 1 < m ? sp[j + 1] : hi, out);
+		if (andnot)
+			appendStringInfoChar(out, ')');
+	}
+	appendStringInfoChar(out, ')');
+	pfree(sp);
+	pfree(brk);
+}
+
+/*
+ * Emit [a,b), which go_needs_prec flagged, fully parenthesized by Go
+ * precedence. A top-level comma list (call arguments, slice elements) is
+ * emitted element by element. Returns false, emitting nothing, when the
+ * range holds an operator this does not model; the caller then emits the
+ * tokens as written.
+ */
+static bool
+go_emit_prec(Go *g, int a, int b, StringInfo out)
+{
+	int			i,
+				depth = 0,
+				n = 0,
+				start = a;
+	int		   *os,
+			   *oe,
+			   *op;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_COMMA)
+		{
+			int			s = a,
+						j;
+
+			/* a comma list: emit each element on its own */
+			depth = 0;
+			for (j = a; j <= b; j++)
+			{
+				GoKind		kk = (j < b) ? g->t[j].kind : GO_COMMA;
+
+				if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+					depth++;
+				else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+					depth--;
+				else if (depth == 0 && kk == GO_COMMA)
+				{
+					if (s > a)
+						appendStringInfoChar(out, ',');
+					go_emit_range(g, s, j, out);
+					s = j + 1;
+				}
+			}
+			return true;
+		}
+	}
+
+	os = palloc(sizeof(int) * (b - a + 1));
+	oe = palloc(sizeof(int) * (b - a + 1));
+	op = palloc(sizeof(int) * (b - a + 1));
+	depth = 0;
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_OP && i > start &&
+				 go_operand_end(&g->t[i - 1]))
+		{
+			if (go_binop_prec(&g->t[i]) == 0)
+			{
+				pfree(os);
+				pfree(oe);
+				pfree(op);
+				return false;
+			}
+			os[n] = start;
+			oe[n] = i;
+			op[n] = i;
+			n++;
+			start = i + 1;
+		}
+	}
+	if (start >= b)						/* dangling operator: emit as written */
+	{
+		pfree(os);
+		pfree(oe);
+		pfree(op);
+		return false;
+	}
+	os[n] = start;
+	oe[n] = b;
+	go_emit_binary(g, os, oe, op, 0, n, out);
+	pfree(os);
+	pfree(oe);
+	pfree(op);
+	return true;
+}
+
+/* emit tokens [a,b) as a plpgsql expression, token by token */
+static void
+go_emit_tokens(Go *g, int a, int b, StringInfo out)
 {
 	int			i = a;
 
@@ -1074,8 +1341,18 @@ go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 		}
 		if (tk->kind == GO_LP)
 		{
+			/* a bracketed group is an expression of its own (precedence) */
+			int			close = go_match(g, i, b);
+
 			go_sp(out);
 			appendStringInfoChar(out, '(');
+			if (close > 0)
+			{
+				go_emit_range(g, i + 1, close, out);
+				appendStringInfoChar(out, ')');
+				i = close + 1;
+				continue;
+			}
 			i++;
 			continue;
 		}
@@ -1157,6 +1434,17 @@ go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 				go_sp(out);
 				appendStringInfoString(out, "NOT ");
 			}
+			else if (tk->len == 1 && tk->s[0] == '^')
+			{
+				/* Go's XOR, or its unary bitwise NOT; SQL's ^ is a power */
+				go_sp(out);
+				appendStringInfoChar(out, (i > a && go_operand_end(&g->t[i - 1])) ? '#' : '~');
+			}
+			else if (tk->len == 2 && tk->s[0] == '&' && tk->s[1] == '^')
+			{
+				go_sp(out);
+				appendStringInfoString(out, "& ~");
+			}
 			else
 			{
 				go_sp(out);
@@ -1167,6 +1455,15 @@ go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/* emit tokens [a,b) as a plpgsql expression */
+static void
+go_emit_range_inner(Go *g, int a, int b, StringInfo out)
+{
+	if (go_needs_prec(g, a, b) && go_emit_prec(g, a, b, out))
+		return;
+	go_emit_tokens(g, a, b, out);
 }
 
 /*
@@ -1391,7 +1688,7 @@ go_simple(Go *g, int ind, int stop)
 	int			i,
 				depth = 0,
 				opidx = -1;
-	char		opc = 0;
+	const char *opc = NULL;		/* SQL operator of a compound assignment */
 	bool		shortdecl = false;
 
 	/* an empty statement range means a stray closer/terminator (e.g. ')' or ']')
@@ -1426,7 +1723,27 @@ go_simple(Go *g, int ind, int stop)
 			if (o->len == 2 && o->s[1] == '=' && strchr("+-*/%", o->s[0]))
 			{
 				opidx = i;
-				opc = o->s[0];
+				opc = pnstrdup(o->s, 1);
+				break;
+			}
+			/* bitwise compound assignments; Go's ^ is SQL's #, &^ is & ~ */
+			if (go_op_is(o, "<<=") || go_op_is(o, ">>=") ||
+				go_op_is(o, "&=") || go_op_is(o, "|="))
+			{
+				opidx = i;
+				opc = pnstrdup(o->s, o->len - 1);
+				break;
+			}
+			if (go_op_is(o, "^="))
+			{
+				opidx = i;
+				opc = "#";
+				break;
+			}
+			if (go_op_is(o, "&^="))
+			{
+				opidx = i;
+				opc = "& ~";
 				break;
 			}
 		}
@@ -1674,7 +1991,7 @@ go_simple(Go *g, int ind, int stop)
 	if (opc)
 	{
 		go_emit_range(g, e0, opidx, &g->cx->out);
-		appendStringInfo(&g->cx->out, " %c (", opc);
+		appendStringInfo(&g->cx->out, " %s (", opc);
 		go_emit_range(g, opidx + 1, e1, &g->cx->out);
 		appendStringInfoString(&g->cx->out, ");\n");
 	}
