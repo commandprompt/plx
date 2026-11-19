@@ -1692,18 +1692,33 @@ cob_display(Cb *cb, int ind)
 	initStringInfo(&args);
 	while (!cob_value_stop(cb, stops, 2))
 	{
-		char	   *op = cob_operand(cb);
+		char	   *op;
 
+		/* a table element WS-ARR(i) reads like a receiving field */
+		if (cob_cur(cb)->kind == CB_WORD && cb->t[cb->pos + 1].kind == CB_LP)
+			op = cob_target(cb);
+		else
+			op = cob_operand(cb);
 		if (!op)
 			break;
 		if (nargs++)
 			appendStringInfoString(&args, ", ");
 		appendStringInfo(&args, "%s", op);
 	}
-	/* consume trailing UPON <dev> / WITH NO ADVANCING noise up to period */
-	while (cob_cur(cb)->kind != CB_PERIOD && cob_cur(cb)->kind != CB_EOF &&
-		   !cob_is_verb(cob_cur(cb)) && !cob_is_close(cob_cur(cb)))
+	/* optional UPON <device> and [WITH] NO ADVANCING, which change nothing */
+	if (cob_ci(cob_cur(cb), "UPON"))
+	{
 		cb->pos++;
+		if (cob_cur(cb)->kind == CB_WORD && !cob_value_stop(cb, stops, 2))
+			cb->pos++;
+	}
+	if (cob_ci(cob_cur(cb), "WITH"))
+		cb->pos++;
+	if (cob_ci(cob_cur(cb), "NO") && cob_ci(&cb->t[cb->pos + 1], "ADVANCING"))
+		cb->pos += 2;
+	/* anything else (a function call, an expression) would be dropped */
+	if (!cob_value_stop(cb, NULL, 0))
+		cob_err(cb, "DISPLAY operands must be data names, table elements, or literals");
 	if (nargs == 0)
 		cob_err(cb, "DISPLAY requires at least one operand");
 	plx_indent(&cb->cx->out, ind);

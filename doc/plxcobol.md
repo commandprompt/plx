@@ -97,7 +97,8 @@ COMPUTE WS-SUM = WS-SUM + WS-ARR(WS-I) *> read element
 ```
 
 Iterate the whole table with `PERFORM v OVER ARRAY WS-ARR`. A subscript is
-recognized in `MOVE`/`COMPUTE` targets and in expressions; use `COMPUTE` (not
+recognized in `MOVE`/`COMPUTE` targets, in `DISPLAY` operands, and in
+expressions; use `COMPUTE` (not
 `ADD`/`SUBTRACT`) when an operand is a subscripted element.
 
 ## Control flow
@@ -318,7 +319,10 @@ RAISE NOTICE "processed rows"
 ```
 
 Levels are `EXCEPTION` (or `ERROR`), `NOTICE`, `WARNING`, `INFO`, `LOG`, and
-`DEBUG`. `DISPLAY` emits a `NOTICE`, concatenating its operands.
+`DEBUG`. `DISPLAY` emits a `NOTICE`, concatenating its operands. An operand is
+a data name, a table element (`WS-ARR(I)`), or a literal; to display an
+expression, `COMPUTE` it into a data item first. `UPON <device>` and
+`WITH NO ADVANCING` are accepted and have no effect.
 
 ### Handling
 

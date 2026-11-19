@@ -216,3 +216,19 @@ PROCEDURE DIVISION.
     GOBACK RETURNING concat(WS-T, " ", WS-F).
 $$;
 SELECT fc_a38_other() AS expect_8_79;
+-- A39: DISPLAY of a subscripted table element shows that element
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-ARR PIC 9(9) OCCURS 3 TIMES.
+01 WS-I PIC 9(9) VALUE 2.
+PROCEDURE DIVISION.
+    COMPUTE WS-ARR(1) = 11
+    COMPUTE WS-ARR(2) = 22
+    DISPLAY "elem2=" WS-ARR(2) " elemI=" WS-ARR(WS-I) UPON CONSOLE
+    DISPLAY "noadv=" WS-ARR(1) WITH NO ADVANCING.
+$$;
+-- A39: an operand DISPLAY cannot handle is an error, not silently dropped
+DO LANGUAGE plxcobol $$
+PROCEDURE DIVISION.
+    DISPLAY "x=" upper("a").
+$$;
