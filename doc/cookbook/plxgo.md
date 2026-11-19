@@ -290,7 +290,7 @@ SELECT slice_demo();
 
 ## Type conversions and the standard library
 
-`float64(x)` and `int(x)` become `::double precision` and `::integer` casts, and `string(x)` becomes `::text`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
+`float64(x)` becomes a `::double precision` cast, and `string(x)` becomes `::text`. `int(x)` truncates toward zero, as in Go, and then casts to `::integer`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
 
 ```go
 CREATE FUNCTION describe_num(x int) RETURNS text LANGUAGE plxgo AS $$

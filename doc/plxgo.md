@@ -151,7 +151,7 @@ $$;
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `trunc(x)::integer` / `trunc(x)::bigint` / `(x)::double precision` / `(x)::text` (see below) |
+| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
 
@@ -168,11 +168,14 @@ supported PostgreSQL version. A number with letters Go does not allow (such as
 `12abc`), a hexadecimal float and an imaginary literal are rejected.
 
 A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
-3 and `int(-2.7)` is -2. A SQL cast would round instead, so plx calls `trunc`
-first. When the operand is an integer literal, or a local or parameter of an
-integer type, plx casts it directly. For any other operand, `trunc` works in
-`double precision` when the operand is an integer, so an integer expression
-beyond 2^53 can lose precision; convert such a value through a variable.
+3 and `int(-2.7)` is -2. A SQL cast would round instead. plx casts an integer
+literal, or a local or parameter of an integer type, directly. For a float or
+`numeric` literal, local or parameter, it calls `trunc` first. For any other
+operand, such as an expression or a row field, the type is known only when the
+function runs. plx evaluates the operand once and then chooses by its type: an
+integer casts exactly, a float goes through `trunc`, and any other value, such
+as `numeric` or `text`, goes through `trunc` as `numeric`. So `int64(n + 1)`
+and `int64(r.id)` stay exact beyond 2^53.
 
 SQL ranks `<<`, `>>`, `&` and `|` below `+` and `-`, while Go ranks `<<`, `>>`,
 `&` and `&^` with `*`, and `|` and `^` with `+`. When an expression uses a

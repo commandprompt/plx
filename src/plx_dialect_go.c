@@ -1099,29 +1099,40 @@ go_match(Go *g, int idx, int limit)
 }
 
 /*
- * True when the operand [a,b) of a conversion is known to be an integer: an
- * integer literal, or a local or parameter of an integer type.
+ * What the operand [a,b) of an integer conversion is known to be: 'i' for an
+ * integer (an integer literal, or a local or parameter of an integer type),
+ * 'f' for a value trunc() handles exactly (a float or numeric literal, local
+ * or parameter), and 0 when plx cannot tell (an expression, a call, a row
+ * field). A row field carries no Go type, so it can be anything.
  */
-static bool
-go_operand_is_int(Go *g, int a, int b)
+static char
+go_operand_kind(Go *g, int a, int b)
 {
 	GoTok	   *tk = &g->t[a];
 	PlxLocal2  *l;
 	int			i;
 
 	if (b - a != 1)
-		return false;
+		return 0;
 	if (tk->kind == GO_NUM)
-		return !go_num_is_float(tk);
+		return go_num_is_float(tk) ? 'f' : 'i';
 	if (tk->kind != GO_WORD)
-		return false;
+		return 0;
 	l = plx_local_find(g->cx, tk->s, tk->len);
 	if (l)
-		return l->typ && (strcmp(l->typ, "integer") == 0 ||
-						  strcmp(l->typ, "smallint") == 0 ||
-						  strcmp(l->typ, "bigint") == 0);
+	{
+		if (!l->typ)
+			return 0;
+		if (strcmp(l->typ, "integer") == 0 || strcmp(l->typ, "smallint") == 0 ||
+			strcmp(l->typ, "bigint") == 0)
+			return 'i';
+		if (strcmp(l->typ, "double precision") == 0 ||
+			strcmp(l->typ, "real") == 0 || strcmp(l->typ, "numeric") == 0)
+			return 'f';
+		return 0;
+	}
 	if (!g->cx->meta || !g->cx->meta->argnames)
-		return false;
+		return 0;
 	for (i = 0; i < g->cx->meta->nargs; i++)
 	{
 		const char *an = g->cx->meta->argnames[i];
@@ -1130,10 +1141,14 @@ go_operand_is_int(Go *g, int a, int b)
 		{
 			Oid			t = g->cx->meta->argtypes[i];
 
-			return t == INT2OID || t == INT4OID || t == INT8OID;
+			if (t == INT2OID || t == INT4OID || t == INT8OID)
+				return 'i';
+			if (t == FLOAT4OID || t == FLOAT8OID || t == NUMERICOID)
+				return 'f';
+			return 0;
 		}
 	}
-	return false;
+	return 0;
 }
 
 /* a stdlib / builtin / type-conversion call at index i; sets *ni on success */
@@ -1267,10 +1282,32 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	conv = go_base_type(tk->s, tk->len);
 	if (conv)
 	{
+		char		kind = 'i';
+
+		if (strcmp(conv, "integer") == 0 || strcmp(conv, "smallint") == 0 ||
+			strcmp(conv, "bigint") == 0)
+			kind = go_operand_kind(g, lp + 1, close);
 		go_sp(out);
-		if ((strcmp(conv, "integer") == 0 || strcmp(conv, "smallint") == 0 ||
-			 strcmp(conv, "bigint") == 0) &&
-			!go_operand_is_int(g, lp + 1, close))
+		if (kind == 0)
+		{
+			/*
+			 * The operand's type is known only at run time. Evaluate it once
+			 * and choose by its type: an integer casts exactly, a float
+			 * truncates as a float, and anything else (numeric, text)
+			 * truncates as numeric, which is exact at any size.
+			 */
+			appendStringInfoString(out, "(SELECT CASE WHEN pg_typeof(__plx_v) IN "
+								   "('smallint'::regtype, 'integer'::regtype, 'bigint'::regtype) ");
+			appendStringInfo(out, "THEN __plx_v::%s WHEN pg_typeof(__plx_v) IN "
+							 "('real'::regtype, 'double precision'::regtype) ", conv);
+			appendStringInfo(out, "THEN trunc(__plx_v::double precision)::%s "
+							 "ELSE trunc(__plx_v::numeric)::%s END FROM (VALUES ((", conv, conv);
+			go_emit_range(g, lp + 1, close, out);
+			appendStringInfoString(out, "))) AS __plx_n(__plx_v))");
+			*ni = close + 1;
+			return true;
+		}
+		if (kind == 'f')
 			appendStringInfoString(out, "trunc");
 		appendStringInfoChar(out, '(');
 		go_emit_range(g, lp + 1, close, out);

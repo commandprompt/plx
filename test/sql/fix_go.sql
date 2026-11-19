@@ -298,6 +298,17 @@ CREATE FUNCTION fg31_big(n bigint) RETURNS bigint LANGUAGE plxgo AS $$
  return int64(n) - int64(m) + int64(n)
 $$;
 SELECT fg31_big(9007199254740993) AS go_9007199254740993;
+-- a row field or an expression converts exactly when it is an integer,
+-- truncates when it is a float or numeric, and a text field still converts
+CREATE FUNCTION fg31_field() RETURNS text LANGUAGE plxgo AS $$
+ for _, r := range query("SELECT 1152921504606846977::bigint AS id, '42'::text AS t, 3.7::float8 AS f, (-2.7)::real AS g, 1152921504606846977.9::numeric AS n") {
+   return fmt.Sprintf("%d %d %d %d %d", int64(r.id), int(r.t), int(r.f), int(r.g), int64(r.n))
+ }
+ return ""
+$$;
+SELECT fg31_field() AS go_exact_42_3_m2_exact;
+CREATE FUNCTION fg31_expr(n bigint) RETURNS bigint LANGUAGE plxgo AS $$ return int64(n + 1) $$;
+SELECT fg31_expr(1152921504606846976) AS go_1152921504606846977;
 
 -- A32: a fmt.Sprintf width pads but never truncates, and an explicit
 -- argument index (%[n]) is rejected rather than mangled
