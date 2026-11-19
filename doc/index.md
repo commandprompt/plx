@@ -78,7 +78,7 @@ CREATE EXTENSION plx;
 Upgrading from an earlier install, after installing the new build:
 
 ```sql
-ALTER EXTENSION plx UPDATE;   -- or UPDATE TO '2.1.0'
+ALTER EXTENSION plx UPDATE;   -- or UPDATE TO '3.0.0'
 ```
 
 Upgrading changes no existing function: plx transpiles at `CREATE FUNCTION`

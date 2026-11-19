@@ -1,6 +1,6 @@
-/* plx 2.0.0 -> 2.1.0: no catalog changes.
+/* plx 2.0.0 -> 3.0.0: no catalog changes.
  *
- * 2.1.0 makes the extension non-relocatable (relocatable = false in
+ * 3.0.0 makes the extension non-relocatable (relocatable = false in
  * plx.control). Generated code now names the extension's own objects
  * (plx_strbuild, plx_sb_append) qualified with the schema plx is installed in,
  * so a function with its own SET search_path still finds them and an object of
@@ -14,4 +14,4 @@
  *
  * Functions already in the catalog keep the unqualified names they were
  * generated with; they pick up the qualified names the next time their DDL is
- * run. See the 2.1.0 entry in CHANGELOG.md. */
+ * run. See the 3.0.0 entry in CHANGELOG.md. */

@@ -18,7 +18,7 @@ dialect syntax and emits plpgsql; the execution engine is plpgsql.
 
 ## Catalog wiring
 
-For each dialect, the install script (`plx--2.1.0.sql` for the current release)
+For each dialect, the install script (`plx--3.0.0.sql` for the current release)
 creates a language whose parts are:
 
 - `HANDLER` is `plx_call_handler`, which is bound to plpgsql's exported
@@ -121,7 +121,7 @@ per-dialect branching in the driver.
 ## Files
 
 ```
-plx.control, plx--2.1.0.sql   extension control and install SQL
+plx.control, plx--3.0.0.sql   extension control and install SQL
 plx--X--Y.sql                 upgrade scripts between releases
 src/plx.h                     public ABI (PlxDialect, PlxFuncMeta)
 src/plx_int.h                 internal ABI (PlxSurface, canonical keywords)

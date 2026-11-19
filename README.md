@@ -254,7 +254,7 @@ can be recovered from the function itself (see
 ## Layout
 
 ```
-plx.control, plx--2.1.0.sql extension control and install SQL
+plx.control, plx--3.0.0.sql extension control and install SQL
 plx--X--Y.sql               upgrade scripts between releases
 Makefile                    PGXS build
 src/                        C sources (transpiler, dialect surfaces, PL handler)

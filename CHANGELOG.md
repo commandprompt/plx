@@ -2,11 +2,11 @@
 
 All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
-version in `plx.control` (currently `2.1.0`).
+version in `plx.control` (currently `3.0.0`).
 
 ## [Unreleased]
 
-Security fixes from a code audit, and extension version 2.1.0. Every
+Security fixes from a code audit, and extension version 3.0.0. Every
 security fix concerns input to `CREATE FUNCTION` or `DO`, which any role with
 USAGE on a plx language can send (the languages are trusted, so PUBLIC has
 USAGE by default).
