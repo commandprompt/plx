@@ -427,6 +427,36 @@ SELECT fg30_ops(12, 10) AS go_9_15_m13_4_12_44_6;
  9 15 -13 4 12 44 6
 (1 row)
 
+-- one operator per function, so a wrong result in one cannot hide behind
+-- an error in another
+CREATE FUNCTION fg30_p1(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a & b + 1 $$;
+SELECT fg30_p1(12, 3) AS go_1;
+ go_1 
+------
+    1
+(1 row)
+
+CREATE FUNCTION fg30_p2(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a | b + 1 $$;
+SELECT fg30_p2(12, 3) AS go_16;
+ go_16 
+-------
+    16
+(1 row)
+
+CREATE FUNCTION fg30_p3(a int) RETURNS int LANGUAGE plxgo AS $$ return a >> 1 * 2 $$;
+SELECT fg30_p3(12) AS go_12;
+ go_12 
+-------
+    12
+(1 row)
+
+CREATE FUNCTION fg30_p4(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a &^ b + 1 $$;
+SELECT fg30_p4(12, 3) AS go_13;
+ go_13 
+-------
+    13
+(1 row)
+
 CREATE FUNCTION fg30_assign() RETURNS text LANGUAGE plxgo AS $$
  a := 6
  a &= 3

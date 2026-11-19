@@ -287,6 +287,16 @@ CREATE FUNCTION fg30_ops(a int, b int) RETURNS text LANGUAGE plxgo AS $$
 $$;
 CREATE FUNCTION foo(x int) RETURNS int LANGUAGE sql AS $$ SELECT x $$;
 SELECT fg30_ops(12, 10) AS go_9_15_m13_4_12_44_6;
+-- one operator per function, so a wrong result in one cannot hide behind
+-- an error in another
+CREATE FUNCTION fg30_p1(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a & b + 1 $$;
+SELECT fg30_p1(12, 3) AS go_1;
+CREATE FUNCTION fg30_p2(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a | b + 1 $$;
+SELECT fg30_p2(12, 3) AS go_16;
+CREATE FUNCTION fg30_p3(a int) RETURNS int LANGUAGE plxgo AS $$ return a >> 1 * 2 $$;
+SELECT fg30_p3(12) AS go_12;
+CREATE FUNCTION fg30_p4(a int, b int) RETURNS int LANGUAGE plxgo AS $$ return a &^ b + 1 $$;
+SELECT fg30_p4(12, 3) AS go_13;
 CREATE FUNCTION fg30_assign() RETURNS text LANGUAGE plxgo AS $$
  a := 6
  a &= 3
