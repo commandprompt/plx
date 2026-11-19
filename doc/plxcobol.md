@@ -327,7 +327,7 @@ Levels are `EXCEPTION` (or `ERROR`), `NOTICE`, `WARNING`, `INFO`, `LOG`, and
 `DEBUG`. `DISPLAY` emits a `NOTICE`, concatenating its operands. An operand is
 a data name, a table element (`WS-ARR(I)`), or a literal; to display an
 expression, `COMPUTE` it into a data item first. `UPON <device>` and
-`WITH NO ADVANCING` are accepted and have no effect.
+`[WITH] NO ADVANCING` are accepted and have no effect.
 
 ### Handling
 

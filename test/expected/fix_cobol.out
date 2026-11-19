@@ -416,3 +416,14 @@ PROCEDURE DIVISION.
     DISPLAY "r=" WS-R.
 $$;
 NOTICE:  r=other
+-- A39 review: NO ADVANCING without WITH is accepted, not read as two data names
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) VALUE 1.
+01 NO-X PIC 9(4) VALUE 2.
+PROCEDURE DIVISION.
+    DISPLAY "a=" WS-A NO ADVANCING
+    DISPLAY "b=" NO-X UPON CONSOLE NO ADVANCING.
+$$;
+NOTICE:  a=1
+NOTICE:  b=2

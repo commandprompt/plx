@@ -1734,6 +1734,9 @@ cob_display(Cb *cb, int ind)
 	{
 		char	   *op;
 
+		/* NO ADVANCING may come without WITH */
+		if (cob_ci(cob_cur(cb), "NO") && cob_ci(&cb->t[cb->pos + 1], "ADVANCING"))
+			break;
 		/* a table element WS-ARR(i) reads like a receiving field */
 		if (cob_cur(cb)->kind == CB_WORD && cb->t[cb->pos + 1].kind == CB_LP)
 			op = cob_target(cb);
