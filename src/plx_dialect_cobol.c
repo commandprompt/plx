@@ -868,6 +868,7 @@ cob_decl(Cb *cb)
 	bool		is_array = false;
 	bool		from_pic = false;
 	CbTok	   *occurs = NULL;	/* the OCCURS count token */
+	bool		value_dec = false;	/* VALUE is a decimal literal */
 
 	/* level number */
 	if (cob_cur(cb)->kind != CB_NUM)
@@ -935,6 +936,7 @@ cob_decl(Cb *cb)
 			if (cob_ci(cob_cur(cb), "IS"))
 				cb->pos++;
 			vt = cob_cur(cb);
+			value_dec = false;
 			initStringInfo(&v);
 			fig = (vt->kind == CB_WORD) ? cob_figurative(vt) : NULL;
 			if (fig)
@@ -947,6 +949,7 @@ cob_decl(Cb *cb)
 			else if (vt->kind == CB_NUM)
 			{
 				appendBinaryStringInfo(&v, vt->s, vt->len);
+				value_dec = memchr(vt->s, '.', vt->len) != NULL;
 				cb->pos++;
 				l->init = v.data;
 			}
@@ -1040,6 +1043,9 @@ cob_decl(Cb *cb)
 		num->name = mapped;
 		num->scale = comma ? atoi(comma + 1) : 0;
 		cb->nums = lappend(cb->nums, num);
+		/* a decimal VALUE is truncated to the PICTURE too */
+		if (value_dec && l->init)
+			l->init = psprintf("trunc(%s, %d)", l->init, num->scale);
 	}
 
 	if (is_array)
