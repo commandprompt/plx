@@ -214,8 +214,16 @@ DROP EXTENSION plx CASCADE;
 CREATE EXTENSION plx VERSION '2.0.0';
 CREATE TABLE a4_old(v plx_strbuild);
 INSERT INTO a4_old VALUES ('b'), ('a'), ('b');
+-- A4: range types over plx_strbuild made under 2.0.0 get the collation too
+CREATE TYPE a4_rng AS RANGE (subtype = plx_strbuild);
+CREATE DOMAIN a4_rdom AS plx_strbuild;
+CREATE TYPE a4_drng AS RANGE (subtype = a4_rdom);
 ALTER EXTENSION plx UPDATE TO '3.0.0';
 -- objects only a fresh install has, then objects only the update has
 SELECT * FROM plx_fresh EXCEPT SELECT * FROM plx_objects;
 SELECT * FROM plx_objects EXCEPT SELECT * FROM plx_fresh;
 SELECT DISTINCT v FROM a4_old ORDER BY v;
+SELECT rngtypid::regtype, rngcollation FROM pg_range
+WHERE rngtypid IN ('a4_rng'::regtype, 'a4_drng'::regtype) ORDER BY rngtypid::regtype::text;
+SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
+       a4_drng('a', 'c') @> 'b'::a4_rdom AS drng_has;

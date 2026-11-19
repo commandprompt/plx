@@ -34,9 +34,9 @@ ALTER TYPE plx_strbuild SET (RECEIVE = plx_sb_recv, SEND = plx_sb_send);
  * ALTER TYPE cannot make a type collatable, so set the collation in the
  * catalog, the way CREATE TYPE ... COLLATABLE = true records it: the default
  * collation on the type, its array type, and domains over either. Existing
- * table and composite-type columns of these types get it too. A view
- * created before the update keeps no collation in its stored query until
- * it is re-created.
+ * table and composite-type columns of these types get it too, and so do
+ * range types over them. A view created before the update keeps no
+ * collation in its stored query until it is re-created.
  */
 UPDATE pg_catalog.pg_type SET typcollation = 100
 WHERE typcollation = 0
@@ -49,6 +49,15 @@ WHERE typcollation = 0
 UPDATE pg_catalog.pg_attribute a SET attcollation = 100
 FROM pg_catalog.pg_type t
 WHERE a.atttypid = t.oid AND a.attcollation = 0 AND t.typcollation = 100
+  AND (t.oid IN ('plx_strbuild'::pg_catalog.regtype,
+                 'plx_strbuild[]'::pg_catalog.regtype)
+       OR (t.typtype = 'd'
+           AND t.typbasetype IN ('plx_strbuild'::pg_catalog.regtype,
+                                 'plx_strbuild[]'::pg_catalog.regtype)));
+
+UPDATE pg_catalog.pg_range r SET rngcollation = 100
+FROM pg_catalog.pg_type t
+WHERE r.rngsubtype = t.oid AND r.rngcollation = 0 AND t.typcollation = 100
   AND (t.oid IN ('plx_strbuild'::pg_catalog.regtype,
                  'plx_strbuild[]'::pg_catalog.regtype)
        OR (t.typtype = 'd'
