@@ -892,7 +892,7 @@ parse_try_brace(Ctx *cx, int ind)
 	plx_skip_seps(cx);
 	while (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_RESCUE)	/* catch */
 	{
-		int			ca, cb, i, ev_a = -1;
+		int			ca, cb, i, ev_a = -1, class_end;
 		const char *cond = "OTHERS";
 		const char *save_ev = cx->exc_var;
 		int			save_evl = cx->exc_varlen;
@@ -909,14 +909,20 @@ parse_try_brace(Ctx *cx, int ind)
 				cb = i;
 				break;
 			}
-		/* catch (\Class $e): last IDENT is $e; the class tokens precede it */
+		/*
+		 * catch (\Class $e): last IDENT is $e; the class tokens precede it.
+		 * PHP 8 allows catch (Class) with no variable, so in PHP only an
+		 * identifier written with the $ sigil is the variable.
+		 */
 		for (i = cb - 1; i >= ca; i--)
 			if (cx->t[i].kind == T_IDENT)
 			{
-				ev_a = i;
+				if (cx->surf->var_sigil == 0 || cx->t[i].s[-1] == cx->surf->var_sigil)
+					ev_a = i;
 				break;
 			}
-		if (ev_a > ca)
+		class_end = ev_a >= 0 ? ev_a : (cx->surf->var_sigil ? cb : ca);
+		if (class_end > ca)
 		{
 			/* catch (A | B $e) -> WHEN a OR b; a catch-all member wins */
 			StringInfoData cl;
@@ -924,8 +930,8 @@ parse_try_brace(Ctx *cx, int ind)
 			bool		all = false;
 
 			initStringInfo(&cl);
-			for (i = ca; i <= ev_a; i++)
-				if (i == ev_a || cx->t[i].kind == T_PIPE)
+			for (i = ca; i <= class_end; i++)
+				if (i == class_end || cx->t[i].kind == T_PIPE)
 				{
 					const char *c = catch_class_condition(cx, s, i, cx->t[ca].line);
 

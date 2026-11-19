@@ -482,3 +482,17 @@ for (var i = 0; i < n; i++) { c = c + i; }
 return c;
 $$;
 SELECT fb_rv12(4);
+-- A14: a PHP catch with no variable maps its class, not every error
+\set VERBOSITY terse
+CREATE FUNCTION fb_rv13(d int) RETURNS text LANGUAGE plxphp AS $$
+try { $r = 0; $r = 10 / $d; return "ok"; } catch (TypeError) { return "type"; }
+$$;
+CREATE FUNCTION fb_rv14(d int) RETURNS text LANGUAGE plxphp AS $$
+try { $r = 0; $r = 10 / $d; return "ok"; } catch (PG::SerializationFailure) { return "retry"; }
+$$;
+SELECT fb_rv14(0);
+\set VERBOSITY default
+CREATE FUNCTION fb_rv15(d int) RETURNS text LANGUAGE plxphp AS $$
+try { $r = 0; $r = 10 / $d; return "ok"; } catch (PG::UniqueViolation | DivisionByZeroError) { return "union"; }
+$$;
+SELECT fb_rv15(0);

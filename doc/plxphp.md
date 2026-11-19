@@ -261,7 +261,9 @@ condition name in CamelCase. For example, `catch (PG::UniqueViolation $e)` maps
 to `unique_violation`, and `catch (PG::SerializationFailure $e)` maps to
 `serialization_failure`. `DivisionByZeroError` maps to `division_by_zero`. To
 catch several conditions in one handler, join the classes with `|`, as in
-`catch (PG::UniqueViolation | PG::CheckViolation $e)`.
+`catch (PG::UniqueViolation | PG::CheckViolation $e)`. The variable is
+optional, as in PHP 8: `catch (PG::SerializationFailure)` maps the class the
+same way.
 
 `CREATE FUNCTION` rejects any other class name, such as `TypeError`, with
 `unsupported exception class`. plpgsql checks a `PG::` condition name the first
