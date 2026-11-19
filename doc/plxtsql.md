@@ -57,15 +57,19 @@ type names in `DECLARE` are translated (see below).
 
 | T-SQL | PostgreSQL |
 | --- | --- |
-| `[Order Details]`, `[user]` | `"Order Details"`, `"user"` |
+| `[Order Details]`, `[user]` | `"order details"`, `"user"` |
 | `"Name"` | `"Name"` |
-| `[a]]b]` | `"a]b"` |
+| `[a]]b]`, `"a""b"` | `"a]b"`, `"a""b"` |
 
 A delimited identifier keeps its delimiters, so it can hold a space or a
-reserved word, and its case is kept. A PostgreSQL quoted identifier is case
-sensitive: `[Name]` matches a column created as `"Name"`, not one created as
-`name`. Write an identifier without brackets to get PostgreSQL's usual folding
-to lower case.
+reserved word.
+
+- A `[bracketed]` name is folded to lower case, then quoted. So `[Orders]`
+  matches a table created as `orders` or `Orders` without quotes, as in SQL
+  Server under its default case-insensitive collation.
+- A `"quoted"` name keeps its case, as in PostgreSQL. Use it to reach an object
+  created with a mixed-case quoted name: `"Name"` matches a column created as
+  `"Name"`, not one created as `name`.
 
 ### Variables and assignment
 

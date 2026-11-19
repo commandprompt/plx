@@ -101,8 +101,8 @@ SELECT fx43_65();
 -- A44: [bracketed] and "quoted" identifiers keep their delimiters
 CREATE TABLE fx44_acct("user" text, "Name" text, name text, "odd ]""col" text);
 INSERT INTO fx44_acct VALUES ('alice', 'UPPER', 'lower', 'odd');
-CREATE TABLE "fx44 Order Details"(qty int);
-INSERT INTO "fx44 Order Details" VALUES (5);
+CREATE TABLE "fx44 order details"(qty int);
+INSERT INTO "fx44 order details" VALUES (5);
 CREATE FUNCTION fx44_q() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @u varchar(50), @n varchar(50), @o varchar(50), @q [int];
   SELECT @u = [user], @n = "Name", @o = [odd ]]"col] FROM fx44_acct;
@@ -358,5 +358,19 @@ SELECT fx42_has();
  fx42_has 
 ----------
         2
+(1 row)
+
+-- A44: [bracketed] names fold to lower case like unquoted names; "quoted" names keep their case and undo a doubled ""
+CREATE TABLE fx44_orders(orderid int, "Say ""Hi""" text);
+INSERT INTO fx44_orders VALUES (9, 'hello');
+CREATE FUNCTION fx44_fold() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @o int, @s varchar(10);
+  SELECT @o = [OrderID], @s = "Say ""Hi""" FROM [FX44_Orders];
+  RETURN CONVERT(varchar(10), @o) || '/' || @s;
+$$;
+SELECT fx44_fold();
+ fx44_fold 
+-----------
+ 9/hello
 (1 row)
 

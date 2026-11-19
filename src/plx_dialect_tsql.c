@@ -378,7 +378,10 @@ tq_sp(StringInfo out)
 /*
  * emit a delimited identifier as a PostgreSQL quoted identifier. T-SQL
  * [a]]b] is the name a]b and "a""b" is a"b; PostgreSQL doubles an embedded
- * '"', so the name keeps its case, spaces and reserved words.
+ * '"', so the name keeps its spaces and reserved words. A [bracketed] name is
+ * folded to lower case first: T-SQL names are case insensitive under the
+ * default collation, so [Orders] must reach a PostgreSQL table created as
+ * orders. A "quoted" name keeps its case, as in PostgreSQL.
  */
 static void
 tq_emit_qident(TqTok *tk, StringInfo out)
@@ -393,6 +396,8 @@ tq_emit_qident(TqTok *tk, StringInfo out)
 
 		if (c == close && i + 1 < tk->len && tk->s[i + 1] == close)
 			i++;				/* doubled closing delimiter: one character */
+		if (tk->q == '[' && c >= 'A' && c <= 'Z')
+			c = c - 'A' + 'a';
 		if (c == '"')
 			appendStringInfoChar(out, '"');
 		appendStringInfoChar(out, c);
