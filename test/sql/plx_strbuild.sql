@@ -57,7 +57,7 @@ end
 return s
 $$;
 SELECT acc_rb(5);
--- the lowered plpgsql uses plx_strbuild + plx_sb_append
+-- the lowered plpgsql uses plx_strbuild + plx_sb_append_strict
 SELECT regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g') FROM pg_proc WHERE proname = 'acc_rb';
 
 CREATE FUNCTION acc_php(n int) RETURNS text LANGUAGE plxphp AS $$
