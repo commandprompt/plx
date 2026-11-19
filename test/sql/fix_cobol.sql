@@ -369,3 +369,52 @@ PROCEDURE DIVISION.
     DIVIDE 4 INTO WS-A ROUNDED
     DISPLAY WS-A " " WS-Q " " WS-M " " WS-T " " WS-N " " WS-X " " WS-C.
 $$;
+-- A36 review: form feed and vertical tab separate words; a non-ASCII byte outside a string is rejected
+DO $d$ BEGIN
+  EXECUTE format('DO LANGUAGE plxcobol %L', E'PROCEDURE DIVISION.\f    DISPLAY "ff"\x0b"vt".');
+END $d$;
+DO LANGUAGE plxcobol $$
+PROCEDURE DIVISION.
+    DISPLAY é "x".
+$$;
+-- A38 review: ROUNDED MODE is rejected
+CREATE FUNCTION fc_g_mode() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(4).
+PROCEDURE DIVISION.
+    COMPUTE WS-I ROUNDED MODE NEAREST-EVEN = 2.5
+    GOBACK RETURNING WS-I.
+$$;
+-- A38 review: ROUNDED between the receiver and GIVING is rejected
+CREATE FUNCTION fc_g_giving() RETURNS int LANGUAGE plxcobol AS $$
+WORKING-STORAGE SECTION.
+01 WS-I PIC 9(4) VALUE 1.
+01 WS-G PIC 9(4).
+PROCEDURE DIVISION.
+    ADD 1.5 TO WS-I ROUNDED GIVING WS-G
+    GOBACK RETURNING WS-G.
+$$;
+-- A38 review: the PERFORM VARYING start and step stores truncate into a fractional item
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-V PIC 9V9 VALUE 0.
+01 WS-C PIC 9(4) VALUE 0.
+PROCEDURE DIVISION.
+    PERFORM VARYING WS-V FROM 0.25 BY 0.25 UNTIL WS-V > 1
+        ADD 1 TO WS-C
+    END-PERFORM
+    DISPLAY WS-C " " WS-V.
+$$;
+-- A41 review: an OCCURS count that is too long or not an integer is rejected
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) OCCURS 1234567890 TIMES VALUE ZERO.
+PROCEDURE DIVISION.
+    DISPLAY "unreached".
+$$;
+DO LANGUAGE plxcobol $$
+WORKING-STORAGE SECTION.
+01 WS-A PIC 9(4) OCCURS 2.5 TIMES VALUE ZERO.
+PROCEDURE DIVISION.
+    DISPLAY "unreached".
+$$;
