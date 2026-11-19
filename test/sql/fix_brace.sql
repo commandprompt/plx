@@ -11,3 +11,14 @@ for r in query():
     pass
 $$;
 SELECT 'N-pyquery backend still alive' AS ok;
+-- N-tscatch: a TypeScript catch with a type annotation binds the variable, not the type
+CREATE FUNCTION fb_tscatch(d int) RETURNS text LANGUAGE plxts AS $$
+let r: number = 0;
+try {
+  r = 10 / d;
+  return "ok";
+} catch (e: unknown) {
+  return `caught ${e.sqlstate}`;
+}
+$$;
+SELECT fb_tscatch(0);

@@ -29,3 +29,19 @@ SELECT 'N-pyquery backend still alive' AS ok;
  N-pyquery backend still alive
 (1 row)
 
+-- N-tscatch: a TypeScript catch with a type annotation binds the variable, not the type
+CREATE FUNCTION fb_tscatch(d int) RETURNS text LANGUAGE plxts AS $$
+let r: number = 0;
+try {
+  r = 10 / d;
+  return "ok";
+} catch (e: unknown) {
+  return `caught ${e.sqlstate}`;
+}
+$$;
+SELECT fb_tscatch(0);
+  fb_tscatch  
+--------------
+ caught 22012
+(1 row)
+

@@ -372,6 +372,14 @@ parse_try_brace(Ctx *cx, int ind)
 
 		cx->pos++;
 		paren_group(cx, &ca, &cb);
+		/* TypeScript catch (e: unknown): drop the type annotation, so the
+		 * variable, not the type name, binds the exception */
+		for (i = ca; i < cb; i++)
+			if (plx_tok_is(&cx->t[i], ":"))
+			{
+				cb = i;
+				break;
+			}
 		/* catch (\Class $e): last IDENT is $e; the class tokens precede it */
 		for (i = cb - 1; i >= ca; i--)
 			if (cx->t[i].kind == T_IDENT)
