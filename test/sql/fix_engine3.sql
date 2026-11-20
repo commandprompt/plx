@@ -420,3 +420,36 @@ CREATE FUNCTION r2s10_read() RETURNS text LANGUAGE plxphp AS $$
 for ($i = 0; $i < 3; $i++) { }
 return "i=$i";
 $$;
+
+-- R3-C30 (PR 24 review r3 s1[1]): a string builder (a += or << target) is
+-- read as (s)::text, but a record field with the same name, r.s, was
+-- rewritten too, to r.(s)::text, a syntax error at CREATE FUNCTION.
+-- 2.0.1 returned the field.
+CREATE FUNCTION r3c30_js() RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+s += 'a';
+let r = fetch_one(`SELECT 'X' AS s`);
+return `${r.s}${s}`;
+$$;
+SELECT r3c30_js() AS r;  -- Xa
+CREATE FUNCTION r3c30_ts() RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+s += 'a';
+let r = fetch_one(`SELECT 'X' AS s`);
+return `${r.s}${s}`;
+$$;
+SELECT r3c30_ts() AS r;  -- Xa
+CREATE FUNCTION r3c30_py() RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+s += 'a'
+r = fetch_one("SELECT 'X' AS s")
+return f"{r.s}{s}"
+$$;
+SELECT r3c30_py() AS r;  -- Xa
+CREATE FUNCTION r3c30_rb() RETURNS text LANGUAGE plxruby AS $$
+s = ''
+s << 'a'
+r = fetch_one("SELECT 'X' AS s")
+return r.s
+$$;
+SELECT r3c30_rb() AS r;  -- X

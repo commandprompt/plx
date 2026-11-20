@@ -3037,6 +3037,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "NOT ");
 			else if (php_value_ref(s, len, i, j) &&
 					 (surf->concat_op || !(j < len && s[j] == '.')) &&
+					 /* outside plxphp, r.s names a field, not the local s */
+					 (surf->concat_op || !(i > 0 && s[i - 1] == '.')) &&
 					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
 					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{

@@ -549,3 +549,55 @@ return "i=$i";
 $$;
 ERROR:  plxphp: the loop variable "i" is read after the for loop, but a counting for does not keep its final value; use a while loop
 DETAIL:  at plxphp source line 2
+-- R3-C30 (PR 24 review r3 s1[1]): a string builder (a += or << target) is
+-- read as (s)::text, but a record field with the same name, r.s, was
+-- rewritten too, to r.(s)::text, a syntax error at CREATE FUNCTION.
+-- 2.0.1 returned the field.
+CREATE FUNCTION r3c30_js() RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+s += 'a';
+let r = fetch_one(`SELECT 'X' AS s`);
+return `${r.s}${s}`;
+$$;
+SELECT r3c30_js() AS r;  -- Xa
+ r  
+----
+ Xa
+(1 row)
+
+CREATE FUNCTION r3c30_ts() RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+s += 'a';
+let r = fetch_one(`SELECT 'X' AS s`);
+return `${r.s}${s}`;
+$$;
+SELECT r3c30_ts() AS r;  -- Xa
+ r  
+----
+ Xa
+(1 row)
+
+CREATE FUNCTION r3c30_py() RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+s += 'a'
+r = fetch_one("SELECT 'X' AS s")
+return f"{r.s}{s}"
+$$;
+SELECT r3c30_py() AS r;  -- Xa
+ r  
+----
+ Xa
+(1 row)
+
+CREATE FUNCTION r3c30_rb() RETURNS text LANGUAGE plxruby AS $$
+s = ''
+s << 'a'
+r = fetch_one("SELECT 'X' AS s")
+return r.s
+$$;
+SELECT r3c30_rb() AS r;  -- X
+ r 
+---
+ X
+(1 row)
+
