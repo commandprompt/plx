@@ -174,7 +174,10 @@ method or library call in a body is passed through and has to name a function
 PostgreSQL actually has. `s.upcase`, `s.toUpperCase()`, `s.upper()` and
 `strtoupper($s)` all transpile without complaint and then fail when the
 function is called; write `upper(s)` instead. The same applies to any other
-library call you would reach for out of habit.
+library call you would reach for out of habit. A call that happens to name a
+PostgreSQL function runs that function, which can give a different answer
+with no error: plxphp `count($arr)` is SQL's aggregate `count()` and returns
+1 for any array. Write `cardinality($arr)`.
 
 ## What each dialect does not support
 
@@ -246,7 +249,9 @@ fail when the function runs.
   the value and arithmetic does not wrap: `uint8(300)` is 300 (Go: 44),
   `uint32(-1)` is -1 (Go: 4294967295), and a `byte` holding 255 incremented
   is 256 (Go: 0). A value that leaves the SQL type's range fails with
-  `smallint out of range` or `integer out of range`.
+  `smallint out of range` or `integer out of range`. A left shift of a
+  `smallint` drops the bits past 16 instead, so an `int8` holding 3 shifted
+  by 14 is -16384 (Go: 0).
 - `len(s)` of a string counts characters, as SQL `length()` does, where Go
   counts UTF-8 bytes: `len("héllo")` is 5 (Go: 6). Use `octet_length(s)` for
   the byte count.
