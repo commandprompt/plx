@@ -72,7 +72,10 @@ Each entry names the dialects it affects.
   took the type its context needed. So with a `text` variable, `ts > '#{since}'`
   on a `date` column now fails with `operator does not exist: date > text`;
   write `'#{since}'::date`. A literal after a built-in type name, such as
-  `interval '#{n} days'`, becomes `CAST(('' || (n)::text || ' days') AS interval)`. An
+  `interval '#{n} days'`, becomes `CAST(('' || (n)::text || ' days') AS interval)`,
+  and `interval '#{s}'` becomes `CAST((s)::text AS interval)`. An interval
+  field after such a literal, `interval '#{n}' hour`, is rejected: write
+  `interval '#{n} hours'`. An
   interpolation inside a quoted identifier, a SQL comment, a dollar-quoted
   string or a prefixed literal (`U&'...'`, `N'...'`, `text'...'`) is
   rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`), and one
