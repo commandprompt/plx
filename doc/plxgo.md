@@ -210,9 +210,11 @@ plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 In Go, an integer or rune constant on the left of a shift takes the type of its
 context, such as `int64`. SQL would type it as a 32-bit integer and take the
 shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
-1099511627776, as in Go. The same holds for a named constant
-(`const mask = 0xFF`, then `mask << 28`) and for a constant expression, such
-as `(1) << 40` or `2 * 1 << 40`, which Go reads as `(2 * 1) << 40`. plx maps `int` to the 32-bit `integer`, so storing a
+1099511627776, as in Go. The same holds for a named constant declared
+without a type (`const mask = 0xFF`, then `mask << 28`) and for a constant
+expression, such as `(1) << 40` or `2 * 1 << 40`, which Go reads as
+`(2 * 1) << 40`. A constant declared with a type (`const m int32 = 3`) has
+that type, as in Go. plx maps `int` to the 32-bit `integer`, so storing a
 shift that does not fit in an `int` fails with `integer out of range`. Go's
 64-bit `int` would hold it; declare the variable `int64`.
 
