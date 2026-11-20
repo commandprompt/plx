@@ -638,6 +638,10 @@ not here.
 
 #### plxpython3
 
+- `range(a, b, step)` with a negative literal step, such as
+  `range(10, 0, -3)`, now counts down as in Python. It failed at run time with
+  `BY value of FOR loop must be greater than zero`. A negative step held in a
+  variable still fails that way.
 - `call(f"...")` emitted an unterminated quoted identifier. An f-string
   procedure name is now rejected.
 

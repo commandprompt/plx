@@ -208,6 +208,8 @@ fail when the function runs.
 - String prefixes other than `f` (`r`, `b`, `u`).
 - Floor division `//`; `/` on integers truncates toward zero.
 - The `\N{name}` string escape; write `\u` or `\U` with the code point.
+- A negative `range()` step held in a variable; write a negative step as a
+  literal, such as `range(10, 0, -3)`.
 
 ### plxgo ([chapter](plxgo.md))
 

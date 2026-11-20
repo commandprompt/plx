@@ -286,3 +286,44 @@ SELECT e3_r5_rb(100);
  stopped at 4
 (1 row)
 
+-- R8: plxpython3 range() with a negative literal step counts down, as in
+-- Python (it used to fail with "BY value of FOR loop must be greater than zero")
+CREATE FUNCTION e3_r8_py4() RETURNS text LANGUAGE plxpython3 AS $body$
+s = ""
+for k in range(10, 0, -3):
+    s += f"{k},"
+return s
+$body$;
+SELECT e3_r8_py4();
+ e3_r8_py4 
+-----------
+ 10,7,4,1,
+(1 row)
+
+CREATE FUNCTION e3_r8_odd(n int) RETURNS text LANGUAGE plxpython3 AS $body$
+s = ""
+for k in range(n, -1, -2):
+    s += f"{k},"
+for k in range(0, 5, -1):
+    s += "never"
+return s
+$body$;
+SELECT e3_r8_odd(5);
+ e3_r8_odd 
+-----------
+ 5,3,1,
+(1 row)
+
+-- the loop variable keeps its last value after the loop
+CREATE FUNCTION e3_r8_last() RETURNS int LANGUAGE plxpython3 AS $body$
+k = 0
+for k in range(10, 0, -3):
+    pass
+return k
+$body$;
+SELECT e3_r8_last();
+ e3_r8_last 
+------------
+          1
+(1 row)
+

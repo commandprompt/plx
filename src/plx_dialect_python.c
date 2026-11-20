@@ -213,6 +213,37 @@ py_loop_counter(Ctx *cx, int var)
 	return psprintf("__plx_for_%d", cx->subq++);
 }
 
+/*
+ * If a rewritten range() step is a negative integer literal, such as -3 or
+ * (- 3), return its magnitude ("3"); else NULL. plpgsql's integer FOR takes
+ * only a positive BY, so a countdown is lowered to FOR ... REVERSE. A step
+ * whose sign is not known until run time stays as it is: if it is negative,
+ * plpgsql stops with "BY value of FOR loop must be greater than zero".
+ */
+static char *
+py_neg_step(const char *step)
+{
+	const char *p = step,
+			   *e = step + strlen(step),
+			   *d;
+
+	while (p < e && (*p == ' ' || *p == '('))
+		p++;
+	while (e > p && (e[-1] == ' ' || e[-1] == ')'))
+		e--;
+	if (p >= e || *p != '-')
+		return NULL;
+	p++;
+	while (p < e && *p == ' ')
+		p++;
+	if (p >= e)
+		return NULL;
+	for (d = p; d < e; d++)
+		if (*d < '0' || *d > '9')
+			return NULL;
+	return pnstrdup(p, e - p);
+}
+
 /* for VAR in <range(...)|query(...)|array>: */
 static void
 parse_py_for(Ctx *cx, int ind)
@@ -241,6 +272,7 @@ parse_py_for(Ctx *cx, int ind)
 		StringInfoData saved;
 		char	   *body;
 		char	   *ctr = NULL;
+		char	   *down;
 
 		n = plx_parse_args(cx, ia, as, ae, 8, &after);
 		if (n == 1)
@@ -270,7 +302,17 @@ parse_py_for(Ctx *cx, int ind)
 		if (py_loop_var_escapes(cx, var, var - 1, cx->pos))
 			ctr = py_loop_counter(cx, var);
 		plx_indent(o, ind);
-		if (ctr)
+		if (step && (down = py_neg_step(step)) != NULL)
+		{
+			/* range(a, b, -k) is a, a - k, ... while > b */
+			if (ctr)
+				appendStringInfo(o, "FOR %s IN REVERSE %s..(%s + 1) BY %s LOOP\n",
+								 ctr, lo, hi, down);
+			else
+				appendStringInfo(o, "FOR %.*s IN REVERSE %s..(%s + 1) BY %s LOOP\n",
+								 cx->t[var].len, cx->t[var].s, lo, hi, down);
+		}
+		else if (ctr)
 			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n",
 							 ctr, lo, hi, step ? " BY " : "", step ? step : "");
 		else
