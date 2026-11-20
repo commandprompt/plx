@@ -174,8 +174,37 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `CEILING(x)` | `ceil(x)` |
 | `@@IDENTITY` | `lastval()` |
 
-`CAST(e AS type)` and most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`,
-`LOWER`, `ABS`, `ROUND`, ...) are already valid in PostgreSQL and pass through.
+Most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`, `LOWER`, `ABS`,
+`ROUND`, ...) are already valid in PostgreSQL and pass through.
+
+### Types in `CAST`
+
+`CAST(e AS type)` keeps its form. plx maps the T-SQL type names below with the
+table that `DECLARE` and `CONVERT` use. Any other type name passes through, so
+PostgreSQL type names work.
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `NVARCHAR(n)` | `varchar(n)` |
+| `NVARCHAR` (no length) | `varchar(30)`, the length SQL Server gives `CAST` |
+| `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
+| `BIT` | `boolean` |
+| `MONEY` | `numeric(19,4)` |
+| `DATETIME`, `DATETIME2` | `timestamp` |
+| `DATETIME2(n)` | `timestamp(n)`; `DATETIME2(7)` gives `timestamp` (6 digits) |
+| `UNIQUEIDENTIFIER` | `uuid` |
+| `VARBINARY(MAX)`, `IMAGE` | `bytea` |
+
+plx does not map `TINYINT`, `SMALLMONEY`, `SMALLDATETIME`, `SYSNAME`,
+`BINARY` or `VARBINARY(n)` in `CAST`, because the PostgreSQL type would not
+keep SQL Server's value. `CAST(300 AS tinyint)` is an error in SQL Server but
+300 in `smallint`, and `CAST('abc' AS varbinary(1))` keeps 1 byte in SQL Server
+but 3 in `bytea`. The call fails with `type "tinyint" does not exist`. Cast to
+the PostgreSQL type you want instead, such as `smallint` or `bytea`.
+
+A `BIT` value is a PostgreSQL `boolean`, so it turns into the text `true` or
+`false`, not `1` or `0`. A `DATETIME` value keeps every digit you give it:
+SQL Server rounds it to 1/300 of a second.
 
 ### Operators
 

@@ -356,6 +356,11 @@ Each entry names the dialects it affects.
   `CREATE FUNCTION`. A function that used a severity of 10 or lower to stop on
   purpose now continues; to keep the old behaviour, use severity 16 or
   `THROW`.
+- **`CAST` to `BIT` gives a `boolean` and `CAST` to `MONEY` gives
+  `numeric(19,4)`**, as `DECLARE` and `CONVERT` already did. Before, `CAST`
+  passed the name to PostgreSQL, whose `bit` keeps only the lowest bit, so
+  `CAST(2 AS bit)` gave 0 instead of 1. PostgreSQL's `money` turned into text
+  such as `$2.50`. A `boolean` turns into the text `true` or `false`.
 
 #### plxplsql
 
@@ -637,6 +642,16 @@ not here.
   expression at the CASE's `ELSE` or `END`, and the function was rejected with
   `unexpected END` or `unexpected keyword in statement position`. An `IF`
   condition that holds `IIF(...)` now compiles too.
+- `CAST` maps T-SQL type names the way `CONVERT` and `DECLARE` do. Before,
+  `CAST(x AS nvarchar(5))` failed when the function ran, with
+  `type "nvarchar" does not exist`. `NVARCHAR`, `NTEXT`, `VARCHAR(MAX)`,
+  `NVARCHAR(MAX)`, `DATETIME`, `DATETIME2`, `UNIQUEIDENTIFIER`, `IMAGE` and
+  `VARBINARY(MAX)` now work in `CAST`. `CAST` to `NVARCHAR` without a length
+  gives `varchar(30)`, as in SQL Server. `TINYINT`, `SMALLMONEY`,
+  `SMALLDATETIME`, `SYSNAME`, `BINARY` and `VARBINARY(n)` still fail, because
+  the PostgreSQL type would not keep SQL Server's value.
+- `CONVERT(varchar(MAX), x)` and `CONVERT(nvarchar(MAX), x)` give `text`.
+  Before, the function was rejected with `syntax error at or near "MAX"`.
 
 #### Test suite
 

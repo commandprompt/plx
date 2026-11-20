@@ -446,3 +446,86 @@ CREATE FUNCTION fxtl_col() RETURNS int LANGUAGE plxtsql AS $$
 $$;
 SELECT fxtl_col() AS r;  -- SQL Server: -2
 DROP TABLE fxtl_t;
+-- CAST maps a T-SQL type name the way CONVERT and DECLARE do. Before, CAST passed the name through, so
+-- CAST(x AS nvarchar(5)) failed with 'type "nvarchar" does not exist'. SQL Server's answer is in each comment.
+CREATE FUNCTION fxct_nvar() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('abcdefg' AS nvarchar(5));
+$$;
+SELECT fxct_nvar() AS r;  -- SQL Server: abcde
+CREATE FUNCTION fxct_nvar30() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CAST('12345678901234567890123456789012345' AS nvarchar));
+$$;
+SELECT fxct_nvar30() AS r;  -- SQL Server: 30 (CAST without a length gives 30 characters)
+CREATE FUNCTION fxct_max() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('ab' AS varchar(MAX)) + CAST('cd' AS nvarchar(max));
+$$;
+SELECT fxct_max() AS r;  -- SQL Server: abcd
+CREATE FUNCTION fxct_ntext() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('e' AS ntext);
+$$;
+SELECT fxct_ntext() AS r;  -- SQL Server: e
+CREATE FUNCTION fxct_conv_max() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(varchar(MAX), 'ab') + CONVERT(nvarchar(MAX), 'cd');
+$$;
+SELECT fxct_conv_max() AS r;  -- SQL Server: abcd
+CREATE FUNCTION fxct_dt() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:05.5' AS datetime);
+$$;
+SELECT fxct_dt() AS r;  -- SQL Server: 2024-01-02 03:04:05.500
+CREATE FUNCTION fxct_dt2() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:05.5' AS datetime2(0));
+$$;
+SELECT fxct_dt2() AS r;  -- SQL Server: 2024-01-02 03:04:06
+CREATE FUNCTION fxct_bit() RETURNS boolean LANGUAGE plxtsql AS $$
+  RETURN CAST(2 AS bit);
+$$;
+SELECT fxct_bit() AS r;  -- SQL Server: 1 (any non-zero number becomes 1)
+CREATE FUNCTION fxct_money() RETURNS numeric LANGUAGE plxtsql AS $$
+  RETURN CAST(2.5 AS money) + 1;
+$$;
+SELECT fxct_money() AS r;  -- SQL Server: 3.5000
+CREATE FUNCTION fxct_uuid() RETURNS uuid LANGUAGE plxtsql AS $$
+  RETURN CAST('A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11' AS uniqueidentifier);
+$$;
+SELECT fxct_uuid() AS r;  -- SQL Server: A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11
+CREATE FUNCTION fxct_bin() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN DATALENGTH(CAST('ab' AS varbinary(MAX))) + 10 * DATALENGTH(CAST('cde' AS image));
+$$;
+SELECT fxct_bin() AS r;  -- SQL Server: 32
+CREATE FUNCTION fxct_nest(n int) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(@n AS nvarchar(10)) AS nvarchar(2)) + 'x';
+$$;
+SELECT fxct_nest(12345) AS r;  -- SQL Server: 12x
+CREATE TABLE fxct_t(v int);
+INSERT INTO fxct_t VALUES (42);
+CREATE FUNCTION fxct_col() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @r nvarchar(10);
+  SELECT @r = CAST(v AS nvarchar(10)) + '!' FROM fxct_t;
+  RETURN @r;
+$$;
+SELECT fxct_col() AS r;  -- SQL Server: 42!
+DROP TABLE fxct_t;
+-- a PostgreSQL type name passes through unchanged
+CREATE FUNCTION fxct_pg() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(1.5 AS double precision) AS varchar(10));
+$$;
+SELECT fxct_pg() AS r;
+-- a T-SQL type whose PostgreSQL type would not keep SQL Server's value still fails when it runs:
+-- tinyint and smallmoney have a smaller range, binary(n) and varbinary(n) cut to n bytes, and
+-- smalldatetime rounds to the minute. SQL Server's answer is in each comment.
+CREATE FUNCTION fxct_tiny() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST(300 AS tinyint);
+$$;
+SELECT fxct_tiny() AS r;  -- SQL Server: arithmetic overflow error
+CREATE FUNCTION fxct_smoney() RETURNS numeric LANGUAGE plxtsql AS $$
+  RETURN CAST(300000 AS smallmoney);
+$$;
+SELECT fxct_smoney() AS r;  -- SQL Server: arithmetic overflow error
+CREATE FUNCTION fxct_vbin() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN DATALENGTH(CAST('abc' AS varbinary(1)));
+$$;
+SELECT fxct_vbin() AS r;  -- SQL Server: 1
+CREATE FUNCTION fxct_sdt() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:35' AS smalldatetime);
+$$;
+SELECT fxct_sdt() AS r;  -- SQL Server: 2024-01-02 03:05:00

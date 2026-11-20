@@ -538,6 +538,12 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 	}
 	w = &tq->t[a];
 	base = tq_base_type(w->s, w->len);
+	if (base && a + 2 < b && tq->t[a + 1].kind == TQ_LP && tq_ci(&tq->t[a + 2], "MAX"))
+	{
+		/* VARCHAR(MAX)/NVARCHAR(MAX) -> text; VARBINARY(MAX) -> bytea */
+		appendStringInfoString(dest, strcmp(base, "bytea") == 0 ? "bytea" : "text");
+		return;
+	}
 	if (base)
 		appendStringInfoString(dest, base);
 	else if (w->kind == TQ_QIDENT)
@@ -607,6 +613,99 @@ tq_pair_parens(Tq *tq)
 		}
 	}
 	pfree(stack);
+}
+
+/* index of the AS that ends the expression of CAST(e AS type), or -1 */
+static int
+tq_cast_as(Tq *tq, int lp, int close)
+{
+	int			i,
+				depth = 0;
+
+	for (i = lp + 1; i < close; i++)
+	{
+		TqTok	   *x = &tq->t[i];
+
+		if (x->kind == TQ_LP)
+			depth++;
+		else if (x->kind == TQ_RP)
+			depth--;
+		else if (depth == 0 && tq_ci(x, "AS"))
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * map the type of CAST(e AS type), the tokens [a,b), into dest with the table
+ * CONVERT and DECLARE use. Return false to keep the type as written, which
+ * suits a PostgreSQL type name. A T-SQL type whose PostgreSQL type would not
+ * keep SQL Server's value is kept too, so the call fails instead of returning
+ * a different value: tinyint and smallmoney have a smaller range than smallint
+ * and numeric(10,4), binary(n) and varbinary(n) cut the value to n bytes,
+ * smalldatetime rounds to the minute, and sysname is nvarchar(128).
+ */
+static bool
+tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
+{
+	static const char *mapped[] = {
+		"nvarchar", "varchar", "ntext", "bit", "money", "datetime",
+		"datetime2", "uniqueidentifier", "image", "varbinary", NULL
+	};
+	TqTok	   *w = &tq->t[a];
+	TqTok	   *arg = NULL;
+	const char *base;
+	bool		is_max;
+	int			i;
+
+	if (a >= b || w->kind != TQ_WORD)
+		return false;
+	if (b - a == 4 && tq->t[a + 1].kind == TQ_LP && tq->t[b - 1].kind == TQ_RP)
+		arg = &tq->t[a + 2];
+	else if (b - a != 1)
+		return false;
+	for (i = 0; mapped[i]; i++)
+		if (tq_ci(w, mapped[i]))
+			break;
+	if (mapped[i] == NULL)
+		return false;
+	base = tq_base_type(w->s, w->len);
+	is_max = (arg != NULL && tq_ci(arg, "MAX"));
+	if (arg && !is_max && arg->kind != TQ_NUM)
+		return false;
+
+	if (tq_ci(w, "varchar") || tq_ci(w, "varbinary"))
+	{
+		/* only (MAX): varchar(n) is PostgreSQL's own, varbinary(n) cuts */
+		if (!is_max)
+			return false;
+		appendStringInfoString(dest, strcmp(base, "bytea") == 0 ? "bytea" : "text");
+		return true;
+	}
+	if (tq_ci(w, "nvarchar"))
+	{
+		if (is_max)
+			appendStringInfoString(dest, "text");
+		else if (arg)
+			appendStringInfo(dest, "varchar(%.*s)", arg->len, arg->s);
+		else
+			appendStringInfoString(dest, "varchar(30)");	/* CAST's default */
+		return true;
+	}
+	if (tq_ci(w, "datetime2") && arg && !is_max && arg->len == 1 &&
+		arg->s[0] >= '0' && arg->s[0] <= '7')
+	{
+		/* datetime2(n) keeps n fractional digits; PostgreSQL keeps 6 at most */
+		if (arg->s[0] == '7')
+			appendStringInfoString(dest, "timestamp");
+		else
+			appendStringInfo(dest, "timestamp(%c)", arg->s[0]);
+		return true;
+	}
+	if (arg)
+		return false;
+	appendStringInfoString(dest, base);
+	return true;
 }
 
 /* index of the ')' matching the '(' at lp, within [.,limit), or -1 */
@@ -1018,6 +1117,25 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 		tq_sp(out);
 		appendStringInfoString(out, "CAST(");
 		tq_emit_range(tq, comma + 1, comma2 > 0 ? comma2 : close, out);
+		appendStringInfo(out, " AS %s)", ty.data);
+		*ni = close + 1;
+		return true;
+	}
+
+	/* CAST(e AS type): map a T-SQL type name as CONVERT does */
+	if (tq_ci(tk, "CAST"))
+	{
+		int			as = tq_cast_as(tq, lp, close);
+		StringInfoData ty;
+
+		if (as < 0)
+			return false;
+		initStringInfo(&ty);
+		if (!tq_cast_type(tq, as + 1, close, &ty))
+			return false;
+		tq_sp(out);
+		appendStringInfoString(out, "CAST(");
+		tq_emit_range(tq, lp + 1, as, out);
 		appendStringInfo(out, " AS %s)", ty.data);
 		*ni = close + 1;
 		return true;
