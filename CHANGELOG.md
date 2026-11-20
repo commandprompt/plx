@@ -80,7 +80,10 @@ Each entry names the dialects it affects.
   until the body uses `ident()` or `raw()` (see Added). In static SQL the
   value is written in parentheses, `FROM (t)`, so `CREATE FUNCTION` fails with
   a syntax error; before, it read the table named `t` whatever the variable
-  held. In dynamic SQL the statement fails when it runs, with
+  held. One static position is not caught: `UPDATE t SET #{c} = ...`
+  becomes `SET (c) = ...`, a one-column list: with a sub-`SELECT` on the
+  right it still updates the column named `c`, as 2.0.1 did; see
+  doc/LIMITATIONS.md. In dynamic SQL the statement fails when it runs, with
   `syntax error at or near "$n"`. A value interpolated to build SQL text on
   purpose is now bound as data. See doc/DYNAMIC-SQL.md.
 - **An expression interpolated in static SQL is one value** (plxruby,

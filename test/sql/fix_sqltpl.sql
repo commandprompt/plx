@@ -330,3 +330,26 @@ r = fetch_one("SELECT count(*) AS c FROM fs_r2c11_t WHERE ts > '#{since}' LIMIT 
 return "#{r.c}"
 $$;
 SELECT fs_err($q$SELECT fs_r2c11_nocast('2020-06-01', 1)$q$) AS r;  -- 42883: operator does not exist: date > text
+-- R2-T10 (PR 24 review r2 t1[0]): one name position is not caught at CREATE
+-- FUNCTION. In static SQL, UPDATE ... SET #{x} = v becomes SET (x) = v,
+-- which PostgreSQL reads as a one-column list. With a plain value the
+-- statement fails when it runs; with a sub-SELECT or ROW() it updates the
+-- column named x whatever the variable holds. doc/LIMITATIONS.md and
+-- DYNAMIC-SQL.md say so; the cases pin the behaviour so that a change is
+-- noticed. ident() is the fix.
+CREATE TABLE fs_r2t10 (id int, balance int, x int);
+INSERT INTO fs_r2t10 VALUES (1, 100, 7);
+CREATE FUNCTION fs_r2t10_val(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = 0 WHERE id = 1`);
+$$;
+SELECT fs_err($q$SELECT fs_r2t10_val('balance')$q$) AS r;
+CREATE FUNCTION fs_r2t10_sub(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = (SELECT 1) WHERE id = 1`);
+$$;
+SELECT fs_r2t10_sub('balance');
+SELECT balance, x FROM fs_r2t10;  -- pinned: column x changes to 1, balance stays 100
+CREATE FUNCTION fs_r2t10_ident(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${ident(x)} = 0 WHERE id = 1`);
+$$;
+SELECT fs_r2t10_ident('balance');
+SELECT balance, x FROM fs_r2t10;  -- 0 1

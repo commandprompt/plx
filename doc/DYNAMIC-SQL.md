@@ -22,7 +22,7 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | Where the interpolation sits | Static SQL | Dynamic SQL |
 |---|---|---|
 | outside quotes: `id = #{n}` | `id = (n)` (plpgsql binds the variable) | `id = $k`, passed with `USING` |
-| where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error | `FROM $k`: the statement fails when it runs |
+| where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error (not in `UPDATE ... SET #{c} =`; see below) | `FROM $k`: the statement fails when it runs |
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
 | inside a literal after a type name: `interval '#{n} days'` | `CAST(('' \|\| (n)::text \|\| ' days') AS interval)` | `CAST(('' \|\| ($k)::text \|\| ' days') AS interval)` |
@@ -135,6 +135,11 @@ When a function is created or replaced under 3.0:
   a syntax error at the parenthesis plx writes around the value. In a dynamic
   call the statement fails when it runs, with `syntax error at or near "$k"`,
   where `$k` is the value's parameter number;
+  one static name position is not caught: `UPDATE t SET #{c} = ...` becomes
+  `SET (c) = ...`, which PostgreSQL reads as a one-column list. With a plain
+  value the statement fails when it runs; with a sub-`SELECT` or `ROW()` it
+  updates the column named `c` whatever the variable holds, as 2.x did. Write
+  `#{ident(c)}`;
 - a value interpolated to build SQL text on purpose (`ORDER BY #{col} DESC`
   where `col` holds `name`) is now bound as data; write `#{raw(col)}` (or
   `#{ident(col)}` when it is a column name);

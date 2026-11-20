@@ -33,6 +33,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   are parsed by PostgreSQL before plx sees the body, so they must be PostgreSQL
   type names (`integer`, `numeric`, `text`, `timestamp`, ...). Dialect type names
   (`NUMBER`, `int64`, `let x: number`) apply only inside the body.
+- **A value interpolated as an `UPDATE ... SET` target names a column.** In a
+  static SQL call, a value interpolated where SQL needs a name is written in
+  parentheses, so `FROM #{t}` fails at `CREATE FUNCTION`. `UPDATE t SET #{c} = v`
+  becomes `SET (c) = v`, which PostgreSQL reads as a one-column list. With a
+  plain value `v` the statement fails when it runs, with `source for a
+  multiple-column UPDATE item must be a sub-SELECT or ROW() expression`. With
+  a sub-`SELECT` or `ROW()` it updates the column named `c`, whatever the
+  variable `c` holds. To choose the column at run time, write `#{ident(c)}`. See [Dynamic SQL](DYNAMIC-SQL.md).
 - **Function-scoped locals.** plx hoists every local declaration into a single
   plpgsql `DECLARE` block, so locals are visible for the whole function. There is
   no per-block (per-`{}`, per-`if`) scope, and a name cannot be redeclared with a

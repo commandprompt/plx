@@ -557,3 +557,51 @@ SELECT fs_err($q$SELECT fs_r2c11_nocast('2020-06-01', 1)$q$) AS r;  -- 42883: op
  42883: operator does not exist: date > text
 (1 row)
 
+-- R2-T10 (PR 24 review r2 t1[0]): one name position is not caught at CREATE
+-- FUNCTION. In static SQL, UPDATE ... SET #{x} = v becomes SET (x) = v,
+-- which PostgreSQL reads as a one-column list. With a plain value the
+-- statement fails when it runs; with a sub-SELECT or ROW() it updates the
+-- column named x whatever the variable holds. doc/LIMITATIONS.md and
+-- DYNAMIC-SQL.md say so; the cases pin the behaviour so that a change is
+-- noticed. ident() is the fix.
+CREATE TABLE fs_r2t10 (id int, balance int, x int);
+INSERT INTO fs_r2t10 VALUES (1, 100, 7);
+CREATE FUNCTION fs_r2t10_val(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = 0 WHERE id = 1`);
+$$;
+SELECT fs_err($q$SELECT fs_r2t10_val('balance')$q$) AS r;
+                                            r                                             
+------------------------------------------------------------------------------------------
+ 0A000: source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression
+(1 row)
+
+CREATE FUNCTION fs_r2t10_sub(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = (SELECT 1) WHERE id = 1`);
+$$;
+SELECT fs_r2t10_sub('balance');
+ fs_r2t10_sub 
+--------------
+ 
+(1 row)
+
+SELECT balance, x FROM fs_r2t10;  -- pinned: column x changes to 1, balance stays 100
+ balance | x 
+---------+---
+     100 | 1
+(1 row)
+
+CREATE FUNCTION fs_r2t10_ident(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${ident(x)} = 0 WHERE id = 1`);
+$$;
+SELECT fs_r2t10_ident('balance');
+ fs_r2t10_ident 
+----------------
+ 
+(1 row)
+
+SELECT balance, x FROM fs_r2t10;  -- 0 1
+ balance | x 
+---------+---
+       0 | 1
+(1 row)
+
