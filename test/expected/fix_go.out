@@ -930,3 +930,36 @@ CREATE FUNCTION fgh18_accn() RETURNS text LANGUAGE plxgo AS $$
 $$;
 ERROR:  plxgo: invalid operation: + between a string and a number; Go does not convert between them, so use strconv.Itoa or fmt.Sprintf
 DETAIL:  at plxgo source line 3
+-- make() is not supported; plx says so at CREATE FUNCTION instead of failing
+-- with a message about something else
+CREATE FUNCTION fgmake_var(n int) RETURNS int LANGUAGE plxgo AS $$
+	var s []int = make([]int, n)
+	return len(s)
+$$;
+ERROR:  plxgo: make is not supported; use a slice literal such as []int{1, 2}, or array_fill(0, []int{n}) for n zeros
+DETAIL:  at plxgo source line 2
+CREATE FUNCTION fgmake_decl(n int) RETURNS int LANGUAGE plxgo AS $$
+	s := make([]int, n)
+	return len(s)
+$$;
+ERROR:  plxgo: make is not supported; use a slice literal such as []int{1, 2}, or array_fill(0, []int{n}) for n zeros
+DETAIL:  at plxgo source line 2
+CREATE FUNCTION fgmake_case() RETURNS int LANGUAGE plxgo AS $$
+	Int := 3
+	var s []int = make([]int, Int)
+	return len(s)
+$$;
+ERROR:  plxgo: make is not supported; use a slice literal such as []int{1, 2}, or array_fill(0, []int{n}) for n zeros
+DETAIL:  at plxgo source line 3
+-- the alternative the message suggests
+CREATE FUNCTION fgmake_fill(n int) RETURNS int[] LANGUAGE plxgo AS $$
+	var s []int = array_fill(0, []int{n})
+	s[1] = 7
+	return s
+$$;
+SELECT fgmake_fill(3) AS go_0_7_0;
+ go_0_7_0 
+----------
+ {0,7,0}
+(1 row)
+

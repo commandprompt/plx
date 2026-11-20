@@ -216,6 +216,8 @@ fail when the function runs.
 - `map`, `chan`, `struct`, and `interface` types; declare data with SQL types or
   slices.
 - `switch` `fallthrough`.
+- `make`, which plx rejects; write a slice literal or
+  `array_fill(0, []int{n})`.
 - `+` joins strings only when plx can see a string operand: a string literal,
   a `string` local, a `text` or `varchar` parameter, or a call that returns a
   string. Between two row fields `+` stays SQL `+`; write `string(r.a) + r.b`

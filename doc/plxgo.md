@@ -329,6 +329,8 @@ $$;
 - `map`, `chan`, `struct`, and `interface` types (declare data with SQL types or
   arrays instead).
 - `switch` `fallthrough`.
+- `make`. plx rejects it at `CREATE FUNCTION`. Write a slice literal such as
+  `[]int{1, 2}`, or `array_fill(0, []int{n})` for a slice of `n` zeros.
 - Transaction control. `commit()` and `rollback()` are accepted when a procedure
   is created but fail when it runs (`function commit() does not exist`).
 - The full `fmt`/`strings`/`math`/`strconv` packages; only the subset above is

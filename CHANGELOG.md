@@ -629,6 +629,10 @@ not here.
 - `s += x` on a string appends. It used to become `s := s + (x)`, which
   failed when it ran. plx now writes `s := s || (x)`, so a NULL `x` makes `s`
   NULL. `s += 1` on a string is rejected at `CREATE FUNCTION`, as in Go.
+- `make(...)` is not supported, but the error named something else: a syntax
+  error at `[`, a type that could not be inferred, or a case clash between
+  the type name and a variable. plx now rejects `make` at `CREATE FUNCTION`
+  with `make is not supported` and suggests a slice literal or `array_fill`.
 
 #### plxcobol
 

@@ -3653,6 +3653,23 @@ plx_go_parse_body(Ctx *cx)
 	g.cx = cx;
 	g.arrlen = -1;
 	go_lex(&g, cx->body);
+
+	/*
+	 * make(...) has no lowering. Left alone it reaches plpgsql as written, and
+	 * the error names something else (a syntax error at "[", a type that
+	 * cannot be inferred, or a case clash with the type name), so reject it
+	 * here first. A field or method named make (x.make(...)) is not the
+	 * builtin.
+	 */
+	{
+		int			i;
+
+		for (i = 0; i + 1 < g.nt; i++)
+			if (go_ci(&g.t[i], "make") && g.t[i + 1].kind == GO_LP &&
+				(i == 0 || g.t[i - 1].kind != GO_DOT))
+				plx_err(cx, g.t[i].line,
+						"make is not supported; use a slice literal such as []int{1, 2}, or array_fill(0, []int{n}) for n zeros");
+	}
 	go_eat_semi(&g);
 
 	/* an outer { ... } wrapping the whole body is unwrapped */
