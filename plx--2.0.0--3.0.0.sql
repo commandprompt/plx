@@ -83,8 +83,8 @@ WHERE rngcollation = 0 AND rngsubtype IN (SELECT oid FROM plx_sb_types);
  * range partition cannot compare its bounds. Give the default collation to
  * every key whose type is in plx_sb_types. A key on a column takes the
  * column's type. A key on an expression takes the type the expression
- * gives: the query below reads it from a subquery that returns no rows, so
- * the expression is never run. The column of an index key gets the same
+ * gives, which plx_key_expr_types reads from the stored expression tree:
+ * the expression is neither parsed nor run. The column of an index key gets the same
  * collation as the key, and an INCLUDE column keeps none, as on a fresh
  * install. Rewriting the pg_class row of a partitioned table makes every
  * session read its new partition key.
