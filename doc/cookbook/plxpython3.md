@@ -142,15 +142,18 @@ SELECT array_agg(d) AS divisors_of_12 FROM divisors(12) d;
 
 ## Error handling with try / except
 
-`try` / `except` maps to a plpgsql exception block. Name a specific condition
-with the `PG::` spelling; `PG::DivisionByZero` catches `division_by_zero`. The
+`try` / `except` maps to a plpgsql exception block. Name the condition with
+one of the classes plx knows: `ZeroDivisionError` catches `division_by_zero`.
+Any other class makes `CREATE FUNCTION` fail with
+`unsupported exception class`; the
+[plxpython3 chapter](../plxpython3.md#handling) lists the known classes. The
 `e.message` accessor reads `SQLERRM`.
 
 ```python
 CREATE FUNCTION safe_divide(a int, b int) RETURNS int LANGUAGE plxpython3 AS $$
 try:
     return a / b
-except PG::DivisionByZero as e:
+except ZeroDivisionError as e:
     raise("notice", f"caught: {e.message}")
     return -1
 $$;
