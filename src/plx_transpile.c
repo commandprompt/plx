@@ -3213,9 +3213,14 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					 (surf->concat_op || !(j < len && s[j] == '.')) &&
 					 /* outside plxphp, r.s or r . s names a field, not the local s */
 					 (surf->concat_op || !prev_is_dot(s, i)) &&
-					 /* (s)::type is cast already (plxcsharp writes it) */
-					 !(i > 0 && s[i - 1] == '(' && j + 3 <= len &&
-					   strncmp(s + j, ")::", 3) == 0) &&
+					 /*
+					  * plxcsharp hands over translated text in which it wrote
+					  * a builder's (s)::text cast itself; do not cast it twice.
+					  * In source text, (s)::int still needs the text cast
+					  * first: plx_strbuild has no cast to integer.
+					  */
+					 !(surf->own_assign_check && i > 0 && s[i - 1] == '(' &&
+					   j + 7 <= len && strncmp(s + j, ")::text", 7) == 0) &&
 					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
 					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{

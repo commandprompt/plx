@@ -1,8 +1,8 @@
 # plx Architecture
 
 plx lets a function body be written in a Ruby, PHP, JavaScript, TypeScript,
-Python, Go, C#, COBOL, Oracle PL/SQL, or Transact-SQL dialect and executed by the
-standard plpgsql interpreter. This document describes how that works in the
+Python, Go, C#, Lua, COBOL, Oracle PL/SQL, or Transact-SQL dialect and executed
+by the standard plpgsql interpreter. This document describes how that works in the
 extension as built.
 
 ## The core idea
