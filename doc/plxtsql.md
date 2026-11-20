@@ -157,6 +157,13 @@ applied; the message argument is emitted as-is.
 | `UNIQUEIDENTIFIER` | `uuid` |
 | `VARBINARY(n)`, `VARBINARY(MAX)` | `bytea` |
 
+SQL Server's names of several words mean the same as the one-word names, here
+and in `CAST` and `CONVERT`: `CHARACTER VARYING` and `CHAR VARYING` mean
+`VARCHAR`, `NATIONAL CHARACTER VARYING` and `NATIONAL CHAR VARYING` mean
+`NVARCHAR`, `CHARACTER` means `CHAR`, `NATIONAL CHARACTER` and `NATIONAL CHAR`
+mean `NCHAR`, `BINARY VARYING` means `VARBINARY`, and `DOUBLE PRECISION` means
+`FLOAT`.
+
 An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 ### Functions
@@ -174,8 +181,53 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `CEILING(x)` | `ceil(x)` |
 | `@@IDENTITY` | `lastval()` |
 
-`CAST(e AS type)` and most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`,
-`LOWER`, `ABS`, `ROUND`, ...) are already valid in PostgreSQL and pass through.
+Most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`, `LOWER`, `ABS`,
+`ROUND`, ...) are already valid in PostgreSQL and pass through.
+
+### Types in `CAST`
+
+`CAST(e AS type)` keeps its form. plx maps the T-SQL type names below with the
+table that `DECLARE` and `CONVERT` use. Any other type name passes through, so
+PostgreSQL type names work.
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `NVARCHAR(n)` | `varchar(n)` |
+| `NVARCHAR` (no length) | `varchar(30)` |
+| `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
+| `BIT` | `boolean` |
+| `MONEY` | `numeric(19,4)` |
+| `DATETIME`, `DATETIME2` | `timestamp` |
+| `DATETIME2(n)` | `timestamp(n)`; `DATETIME2(7)` gives `timestamp` (6 digits) |
+| `UNIQUEIDENTIFIER` | `uuid` |
+| `VARBINARY(MAX)`, `IMAGE` | `bytea` |
+
+plx does not map `TINYINT`, `SMALLMONEY`, `SMALLDATETIME`, `SYSNAME`,
+`BINARY` or `VARBINARY(n)` in `CAST`, because the PostgreSQL type would not
+keep SQL Server's value. `CAST(300 AS tinyint)` is an error in SQL Server but
+300 in `smallint`, and `CAST('abc' AS varbinary(1))` keeps 1 byte in SQL Server
+but 3 in `bytea`. The call fails with `type "tinyint" does not exist`. Cast to
+the PostgreSQL type you want instead, such as `smallint` or `bytea`.
+
+A mapped type takes the PostgreSQL rules for its values, as in `DECLARE` and
+`CONVERT`. These values differ from SQL Server:
+
+- A `BIT` value is a PostgreSQL `boolean`. A cast to text gives `true` or
+  `false`, and `CONCAT` gives `t` or `f`. SQL Server gives `1` or `0` in both.
+- `CAST('yes' AS bit)` gives true, because PostgreSQL accepts `yes`, `on`
+  and `t`. SQL Server raises a conversion error.
+- A `DATETIME` value keeps every digit you give it, up to 6: SQL Server rounds
+  it to 1/300 of a second. A string with more than 3 fractional digits, such
+  as `'2024-01-01 10:00:00.1234567'`, works in plx and fails in SQL Server.
+- A `DATETIME` before 1753, such as `'1700-01-01'`, works in plx. SQL Server
+  raises an out-of-range error.
+- `CAST(12 AS nvarchar(1))` gives `1`. SQL Server raises error 8115, an
+  arithmetic overflow.
+- A `UNIQUEIDENTIFIER` turns into lowercase text. SQL Server gives uppercase.
+- `CAST` of a string to `VARBINARY(MAX)` takes `\x41` as hex, so
+  `DATALENGTH(CAST('\x41' AS varbinary(max)))` gives 1. SQL Server gives 4.
+- `CAST(N'ab' AS varbinary(max))` holds the UTF-8 bytes, so `DATALENGTH`
+  gives 2. SQL Server stores UTF-16 and gives 4.
 
 ### Operators
 
@@ -211,7 +263,8 @@ A chain is a run of operands joined by `+`, such as `@a + ' ' + @b`. A known
 string is one of:
 
 - a variable or parameter declared with a variable-length string type:
-  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
+  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`
+  (`CHARACTER VARYING` and the other names for them count too);
 - a string literal, `'...'` or `N'...'`;
 - `CAST` or `CONVERT` to one of those types;
 - `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
@@ -254,7 +307,8 @@ the default `CONCAT_NULL_YIELDS_NULL ON`.
 Write `||` or `CONCAT(...)` yourself to join strings that are not all known
 strings, for example two columns, or a column and a literal.
 
-`CHAR(n)` and `NCHAR(n)` values are not known strings. This covers a variable,
+`CHAR(n)` and `NCHAR(n)` values are not known strings, and neither are
+`CHARACTER(n)` and `NATIONAL CHARACTER(n)`. This covers a variable,
 a parameter, and `CAST` or `CONVERT` to `CHAR` or `NCHAR`, with or without a
 length. SQL Server keeps their trailing spaces when it joins them, but
 PostgreSQL's `||` drops them, so `||` would return a different value without an

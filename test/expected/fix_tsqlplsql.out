@@ -740,3 +740,257 @@ SELECT fxtl_col() AS r;  -- SQL Server: -2
 (1 row)
 
 DROP TABLE fxtl_t;
+-- CAST maps a T-SQL type name the way CONVERT and DECLARE do. Before, CAST passed the name through, so
+-- CAST(x AS nvarchar(5)) failed with 'type "nvarchar" does not exist'. SQL Server's answer is in each comment.
+CREATE FUNCTION fxct_nvar() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('abcdefg' AS nvarchar(5));
+$$;
+SELECT fxct_nvar() AS r;  -- SQL Server: abcde
+   r   
+-------
+ abcde
+(1 row)
+
+CREATE FUNCTION fxct_nvar30() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CAST('12345678901234567890123456789012345' AS nvarchar));
+$$;
+SELECT fxct_nvar30() AS r;  -- SQL Server: 30 (CAST without a length gives 30 characters)
+ r  
+----
+ 30
+(1 row)
+
+CREATE FUNCTION fxct_max() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('ab' AS varchar(MAX)) + CAST('cd' AS nvarchar(max));
+$$;
+SELECT fxct_max() AS r;  -- SQL Server: abcd
+  r   
+------
+ abcd
+(1 row)
+
+CREATE FUNCTION fxct_ntext() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('e' AS ntext);
+$$;
+SELECT fxct_ntext() AS r;  -- SQL Server: e
+ r 
+---
+ e
+(1 row)
+
+CREATE FUNCTION fxct_conv_max() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(varchar(MAX), 'ab') + CONVERT(nvarchar(MAX), 'cd');
+$$;
+SELECT fxct_conv_max() AS r;  -- SQL Server: abcd
+  r   
+------
+ abcd
+(1 row)
+
+CREATE FUNCTION fxct_dt() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:05.5' AS datetime);
+$$;
+SELECT fxct_dt() AS r;  -- SQL Server: 2024-01-02 03:04:05.500
+             r              
+----------------------------
+ Tue Jan 02 03:04:05.5 2024
+(1 row)
+
+CREATE FUNCTION fxct_dt2() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:05.5' AS datetime2(0));
+$$;
+SELECT fxct_dt2() AS r;  -- SQL Server: 2024-01-02 03:04:06
+            r             
+--------------------------
+ Tue Jan 02 03:04:06 2024
+(1 row)
+
+CREATE FUNCTION fxct_bit() RETURNS boolean LANGUAGE plxtsql AS $$
+  RETURN CAST(2 AS bit);
+$$;
+SELECT fxct_bit() AS r;  -- SQL Server: 1 (any non-zero number becomes 1)
+ r 
+---
+ t
+(1 row)
+
+CREATE FUNCTION fxct_money() RETURNS numeric LANGUAGE plxtsql AS $$
+  RETURN CAST(2.5 AS money) + 1;
+$$;
+SELECT fxct_money() AS r;  -- SQL Server: 3.5000
+   r    
+--------
+ 3.5000
+(1 row)
+
+CREATE FUNCTION fxct_uuid() RETURNS uuid LANGUAGE plxtsql AS $$
+  RETURN CAST('A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11' AS uniqueidentifier);
+$$;
+SELECT fxct_uuid() AS r;  -- SQL Server: A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11
+                  r                   
+--------------------------------------
+ a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+(1 row)
+
+CREATE FUNCTION fxct_bin() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN DATALENGTH(CAST('ab' AS varbinary(MAX))) + 10 * DATALENGTH(CAST('cde' AS image));
+$$;
+SELECT fxct_bin() AS r;  -- SQL Server: 32
+ r  
+----
+ 32
+(1 row)
+
+CREATE FUNCTION fxct_nest(n int) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(@n AS nvarchar(10)) AS nvarchar(2)) + 'x';
+$$;
+SELECT fxct_nest(12345) AS r;  -- SQL Server: 12x
+  r  
+-----
+ 12x
+(1 row)
+
+CREATE TABLE fxct_t(v int);
+INSERT INTO fxct_t VALUES (42);
+CREATE FUNCTION fxct_col() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @r nvarchar(10);
+  SELECT @r = CAST(v AS nvarchar(10)) + '!' FROM fxct_t;
+  RETURN @r;
+$$;
+SELECT fxct_col() AS r;  -- SQL Server: 42!
+  r  
+-----
+ 42!
+(1 row)
+
+DROP TABLE fxct_t;
+-- a PostgreSQL type name passes through unchanged
+CREATE FUNCTION fxct_pg() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(1.5 AS double precision) AS varchar(10));
+$$;
+SELECT fxct_pg() AS r;
+  r  
+-----
+ 1.5
+(1 row)
+
+-- a T-SQL type whose PostgreSQL type would not keep SQL Server's value still fails when it runs:
+-- tinyint and smallmoney have a smaller range, binary(n) and varbinary(n) cut to n bytes, and
+-- smalldatetime rounds to the minute. SQL Server's answer is in each comment.
+CREATE FUNCTION fxct_tiny() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST(300 AS tinyint);
+$$;
+SELECT fxct_tiny() AS r;  -- SQL Server: arithmetic overflow error
+ERROR:  type "tinyint" does not exist at character 14
+CREATE FUNCTION fxct_smoney() RETURNS numeric LANGUAGE plxtsql AS $$
+  RETURN CAST(300000 AS smallmoney);
+$$;
+SELECT fxct_smoney() AS r;  -- SQL Server: arithmetic overflow error
+ERROR:  type "smallmoney" does not exist at character 17
+CREATE FUNCTION fxct_vbin() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN DATALENGTH(CAST('abc' AS varbinary(1)));
+$$;
+SELECT fxct_vbin() AS r;  -- SQL Server: 1
+ERROR:  type "varbinary" does not exist at character 29
+CREATE FUNCTION fxct_sdt() RETURNS timestamp LANGUAGE plxtsql AS $$
+  RETURN CAST('2024-01-02 03:04:35' AS smalldatetime);
+$$;
+SELECT fxct_sdt() AS r;  -- SQL Server: 2024-01-02 03:05:00
+ERROR:  type "smalldatetime" does not exist at character 32
+-- CHARACTER VARYING, CHAR VARYING and NATIONAL CHARACTER VARYING are SQL Server's names for VARCHAR and
+-- NVARCHAR, so a value of one of these types is a known string for +. Before, DECLARE rejected the
+-- names and + stayed + after a CAST or CONVERT to them. SQL Server's answer is in each comment.
+CREATE FUNCTION fxcv_local() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s character varying(10) = 'a', @t char varying(5) = 'c', @u national character varying(5) = 'd';
+  RETURN @s + 'b' + @t + @u;
+$$;
+SELECT fxcv_local() AS r;  -- SQL Server: abcd
+  r   
+------
+ abcd
+(1 row)
+
+CREATE FUNCTION fxcv_nat() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s national char varying(5) = 'a', @m character varying(MAX) = 'c';
+  RETURN @s + 'b' + @m;
+$$;
+SELECT fxcv_nat() AS r;  -- SQL Server: abc
+  r  
+-----
+ abc
+(1 row)
+
+CREATE FUNCTION fxcv_par(p character varying, q character varying(5)) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN @p + 'b' + @q;
+$$;
+SELECT fxcv_par('a', 'c') AS r;  -- SQL Server: abc
+  r  
+-----
+ abc
+(1 row)
+
+CREATE FUNCTION fxcv_cast() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('a' AS character varying(5)) + 'b' + CAST('c' AS national char varying(5));
+$$;
+SELECT fxcv_cast() AS r;  -- SQL Server: abc
+  r  
+-----
+ abc
+(1 row)
+
+CREATE FUNCTION fxcv_cast30() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CAST('12345678901234567890123456789012345' AS national character varying));
+$$;
+SELECT fxcv_cast30() AS r;  -- SQL Server: 30 (CAST without a length gives 30 characters)
+ r  
+----
+ 30
+(1 row)
+
+CREATE FUNCTION fxcv_conv() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(character varying(5), 'a') + 'b' + CONVERT(char varying(5), 'c');
+$$;
+SELECT fxcv_conv() AS r;  -- SQL Server: abc
+  r  
+-----
+ abc
+(1 row)
+
+-- CHARACTER(n) and NATIONAL CHARACTER(n) are fixed length, like CHAR(n): + stays +, and the call fails
+CREATE FUNCTION fxcv_fix() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @c character(3) = 'a';
+  RETURN @c + 'b';
+$$;
+SELECT fxcv_fix() AS r;  -- SQL Server: 'a  b'
+ERROR:  operator does not exist: character + unknown at character 3
+CREATE FUNCTION fxcv_fixn() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @c national character(3) = 'a';
+  RETURN @c + 'b';
+$$;
+SELECT fxcv_fixn() AS r;  -- SQL Server: 'a  b'
+ERROR:  operator does not exist: character + unknown at character 3
+CREATE FUNCTION fxcv_fixcast() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('a' AS national char(3)) + 'b';
+$$;
+SELECT fxcv_fixcast() AS r;  -- SQL Server: 'a  b'
+ERROR:  operator does not exist: character + unknown at character 33
+-- (MAX) is only for VARCHAR, NVARCHAR and VARBINARY: on another type CONVERT must still fail
+CREATE FUNCTION fxmx_num() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(numeric(MAX), '1.5');
+$$;
+SELECT fxmx_num() AS r;  -- SQL Server: error, numeric(max) is not a type
+ERROR:  invalid input syntax for type integer: "max" at character 15
+-- SQL Server: error, char(max) is not a type; plx fails at CREATE
+CREATE FUNCTION fxmx_char() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(char(MAX), 'a  ');
+$$;
+ERROR:  syntax error at or near "MAX" at character 63
+CREATE FUNCTION fxmx_nv() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CONVERT(nvarchar(MAX), 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')) + DATALENGTH(CONVERT(varbinary(MAX), 'ab'));
+$$;
+SELECT fxmx_nv() AS r;  -- SQL Server: 42
+ r  
+----
+ 42
+(1 row)
+

@@ -453,18 +453,78 @@ tq_base_type(const char *s, int len)
 	return NULL;
 }
 
+/* is the type name [s, s+len) the word w, ignoring case? */
+static bool
+tq_name_is(const char *s, int len, const char *w)
+{
+	return (int) strlen(w) == len && pg_strncasecmp(s, w, len) == 0;
+}
+
+/*
+ * the type name that starts at token a (below b): one word, or a name of
+ * several words that SQL Server reads as a one-word type, such as CHARACTER
+ * VARYING for VARCHAR. Sets *s and *len to the one-word name and returns the
+ * index of the token after the name.
+ */
+static int
+tq_type_name(Tq *tq, int a, int b, const char **s, int *len)
+{
+	static const struct
+	{
+		const char *w1;
+		const char *w2;
+		const char *w3;
+		const char *tsql;
+	}			syn[] = {
+		{"national", "character", "varying", "nvarchar"},
+		{"national", "char", "varying", "nvarchar"},
+		{"national", "character", NULL, "nchar"},
+		{"national", "char", NULL, "nchar"},
+		{"character", "varying", NULL, "varchar"},
+		{"char", "varying", NULL, "varchar"},
+		{"binary", "varying", NULL, "varbinary"},
+		{"double", "precision", NULL, "float"},
+		{"character", NULL, NULL, "char"},
+		{NULL, NULL, NULL, NULL}
+	};
+	TqTok	   *t = tq->t;
+	int			i;
+
+	*s = t[a].s;
+	*len = t[a].len;
+	if (t[a].kind != TQ_WORD)
+		return a + 1;
+	for (i = 0; syn[i].w1; i++)
+	{
+		int			n = syn[i].w3 ? 3 : syn[i].w2 ? 2 : 1;
+
+		if (a + n > b || !tq_ci(&t[a], syn[i].w1) ||
+			(syn[i].w2 && !tq_ci(&t[a + 1], syn[i].w2)) ||
+			(syn[i].w3 && !tq_ci(&t[a + 2], syn[i].w3)))
+			continue;
+		*s = syn[i].tsql;
+		*len = (int) strlen(syn[i].tsql);
+		return a + n;
+	}
+	return a + 1;
+}
+
 /* read a type reference from the stream into dest, consuming its tokens */
 static void
 tq_read_type(Tq *tq, StringInfo dest)
 {
 	TqTok	   *w = tq_cur(tq);
 	const char *base;
+	const char *name;
+	int			nlen,
+				next;
 	bool		is_char = false,
 				is_bin = false;
 
 	if (w->kind != TQ_WORD && w->kind != TQ_QIDENT)
 		tq_err(tq, "expected a type name");
-	base = tq_base_type(w->s, w->len);
+	next = tq_type_name(tq, tq->pos, tq->nt, &name, &nlen);
+	base = tq_base_type(name, nlen);
 	is_char = (base && (strcmp(base, "varchar") == 0 || strcmp(base, "char") == 0));
 	is_bin = (base && strcmp(base, "bytea") == 0);
 	if (base)
@@ -478,7 +538,7 @@ tq_read_type(Tq *tq, StringInfo dest)
 
 		appendStringInfoString(dest, id);
 	}
-	tq->pos++;
+	tq->pos = next;
 	if (tq_cur(tq)->kind == TQ_LP)
 	{
 		TqTok	   *inner = &tq->t[tq->pos + 1];
@@ -530,6 +590,8 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 {
 	TqTok	   *w;
 	const char *base;
+	const char *name;
+	int			nlen;
 
 	if (a >= b || (tq->t[a].kind != TQ_WORD && tq->t[a].kind != TQ_QIDENT))
 	{
@@ -537,17 +599,35 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 		return;
 	}
 	w = &tq->t[a];
-	base = tq_base_type(w->s, w->len);
+	{
+		int			next = tq_type_name(tq, a, b, &name, &nlen);
+
+		if (next > a + 1)
+		{
+			/* a name of several words: treat it as its one-word name */
+			a = next - 1;
+			w = &tq->t[a];
+		}
+	}
+	base = tq_base_type(name, nlen);
+	if (base && a + 2 < b && tq->t[a + 1].kind == TQ_LP && tq_ci(&tq->t[a + 2], "MAX") &&
+		(tq_name_is(name, nlen, "varchar") || tq_name_is(name, nlen, "nvarchar") ||
+		 tq_name_is(name, nlen, "varbinary")))
+	{
+		/* VARCHAR(MAX)/NVARCHAR(MAX) -> text; VARBINARY(MAX) -> bytea */
+		appendStringInfoString(dest, strcmp(base, "bytea") == 0 ? "bytea" : "text");
+		return;
+	}
 	if (base)
 		appendStringInfoString(dest, base);
 	else if (w->kind == TQ_QIDENT)
 		tq_emit_qident(w, dest);
 	else
 		appendStringInfoString(dest, tq_ident(w->s, w->len));
-	if (base && (pg_strncasecmp(w->s, "char", 4) == 0 ||
-				 pg_strncasecmp(w->s, "varc", 4) == 0 ||
-				 pg_strncasecmp(w->s, "nvar", 4) == 0 ||
-				 pg_strncasecmp(w->s, "ncha", 4) == 0 ||
+	if (base && (pg_strncasecmp(name, "char", 4) == 0 ||
+				 pg_strncasecmp(name, "varc", 4) == 0 ||
+				 pg_strncasecmp(name, "nvar", 4) == 0 ||
+				 pg_strncasecmp(name, "ncha", 4) == 0 ||
 				 strcmp(base, "numeric") == 0) &&
 		a + 1 < b && tq->t[a + 1].kind == TQ_LP)
 	{
@@ -607,6 +687,102 @@ tq_pair_parens(Tq *tq)
 		}
 	}
 	pfree(stack);
+}
+
+/* index of the AS that ends the expression of CAST(e AS type), or -1 */
+static int
+tq_cast_as(Tq *tq, int lp, int close)
+{
+	int			i,
+				depth = 0;
+
+	for (i = lp + 1; i < close; i++)
+	{
+		TqTok	   *x = &tq->t[i];
+
+		if (x->kind == TQ_LP)
+			depth++;
+		else if (x->kind == TQ_RP)
+			depth--;
+		else if (depth == 0 && tq_ci(x, "AS"))
+			return i;
+	}
+	return -1;
+}
+
+/*
+ * map the type of CAST(e AS type), the tokens [a,b), into dest with the table
+ * CONVERT and DECLARE use. Return false to keep the type as written, which
+ * suits a PostgreSQL type name. A T-SQL type whose PostgreSQL type would not
+ * keep SQL Server's value is kept too, so the call fails instead of returning
+ * a different value: tinyint and smallmoney have a smaller range than smallint
+ * and numeric(10,4), binary(n) and varbinary(n) cut the value to n bytes,
+ * smalldatetime rounds to the minute, and sysname is nvarchar(128).
+ */
+static bool
+tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
+{
+	static const char *mapped[] = {
+		"nvarchar", "varchar", "ntext", "bit", "money", "datetime",
+		"datetime2", "uniqueidentifier", "image", "varbinary", NULL
+	};
+	TqTok	   *arg = NULL;
+	const char *base;
+	const char *name;
+	bool		is_max;
+	int			i,
+				nlen,
+				next;
+
+	if (a >= b || tq->t[a].kind != TQ_WORD)
+		return false;
+	next = tq_type_name(tq, a, b, &name, &nlen);
+	if (b - next == 3 && tq->t[next].kind == TQ_LP && tq->t[b - 1].kind == TQ_RP)
+		arg = &tq->t[next + 1];
+	else if (b != next)
+		return false;
+	for (i = 0; mapped[i]; i++)
+		if (tq_name_is(name, nlen, mapped[i]))
+			break;
+	if (mapped[i] == NULL)
+		return false;
+	base = tq_base_type(name, nlen);
+	is_max = (arg != NULL && tq_ci(arg, "MAX"));
+	if (arg && !is_max && arg->kind != TQ_NUM)
+		return false;
+
+	if (tq_name_is(name, nlen, "varchar") || tq_name_is(name, nlen, "varbinary"))
+	{
+		/* only (MAX): varchar(n) is PostgreSQL's own, varbinary(n) cuts */
+		if (!is_max)
+			return false;
+		appendStringInfoString(dest, strcmp(base, "bytea") == 0 ? "bytea" : "text");
+		return true;
+	}
+	if (tq_name_is(name, nlen, "nvarchar"))
+	{
+		if (is_max)
+			appendStringInfoString(dest, "text");
+		else if (arg)
+			appendStringInfo(dest, "varchar(%.*s)", arg->len, arg->s);
+		else
+			appendStringInfoString(dest, "varchar(30)");	/* CAST's default */
+		return true;
+	}
+	if (tq_name_is(name, nlen, "datetime2") && arg && !is_max && arg->len == 1 &&
+		arg->s[0] >= '0' && arg->s[0] <= '7')
+	{
+		/* datetime2(n) keeps n fractional digits; PostgreSQL keeps 6 at most */
+		if (arg->s[0] == '7')
+			appendStringInfoString(dest, "timestamp");
+		else
+			appendStringInfo(dest, "timestamp(%c)", arg->s[0]);
+		return true;
+	}
+	if (arg)
+		return false;
+	appendStringInfoString(dest, base);
+	return true;
 }
 
 /* index of the ')' matching the '(' at lp, within [.,limit), or -1 */
@@ -710,15 +886,27 @@ tq_var_class(Tq *tq, TqTok *tk)
 	return TC_UNK;
 }
 
-/* class of a T-SQL type name token (CAST/CONVERT target) */
+/*
+ * class of the T-SQL type name at a (CAST/CONVERT target), which may be several
+ * words such as CHARACTER VARYING. With close >= 0 the name must be followed
+ * by the ')' at close, or by a one-token (n) and then that ')'.
+ */
 static TqCls
-tq_typetok_class(TqTok *tk)
+tq_typename_class(Tq *tq, int a, int b, int close)
 {
+	const char *name;
 	const char *base;
+	int			nlen,
+				next;
 
-	if (tk->kind != TQ_WORD)
+	if (a >= b || tq->t[a].kind != TQ_WORD)
 		return TC_UNK;
-	base = tq_base_type(tk->s, tk->len);
+	next = tq_type_name(tq, a, b, &name, &nlen);
+	if (close >= 0 && next != close &&
+		!(next + 3 == close && tq->t[next].kind == TQ_LP &&
+		  tq->t[next + 2].kind == TQ_RP))
+		return TC_UNK;
+	base = tq_base_type(name, nlen);
 	return base ? tq_type_class(base) : TC_UNK;
 }
 
@@ -737,16 +925,13 @@ tq_call_class(Tq *tq, int i, int close)
 	int			k;
 
 	if (tq_ci(tk, "CONVERT"))
-		return tq_typetok_class(a1);
+		return tq_typename_class(tq, i + 2, close, -1);
 	if (tq_ci(tk, "CAST"))
 	{
-		/* CAST(e AS type) or CAST(e AS type(n)): the type sits before ')' */
-		if (close - 2 > i + 1 && tq_ci(&tq->t[close - 2], "AS"))
-			return tq_typetok_class(&tq->t[close - 1]);
-		if (close - 5 > i + 1 && tq->t[close - 1].kind == TQ_RP &&
-			tq->t[close - 3].kind == TQ_LP && tq_ci(&tq->t[close - 5], "AS"))
-			return tq_typetok_class(&tq->t[close - 4]);
-		return TC_UNK;
+		/* CAST(e AS type) or CAST(e AS type(n)): the type ends at ')' */
+		int			as = tq_cast_as(tq, i + 1, close);
+
+		return as < 0 ? TC_UNK : tq_typename_class(tq, as + 1, close, close);
 	}
 	if (tq_ci(tk, "ISNULL"))
 	{
@@ -1018,6 +1203,25 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 		tq_sp(out);
 		appendStringInfoString(out, "CAST(");
 		tq_emit_range(tq, comma + 1, comma2 > 0 ? comma2 : close, out);
+		appendStringInfo(out, " AS %s)", ty.data);
+		*ni = close + 1;
+		return true;
+	}
+
+	/* CAST(e AS type): map a T-SQL type name as CONVERT does */
+	if (tq_ci(tk, "CAST"))
+	{
+		int			as = tq_cast_as(tq, lp, close);
+		StringInfoData ty;
+
+		if (as < 0)
+			return false;
+		initStringInfo(&ty);
+		if (!tq_cast_type(tq, as + 1, close, &ty))
+			return false;
+		tq_sp(out);
+		appendStringInfoString(out, "CAST(");
+		tq_emit_range(tq, lp + 1, as, out);
 		appendStringInfo(out, " AS %s)", ty.data);
 		*ni = close + 1;
 		return true;

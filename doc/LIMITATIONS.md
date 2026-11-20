@@ -277,6 +277,11 @@ fail when the function runs.
   `(1 ^ 2) + 3`.
 - `SELECT @t = @t + v FROM t`, where the assignment list reads a variable it
   assigns; use an aggregate such as `SUM(v)` or `string_agg(...)`.
+- The 30-character default for a string type without a length. SQL Server
+  gives 30 characters to `VARCHAR`, `NVARCHAR` and `CHAR` in `CAST` and
+  `CONVERT`. plx gives 30 only to `CAST(x AS nvarchar)`. `CAST(x AS varchar)`
+  and `CONVERT(nvarchar, x)` keep every character, and `CAST(x AS char)` keeps
+  1, because PostgreSQL `char` means `char(1)`. Write the length.
 
 ## Working around a gap
 
