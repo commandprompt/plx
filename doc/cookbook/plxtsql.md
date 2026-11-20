@@ -1,6 +1,6 @@
 # Transact-SQL cookbook
 
-Practical recipes for the plxtsql dialect (SQL Server / Sybase T-SQL). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxtsql chapter](plxtsql.md) for the full language reference.
+Practical recipes for the plxtsql dialect (SQL Server / Sybase T-SQL). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxtsql chapter](../plxtsql.md) for the full language reference.
 
 ## Scalar function with branching
 
@@ -60,7 +60,7 @@ SELECT sum_to(100);
 
 ## Building a text result in a loop
 
-T-SQL overloads `+` for both numeric addition and string concatenation, so plx leaves `+` untranslated. Use `||` or `CONCAT(...)` to join strings. `VARCHAR(MAX)` maps to `text`.
+T-SQL overloads `+` for both numeric addition and string concatenation. plx writes `+` as `||` only when every operand is a known string, such as a `VARCHAR` variable, a string literal or a `CONVERT` to `varchar` (see [plxtsql.md](../plxtsql.md#string-concatenation-with)). Use `||` or `CONCAT(...)` to join other strings, such as two columns. `VARCHAR(MAX)` maps to `text`.
 
 ```sql
 CREATE FUNCTION repeat_word(word text, times int) RETURNS text LANGUAGE plxtsql AS $$
@@ -89,7 +89,7 @@ SELECT repeat_word('ping', 3);
 
 ## Reading a value from a query
 
-`SELECT @x = col FROM t ...` becomes `SELECT col INTO x FROM t ...`. This is the T-SQL idiom for pulling a computed or aggregated value out of a table into a local variable. `ISNULL(@total, 0)` guards against a group with no rows.
+`SELECT @x = col FROM t ...` becomes a `FOR` loop over the query that assigns `x` once per row, so `@x` ends with the last row's value and keeps its old value when no row matches. This is the T-SQL idiom for pulling a computed or aggregated value out of a table into a local variable. `ISNULL(@total, 0)` guards against a group with no rows.
 
 ```sql
 CREATE TABLE orders (id int, grp int, amount int);

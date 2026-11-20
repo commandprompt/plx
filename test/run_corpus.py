@@ -1,72 +1,217 @@
 #!/usr/bin/env python3
 """plx corpus test runner. Each case runs in its own fresh psql session
 (so TEMP tables don't collide), output normalized and compared to expected.
-Reject-* categories PASS when transpile/exec raises an ERROR.
-Run as: runuser -u postgres -- python3 <thisdir>/run_corpus.py
+A case that should succeed must produce the expected result rows in the same
+order, with the same values and row counts, and the same NOTICE lines in the
+same order. Only trailing spaces and blank lines at either end are ignored.
+psql prints NULL and the empty string the same way, so they compare equal.
+A case that expects an error passes when psql prints an ERROR. When its
+expected output records the error, each recorded ERROR line must appear in
+the output word for word; CONTEXT, DETAIL and HINT lines are not compared.
+Reject-* cases that record no error pass on any ERROR.
+
+Usage: make corpuscheck                  (runs it against contrib_regression)
+       python3 test/run_corpus.py
+       python3 test/run_corpus.py --selftest   (check the comparison only, no server)
+
+A self-test of the comparison runs first, before the runner touches the
+server. The runner then drops and re-creates the plx extension in the target
+database, so point it at a test database. The usual libpq variables (PGHOST,
+PGPORT, PGDATABASE) choose the server and database. PLX_PSQL names the psql
+binary; the default is the first psql on PATH. Run as root, the runner
+connects as the postgres account; otherwise as the current user, or as
+PLX_PGUSER when it is set.
 """
-import json, os, re, subprocess, sys
+import json, os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PSQL = "/usr/local/pgsql/bin/psql"
-cases = json.load(open(os.path.join(HERE, "corpus.json")))["cases"]
+PSQL = os.environ.get("PLX_PSQL") or shutil.which("psql") or "psql"
 
 def psql(sql):
-    p = subprocess.run(["runuser", "-u", "postgres", "--", PSQL, "-U", "postgres",
-                        "-X", "-q", "-v", "ON_ERROR_STOP=0"],
-                       input=sql, capture_output=True, text=True)
+    argv = [PSQL, "-X", "-q", "-v", "ON_ERROR_STOP=0"]
+    user = os.environ.get("PLX_PGUSER")
+    if os.geteuid() == 0:
+        argv = ["runuser", "-u", "postgres", "--"] + argv + ["-U", user or "postgres"]
+    elif user:
+        argv += ["-U", user]
+    p = subprocess.run(argv, input=sql, capture_output=True, text=True)
     return p.stdout + p.stderr
 
-# fresh extension
-psql("DROP EXTENSION IF EXISTS plx CASCADE; CREATE EXTENSION plx;")
+MESSAGE = ("NOTICE:", "WARNING:", "INFO:")
+ERRORISH = ("ERROR:", "CONTEXT:", "DETAIL:", "HINT:", "LINE ", "QUERY:")
 
-CHROME = {"CREATE", "EXTENSION", "FUNCTION", "DROP", "TABLE", "TEMP", "INSERT",
-          "SET", "PL/pgSQL", "CONTEXT:", "line", "at"}
+def normalize(s):
+    """Split psql output into (rows, messages), each an ordered list.
 
-def datatokens(s):
-    toks = set()
+    rows holds every result line: headers, separator lines, data rows, row
+    counts and the blank lines between result sets. psql lays out a result
+    the same way every time, so a line is compared exactly. Only trailing
+    spaces and the blank lines at either end are dropped: inside a line,
+    spaces and dashes can be data. messages holds the NOTICE, WARNING and
+    INFO lines. psql writes those to stderr and the results to stdout, so
+    their order relative to the rows is not comparable, but the order within
+    each list is. Error lines are left out; the caller checks for an error
+    separately.
+    """
+    rows, messages = [], []
     for ln in s.splitlines():
-        ln = ln.strip()
-        if not ln or set(ln) <= set("-+| "):
+        ln = re.sub(r"^psql:[^:]*:\d+: ", "", ln).rstrip()
+        if ln.startswith(MESSAGE):
+            messages.append(ln)
+        elif ln.startswith(ERRORISH):
             continue
-        if re.match(r"^\(\d+ rows?\)$", ln):
-            continue
-        for t in re.split(r"[\s|]+", ln):
-            t = t.strip().strip(",;\"")
-            if t and t not in CHROME:
-                toks.add(t)
-    return toks
+        else:
+            rows.append(ln)
+    while rows and not rows[0]:
+        rows.pop(0)
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows, messages
 
-npass = nfail = 0
-fails = []
-for c in cases:
+def selftest():
+    """normalize() must keep order, pairing and messages, and judge() must
+    use it. Returns failures."""
+    t = " a | b | c \n---+---+---\n A | B | F\n(1 row)"
+    pairs = [
+        # (expected, got, should they compare equal?)
+        # Trailing spaces and blank lines at the end are not output.
+        (t, " a | b | c\n---+---+---\n A | B | F   \n(1 row)\n\n", True),
+        (t, " a | b | c \n---+---+---\n F | B | A\n(1 row)", False),
+        (" k | v \n---+---\n 1 | 20\n 2 | 60\n(2 rows)",
+         " k | v \n---+---\n 1 | 60\n 2 | 20\n(2 rows)", False),
+        (" x \n---\n f\n(1 row)\n\n x \n---\n t\n(1 row)",
+         " x \n---\n t\n(1 row)\n\n x \n---\n f\n(1 row)", False),
+        ("NOTICE:  a\nNOTICE:  b\n x \n---\n 1\n(1 row)",
+         " x \n---\n 1\n(1 row)\nNOTICE:  a\nNOTICE:  b\n", True),
+        ("NOTICE:  a\nNOTICE:  b\n x \n---\n 1\n(1 row)",
+         " x \n---\n 1\n(1 row)\nNOTICE:  b\nNOTICE:  a\n", False),
+        (" x \n---\n 1\n(1 row)", " x \n---\n 1\n 1\n(2 rows)", False),
+        # Real psql output. A value made only of '-' or '+' is data, not a
+        # separator line.
+        (" s \n---\n +\n(1 row)", " s \n---\n -\n(1 row)\n\n", False),
+        # Spaces inside a value are data, not alignment padding.
+        ("   v   \n-------\n hello\n(1 row)",
+         "     v     \n-----------\n   hello  \n(1 row)\n\n", False),
+        # An empty-string row keeps its place.
+        (" s \n---\n a\n \n b\n(3 rows)",
+         " s \n---\n \n a\n b\n(3 rows)\n\n", False),
+        # Spaces inside a message are part of it.
+        ("NOTICE:  a  b", "NOTICE:  a b\n", False),
+    ]
+    failures = []
+    for want, got, same in pairs:
+        if (normalize(want) == normalize(got)) != same:
+            failures.append("normalize: %r vs %r should %scompare equal"
+                            % (want, got, "" if same else "not "))
+    # judge() decides PASS or FAIL for a whole case, so test it too: a case
+    # that should succeed passes only on the same rows, in the same order.
+    two = " x \n---\n f\n(1 row)\n\n x \n---\n t\n(1 row)"
+    swapped = " x \n---\n t\n(1 row)\n\n x \n---\n f\n(1 row)"
+    ok_case = {"category": "values", "expected_output": two}
+    reject_case = {"category": "reject-x", "expected_output": "anything"}
+    verdicts = [
+        # (case, psql output, should it pass?)
+        (ok_case, two + "\n", True),
+        (ok_case, swapped + "\n", False),
+        (ok_case, two + "\nERROR:  boom\n", False),
+        (reject_case, "ERROR:  plxruby: not supported\n", True),
+        (reject_case, " x \n---\n 1\n(1 row)\n", False),
+    ]
+    # A case that expects an error passes only on that error. The CONTEXT
+    # line names where the error was raised, so it must not be enough: a
+    # different error raised at the same place fails.
+    ctx = "CONTEXT:  PL/pgSQL function c5i(text,text) line 3 at EXECUTE"
+    err_case = {"category": "execute-dynamic",
+                "expected_output": 'ERROR:  syntax error at or near "$2"\n' + ctx}
+    verdicts += [
+        (err_case, 'ERROR:  syntax error at or near "$2"\n'
+                   "LINE 1: INSERT INTO $2(msg) VALUES ($1)\n"
+                   "QUERY:  INSERT INTO $2(msg) VALUES ($1)\n" + ctx + "\n", True),
+        (err_case, 'psql:<stdin>:5: ERROR:  syntax error at or near "$2"\n'
+                   + ctx + "\n", True),
+        (err_case, 'ERROR:  relation "aud" does not exist\n' + ctx + "\n", False),
+        (err_case, "ERROR:  division by zero\n" + ctx + "\n", False),
+        (err_case, 'ERROR:  syntax error at or near "INSERT"\n' + ctx + "\n", False),
+        (err_case, " c5i \n-----\n \n(1 row)\n", False),
+    ]
+    for case, out, want in verdicts:
+        got = judge(case, out)[0]
+        if got != want:
+            failures.append("judge(%s case, %r) gave %s, want %s"
+                            % (case["category"], out,
+                               "PASS" if got else "FAIL",
+                               "PASS" if want else "FAIL"))
+    return failures
+
+def error_lines(s):
+    """The ERROR lines of psql output, without psql's file and line prefix."""
+    lines = (re.sub(r"^psql:[^:]*:\d+: ", "", ln).rstrip() for ln in s.splitlines())
+    return [ln for ln in lines if ln.startswith("ERROR:")]
+
+def judge(c, out):
+    """Decide whether case c passed, given what psql printed for it.
+
+    Returns (ok, detail), where detail is a list of lines explaining a FAIL.
+    """
     reject = c["category"].startswith("reject")
     exp_err = "ERROR:" in c["expected_output"]
-    sql = "CREATE EXTENSION IF NOT EXISTS plx;\n" + c["ruby_create"] + "\n"
-    sql += c["test_sql"] + "\n"
-    out = psql(sql)
     had_error = "ERROR:" in out
     if reject or exp_err:
-        # expected to raise: PASS if it errored (and a keyword from expected shows)
-        kw = datatokens(c["expected_output"].split("ERROR:")[-1]) if exp_err else set()
-        got = datatokens(out)
-        ok = had_error and (not kw or len(kw & got) >= max(1, len(kw) // 2))
+        # Expected to raise. When the expected output records the error,
+        # each recorded ERROR line must appear in the output word for word.
+        # CONTEXT, DETAIL and HINT lines are not compared.
+        got = error_lines(out)
+        ok = had_error and all(e in got for e in error_lines(c["expected_output"]))
     else:
-        want = datatokens(c["expected_output"])
-        got = datatokens(out)
-        missing = want - got
-        ok = (not had_error) and not missing
+        # Compare in order: values, row pairing, row count and messages
+        # must all match the expected output, and nothing may be extra.
+        want = normalize(c["expected_output"])
+        got = normalize(out)
+        ok = (not had_error) and want == got
     if ok:
-        npass += 1
-    else:
-        nfail += 1
-        detail = out.strip().splitlines()[-3:] if out.strip() else []
-        if not (reject or exp_err) and not had_error:
-            detail = ["missing tokens: " + " ".join(sorted(want - got))]
-        fails.append((c["id"], c["category"], detail))
+        return True, []
+    detail = out.strip().splitlines()[-3:] if out.strip() else []
+    if not (reject or exp_err) and not had_error:
+        detail = ["expected rows: %s" % " / ".join(want[0]),
+                  "got rows     : %s" % " / ".join(got[0])]
+        if want[1] != got[1]:
+            detail += ["expected messages: %s" % " / ".join(want[1]),
+                       "got messages     : %s" % " / ".join(got[1])]
+    return False, detail
 
-print(f"PASS {npass}/{len(cases)}  FAIL {nfail}")
-for fid, cat, tail in fails:
-    print(f"  FAIL [{cat}] {fid}")
-    for t in tail:
-        print(f"        {t}")
-sys.exit(1 if nfail else 0)
+def main():
+    failures = selftest()
+    if failures:
+        sys.exit("run_corpus.py self-test failed:\n  " + "\n  ".join(failures))
+    if sys.argv[1:] == ["--selftest"]:
+        return 0
+    if not shutil.which(PSQL):
+        sys.exit("run_corpus.py: cannot run psql (%s). Put psql on PATH or "
+                 "set PLX_PSQL to its full path." % PSQL)
+    cases = json.load(open(os.path.join(HERE, "corpus.json")))["cases"]
+    # fresh extension
+    psql("DROP EXTENSION IF EXISTS plx CASCADE; CREATE EXTENSION plx;")
+    npass = nfail = 0
+    fails = []
+    for c in cases:
+        # Keep the runner's own setup quiet, so only the case's messages count.
+        sql = ("SET client_min_messages = warning;\n"
+               "CREATE EXTENSION IF NOT EXISTS plx;\n"
+               "RESET client_min_messages;\n" + c["ruby_create"] + "\n")
+        sql += c["test_sql"] + "\n"
+        ok, detail = judge(c, psql(sql))
+        if ok:
+            npass += 1
+        else:
+            nfail += 1
+            fails.append((c["id"], c["category"], detail))
+
+    print(f"PASS {npass}/{len(cases)}  FAIL {nfail}")
+    for fid, cat, tail in fails:
+        print(f"  FAIL [{cat}] {fid}")
+        for t in tail:
+            print(f"        {t}")
+    return 1 if nfail else 0
+
+if __name__ == "__main__":
+    sys.exit(main())

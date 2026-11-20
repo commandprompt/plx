@@ -11,8 +11,10 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
@@ -58,11 +60,51 @@ typedef struct
 	Ctx		   *cx;
 	GoTok	   *t;
 	int			nt, pos;
+	/*
+	 * Label of the block that holds the body of the innermost enclosing
+	 * three-clause for loop, or NULL inside any other loop. continue leaves
+	 * that block (EXIT label) so the loop's post statement still runs.
+	 */
+	const char *cont_label;
+	/*
+	 * Label of the block around the innermost enclosing switch, or NULL inside
+	 * a loop nested in it: break inside a switch leaves only the switch.
+	 */
+	const char *brk_label;
+	/*
+	 * Length of the array type go_read_type last read ([N]T with N a plain
+	 * decimal number), or -1 for a slice or any other type.
+	 */
+	int			arrlen;
+	/*
+	 * mt[i] is the index of the bracket that closes the opener at i, or -1.
+	 * go_lex builds it once, so go_match takes constant time.
+	 */
+	int		   *mt;
+	/*
+	 * The operand typing pass stores the kind of each bracketed expression in
+	 * kmemo[], keyed by the index of its '('. An entry counts only while
+	 * kgen[] equals gen. gen moves on at each new top-level expression,
+	 * because the kind of a name can change between statements. edepth
+	 * counts the levels of expression emission and typing, so 0 means a
+	 * top-level expression.
+	 */
+	char	   *kmemo;
+	int		   *kgen;
+	int			gen;
+	int			edepth;
+	/*
+	 * guards counts the shift guards (see GO_SHL_OPEN) open around the code
+	 * being emitted. Each is a subquery, and PostgreSQL needs memory that
+	 * grows faster than linearly to plan subqueries nested in one another.
+	 */
+	int			guards;
 } Go;
 
 static void go_stmt(Go *g, int ind);
 static void go_block(Go *g, int ind);
 static void go_emit_range(Go *g, int a, int b, StringInfo out);
+static char go_expr_kind(Go *g, int a, int b);
 
 static GoTok *
 go_cur(Go *g)
@@ -89,6 +131,18 @@ static char *
 go_ident(const char *s, int len)
 {
 	return pnstrdup(s, len);
+}
+
+/*
+ * Go is case-sensitive, plpgsql is not: i and I are one name to plpgsql.
+ * Pass every name the body declares or reads through the engine's spelling
+ * check, which rejects a second spelling of a local or a parameter.
+ */
+static void
+go_check_name(Go *g, const char *s, int len)
+{
+	(void) plx_local_find(g->cx, s, len);
+	(void) plx_is_param(g->cx, s, len);
 }
 
 static void
@@ -119,6 +173,105 @@ go_asi_kind(GoTok *tk)
 	}
 }
 
+/* value of a hex digit, or -1 */
+static int
+go_hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * A Go number literal st[0..len) as SQL text, or a plx error when Go would
+ * reject it. Integer literals in base 16 (0x), 8 (0o or a leading 0) and 2
+ * (0b) become decimal: PostgreSQL before 16 reads 0x1F as 0 followed by a
+ * column alias, and 017 as decimal. Digit separators (_) are dropped.
+ * Floats keep their text; hexadecimal floats and imaginary literals are not
+ * supported.
+ */
+static char *
+go_number(Go *g, const char *st, int len, int line)
+{
+	char	   *d = palloc(len + 1);
+	int			n = 0,
+				i,
+				base = 10,
+				from = 0;
+	uint64		v = 0;
+	bool		isfloat = false;
+
+	for (i = 0; i < len; i++)				/* drop digit separators */
+		if (st[i] != '_')
+			d[n++] = st[i];
+	d[n] = '\0';
+	if (n > 1 && d[0] == '0' && (d[1] == 'x' || d[1] == 'X'))
+		base = 16, from = 2;
+	else if (n > 1 && d[0] == '0' && (d[1] == 'o' || d[1] == 'O'))
+		base = 8, from = 2;
+	else if (n > 1 && d[0] == '0' && (d[1] == 'b' || d[1] == 'B'))
+		base = 2, from = 2;
+	else
+	{
+		for (i = 0; i < n; i++)
+			if (d[i] == '.' || d[i] == 'e' || d[i] == 'E')
+				isfloat = true;
+		if (isfloat)
+		{
+			/* digits, one '.', and an exponent with an optional sign */
+			bool		dot = false,
+						exp = false,
+						digit = false;
+
+			for (i = 0; i < n; i++)
+			{
+				char		c = d[i];
+
+				if (c >= '0' && c <= '9')
+					digit = true;
+				else if (c == '.' && !dot && !exp)
+					dot = true;
+				else if ((c == 'e' || c == 'E') && !exp && digit &&
+						 i + 1 < n)
+				{
+					exp = true;
+					if (d[i + 1] == '+' || d[i + 1] == '-')
+						i++;
+					if (i + 1 >= n)
+						break;
+				}
+				else
+					break;
+			}
+			if (i < n || !digit || (n > 0 && (d[n - 1] == 'e' || d[n - 1] == 'E' ||
+											  d[n - 1] == '+' || d[n - 1] == '-')))
+				plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+			return d;
+		}
+		if (n > 1 && d[0] == '0')
+			base = 8, from = 1;			/* legacy octal: 017 */
+	}
+	if (from >= n)
+		plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+	for (i = from; i < n; i++)
+	{
+		int			dv = go_hexval(d[i]);
+
+		if (dv < 0 || dv >= base)
+			plx_err(g->cx, line, "invalid number literal \"%s\"", pnstrdup(st, len));
+		if (v > (PG_UINT64_MAX - dv) / base)
+			plx_err(g->cx, line, "number literal \"%s\" is too large", pnstrdup(st, len));
+		v = v * base + dv;
+	}
+	if (base == 10)
+		return d;
+	return psprintf(UINT64_FORMAT, v);
+}
+
 static void
 go_lex(Go *g, const char *body)
 {
@@ -138,6 +291,7 @@ go_lex(Go *g, const char *body)
 
 	while (p < end)
 	{
+		CHECK_FOR_INTERRUPTS();
 		if (*p == '\n')
 		{
 			if (n > 0 && go_asi_kind(&t[n - 1]))		/* ASI */
@@ -243,14 +397,22 @@ go_lex(Go *g, const char *body)
 		}
 		if (GODIGIT(*p))
 		{
+			/*
+			 * Take the whole run of letters, digits and dots, so that a
+			 * letter Go would reject (12abc) is an error rather than an
+			 * identifier glued to the number. A sign continues the literal
+			 * only after a decimal exponent: in 0x1e+2 the e is a digit.
+			 */
 			const char *st = p;
+			bool		hex = (p + 1 < end && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'));
+			char	   *txt;
 
-			while (p < end && (GODIGIT(*p) || *p == '.' || *p == '_' ||
-							   *p == 'x' || *p == 'X' ||
-							   ((*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) ||
-							   (( *p == '+' || *p == '-') && (p[-1] == 'e' || p[-1] == 'E'))))
+			while (p < end && (GOALPHA(*p) || GODIGIT(*p) || *p == '.' ||
+							   (!hex && (*p == '+' || *p == '-') &&
+								(p[-1] == 'e' || p[-1] == 'E'))))
 				p++;
-			GOPUSH(GO_NUM, st, (int) (p - st));
+			txt = go_number(g, st, (int) (p - st), line);
+			GOPUSH(GO_NUM, txt, (int) strlen(txt));
 			continue;
 		}
 		if (*p == '(')
@@ -355,20 +517,79 @@ go_lex(Go *g, const char *body)
 	g->t = t;
 	g->nt = n;
 	g->pos = 0;
+
+	/* the bracket match table: one pass with a stack of open brackets */
+	{
+		int		   *stack = palloc(sizeof(int) * n);
+		int			sp = 0,
+					i;
+
+		g->mt = palloc(sizeof(int) * n);
+		for (i = 0; i < n; i++)
+		{
+			GoKind		k = t[i].kind;
+
+			g->mt[i] = -1;
+			if (k == GO_LP || k == GO_LBRACE || k == GO_LBRACK)
+				stack[sp++] = i;
+			else if ((k == GO_RP || k == GO_RBRACE || k == GO_RBRACK) && sp > 0)
+				g->mt[stack[--sp]] = i;
+		}
+		pfree(stack);
+		g->kmemo = palloc0(n);
+		g->kgen = palloc0(sizeof(int) * n);
+		g->gen = 1;
+	}
 #undef GOPUSH
 #undef GOALPHA
 #undef GODIGIT
 }
 
-/* emit a Go string/rune literal as a SQL string literal */
+/* append one decoded byte to a SQL literal, doubling a quote */
 static void
-go_emit_str(GoTok *tk, StringInfo out)
+go_str_byte(Go *g, GoTok *tk, StringInfo out, unsigned int c)
+{
+	if (c == 0)
+		plx_err(g->cx, tk->line, "a string literal cannot contain a NUL character");
+	if (c == '\'')
+		appendStringInfoString(out, "''");
+	else
+		appendStringInfoChar(out, (char) c);
+}
+
+/* append one Unicode code point to a SQL literal, in the server encoding */
+static void
+go_str_cp(Go *g, GoTok *tk, StringInfo out, pg_wchar cp)
+{
+	unsigned char buf[64];
+
+	if (cp < 0x80)
+	{
+		go_str_byte(g, tk, out, cp);
+		return;
+	}
+	pg_unicode_to_server(cp, buf);
+	appendStringInfoString(out, (char *) buf);
+}
+
+/*
+ * emit a Go string/rune literal as a SQL string literal, decoding every Go
+ * escape: \a \b \f \n \r \t \v \\ \' \", \xHH and \NNN (one byte each in a
+ * string, a code point in a rune, as in Go), and \uHHHH and \UHHHHHHHH (a
+ * Unicode code point, in the server encoding). Go
+ * rejects any other escape, and so does plx. A decoded quote is doubled, so
+ * an escape cannot end the SQL literal.
+ */
+static void
+go_emit_str(Go *g, GoTok *tk, StringInfo out)
 {
 	char		q = tk->s[0];
 	const char *s = tk->s + 1,
 			   *e = tk->s + tk->len - 1;
+	int			start;
 
 	appendStringInfoChar(out, '\'');
+	start = out->len;
 	if (q == '`')									/* raw: no escapes */
 	{
 		while (s < e)
@@ -392,10 +613,63 @@ go_emit_str(GoTok *tk, StringInfo out)
 					case 'n': appendStringInfoChar(out, '\n'); break;
 					case 't': appendStringInfoChar(out, '\t'); break;
 					case 'r': appendStringInfoChar(out, '\r'); break;
+					case 'a': appendStringInfoChar(out, '\a'); break;
+					case 'b': appendStringInfoChar(out, '\b'); break;
+					case 'f': appendStringInfoChar(out, '\f'); break;
+					case 'v': appendStringInfoChar(out, '\v'); break;
 					case '\\': appendStringInfoChar(out, '\\'); break;
 					case '\'': appendStringInfoString(out, "''"); break;
 					case '"': appendStringInfoChar(out, '"'); break;
-					default: appendStringInfoChar(out, *s); break;
+					case 'x':
+						if (s + 2 >= e || go_hexval(s[1]) < 0 || go_hexval(s[2]) < 0)
+							plx_err(g->cx, tk->line, "\\x in a string literal needs two hexadecimal digits");
+						if (q == '\'')
+							go_str_cp(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
+						else
+							go_str_byte(g, tk, out, go_hexval(s[1]) * 16 + go_hexval(s[2]));
+						s += 2;
+						break;
+					case '0': case '1': case '2': case '3':
+					case '4': case '5': case '6': case '7':
+						{
+							unsigned int v;
+
+							if (s + 2 >= e || s[1] < '0' || s[1] > '7' ||
+								s[2] < '0' || s[2] > '7')
+								plx_err(g->cx, tk->line, "an octal escape in a string literal needs three octal digits");
+							v = (s[0] - '0') * 64 + (s[1] - '0') * 8 + (s[2] - '0');
+							if (v > 255)
+								plx_err(g->cx, tk->line, "octal escape value in a string literal is above 255");
+							if (q == '\'')
+								go_str_cp(g, tk, out, v);
+							else
+								go_str_byte(g, tk, out, v);
+							s += 2;
+						}
+						break;
+					case 'u':
+					case 'U':
+						{
+							int			n = (*s == 'u') ? 4 : 8,
+										k;
+							pg_wchar	cp = 0;
+
+							if (s + n >= e)
+								plx_err(g->cx, tk->line, "\\u needs four and \\U eight hexadecimal digits");
+							for (k = 1; k <= n; k++)
+							{
+								if (go_hexval(s[k]) < 0)
+									plx_err(g->cx, tk->line, "\\u needs four and \\U eight hexadecimal digits");
+								cp = cp * 16 + go_hexval(s[k]);
+							}
+							if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+								plx_err(g->cx, tk->line, "invalid Unicode code point in a string literal");
+							go_str_cp(g, tk, out, cp);
+							s += n;
+						}
+						break;
+					default:
+						plx_err(g->cx, tk->line, "unknown escape sequence in a string literal");
 				}
 				s++;
 				continue;
@@ -406,8 +680,91 @@ go_emit_str(GoTok *tk, StringInfo out)
 				appendStringInfoChar(out, *s);
 			s++;
 		}
+		/* \x and octal escapes write single bytes; the result must still be text */
+		if (!pg_verifymbstr(out->data + start, out->len - start, true))
+			plx_err(g->cx, tk->line, "a string literal's escapes do not form valid text in the database encoding");
 	}
 	appendStringInfoChar(out, '\'');
+}
+
+/* true for a rune literal token ('x'), as opposed to a string literal */
+static bool
+go_is_rune(const GoTok *tk)
+{
+	return tk->kind == GO_STR && tk->s[0] == '\'';
+}
+
+/*
+ * The value of a rune literal: its Unicode code point, as in Go, where a rune
+ * is an int32. The literal is decoded as go_emit_str decodes it, and must
+ * hold exactly one character.
+ */
+static int32
+go_rune_value(Go *g, GoTok *tk)
+{
+	StringInfoData raw;
+	char	   *c;
+	int			n = 0,
+				i;
+	int32		cp;
+
+	initStringInfo(&raw);
+	go_emit_str(g, tk, &raw);	/* a quoted SQL literal, escapes decoded */
+	c = palloc(raw.len);
+	for (i = 1; i + 1 < raw.len; i++)	/* drop the quotes, undouble '' */
+	{
+		c[n++] = raw.data[i];
+		if (raw.data[i] == '\'')
+			i++;
+	}
+	c[n] = '\0';
+	if (n == 0 || pg_mbstrlen_with_len(c, n) != 1)
+		plx_err(g->cx, tk->line, "a rune literal must hold exactly one character");
+	if ((unsigned char) c[0] < 0x80)
+		cp = (unsigned char) c[0];
+	else
+	{
+		unsigned char *u = (unsigned char *) pg_server_to_any(c, n, PG_UTF8);
+
+		cp = (int32) utf8_to_unicode(u);
+	}
+	pfree(raw.data);
+	pfree(c);
+	return cp;
+}
+
+/*
+ * Reject a format string that uses an explicit argument index (%[n]d). No
+ * lowering models it: each would consume '[' as the verb, or take the
+ * arguments in order, and print the wrong values. fn names the fmt function
+ * for the message. Every path that reads a format string calls this.
+ */
+static void
+go_check_argindex(Go *g, GoTok *tk, const char *fn)
+{
+	StringInfoData raw;
+	int			i;
+
+	initStringInfo(&raw);
+	go_emit_str(g, tk, &raw);	/* quoted, escapes decoded */
+	for (i = 1; i + 1 < raw.len; i++)
+	{
+		int			j = i + 1;
+
+		if (raw.data[i] != '%')
+			continue;
+		if (raw.data[j] == '%')
+		{
+			i++;
+			continue;
+		}
+		while (j + 1 < raw.len && strchr("-+ #0123456789.", raw.data[j]))
+			j++;
+		if (raw.data[j] == '[')
+			plx_err(g->cx, tk->line,
+					"fmt.%s explicit argument indexes (%%[n]) are not supported", fn);
+	}
+	pfree(raw.data);
 }
 
 /* emit a Go format string as one SQL format() accepts.
@@ -421,13 +778,13 @@ go_emit_str(GoTok *tk, StringInfo out)
  * format() at run time.
  */
 static void
-go_emit_format_str(GoTok *tk, StringInfo out)
+go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 {
 	StringInfoData raw;
 	int			i;
 
 	initStringInfo(&raw);
-	go_emit_str(tk, &raw);		/* a quoted SQL literal, escapes decoded */
+	go_emit_str(g, tk, &raw);	/* a quoted SQL literal, escapes decoded */
 
 	for (i = 0; i < raw.len; i++)
 	{
@@ -468,6 +825,15 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 			while (j < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
 				j++;
 		}
+
+		/*
+		 * A * width or precision takes its value from an argument, which
+		 * format() cannot model: every later directive would take the wrong
+		 * argument.
+		 */
+		if (j < raw.len && raw.data[j] == '*')
+			plx_err(g->cx, tk->line,
+					"fmt.Sprintf with a * width or precision needs exactly one argument for each directive and each *, and at most 16");
 		if (j >= raw.len ||
 			!((raw.data[j] >= 'a' && raw.data[j] <= 'z') ||
 			  (raw.data[j] >= 'A' && raw.data[j] <= 'Z')))
@@ -478,6 +844,13 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 			continue;
 		}
 
+		/*
+		 * format() renders every operand as text, which would print a rune's
+		 * number for %c, not its character.
+		 */
+		if (raw.data[j] == 'c')
+			plx_err(g->cx, tk->line,
+					"fmt.Sprintf with %%c needs exactly one argument for each directive, and at most 16");
 		appendStringInfoChar(out, '%');
 		if (dash)
 			appendStringInfoChar(out, '-');
@@ -487,6 +860,60 @@ go_emit_format_str(GoTok *tk, StringInfo out)
 		i = j;
 	}
 	pfree(raw.data);
+}
+
+/*
+ * Index of the verb of the fmt directive whose '%' is at raw->data[pct], after
+ * skipping flags, width and precision (each may be a '*' that takes its value
+ * from an argument); -1 when that character is not an ASCII letter (or the
+ * directive runs into the closing quote).
+ */
+static int
+go_sprintf_verb(StringInfo raw, int pct)
+{
+	int			j = pct + 1;
+
+	while (j + 1 < raw->len && (raw->data[j] == '-' || raw->data[j] == '+' ||
+								raw->data[j] == ' ' || raw->data[j] == '#' ||
+								raw->data[j] == '0'))
+		j++;
+	if (j + 1 < raw->len && raw->data[j] == '*')
+		j++;					/* the width comes from an argument */
+	else
+		while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+			j++;
+	if (j + 1 < raw->len && raw->data[j] == '.')
+	{
+		j++;
+		if (j + 1 < raw->len && raw->data[j] == '*')
+			j++;				/* the precision comes from an argument */
+		else
+			while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+				j++;
+	}
+	if (j + 1 >= raw->len)
+		return -1;
+	if (!((raw->data[j] >= 'a' && raw->data[j] <= 'z') ||
+		  (raw->data[j] >= 'A' && raw->data[j] <= 'Z')))
+		return -1;
+	return j;
+}
+
+/*
+ * Emit the argument [a,b) of a fmt directive. For %c, Go prints the character
+ * whose code point the integer argument holds (a rune), so wrap it in chr().
+ */
+static void
+go_emit_verb_arg(Go *g, int a, int b, bool isc, StringInfo out)
+{
+	if (!isc)
+	{
+		go_emit_range(g, a, b, out);
+		return;
+	}
+	appendStringInfoString(out, "chr((");
+	go_emit_range(g, a, b, out);
+	appendStringInfoString(out, ")::integer)");
 }
 
 /* fmt.Sprintf with a literal format string, lowered to a || chain.
@@ -513,6 +940,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 				ai = 0,
 				i,
 				d,
+				v,
 				seg;
 	bool		first = true;
 	bool		diag = g->cx->diag_msg;
@@ -553,7 +981,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	}
 
 	initStringInfo(&raw);
-	go_emit_str(&g->t[lp + 1], &raw);		/* quoted, escapes decoded */
+	go_emit_str(g, &g->t[lp + 1], &raw);	/* quoted, escapes decoded */
 
 	/* count directives so a mismatch can fall back before emitting anything */
 	for (i = 1; i + 1 < raw.len; i++)
@@ -565,7 +993,21 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			i++;
 			continue;
 		}
+		/*
+		 * The verb must be a letter. raw is already a SQL literal ('
+		 * doubled), so a quote here would otherwise be consumed as the verb
+		 * and leave half of a '' pair unescaped in the output; fall back to
+		 * the format() path, which validates verbs, instead.
+		 */
+		if ((v = go_sprintf_verb(&raw, i)) < 0)
+		{
+			pfree(raw.data);
+			return false;
+		}
 		ndir++;
+		for (d = i + 1; d < v; d++)	/* a * width or precision takes one */
+			if (raw.data[d] == '*')
+				ndir++;
 	}
 	if (ndir != nargs)
 	{
@@ -579,10 +1021,13 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	for (i = 1; i + 1 < raw.len; i++)
 	{
 		char		c = raw.data[i];
-		bool		dash = false;
+		bool		dash = false,
+					isc,
+					starw = false;
 		int			j,
 					wstart,
-					wlen;
+					wlen,
+					wa = -1;
 
 		if (c != '%')
 		{
@@ -607,14 +1052,28 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			j++;
 		}
 		wstart = j;
-		while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+		if (j + 1 < raw.len && raw.data[j] == '*')
+		{
+			starw = true;
+			wa = ai++;			/* the width is the next argument */
 			j++;
+		}
+		else
+			while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+				j++;
 		wlen = j - wstart;
 		if (j + 1 < raw.len && raw.data[j] == '.')
 		{
 			j++;
-			while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+			if (j + 1 < raw.len && raw.data[j] == '*')
+			{
+				/* precision is dropped (see above), but it takes an argument */
+				ai++;
 				j++;
+			}
+			else
+				while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+					j++;
 		}
 
 		/* flush the literal run before the value */
@@ -633,16 +1092,59 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			appendStringInfoString(out, " || ");
 		if (diag)
 			appendStringInfoString(out, "COALESCE(");
-		if (wlen > 0)
-			appendStringInfoString(out, dash ? "rpad(" : "lpad(");
-		appendStringInfoChar(out, '(');
-		go_emit_range(g, as[ai], ae[ai], out);
-		appendStringInfoString(out, ")::text");
-		if (wlen > 0)
+		isc = (raw.data[j] == 'c');
+		if (starw)
 		{
-			appendStringInfoString(out, ", ");
+			/*
+			 * A width from an argument: as in Go, a negative width pads on
+			 * the right, like the '-' flag. Value and width are evaluated
+			 * once, in a subquery. Its OFFSET 0 keeps the planner from
+			 * pulling it up, which would copy the value into each place it
+			 * is used, so that nested ones grow exponentially.
+			 */
+			appendStringInfoString(out, "(SELECT CASE WHEN __plx_n < 0 THEN "
+								   "rpad(__plx_v, greatest(-__plx_n, length(__plx_v))) ELSE ");
+			appendStringInfoString(out, dash ? "rpad" : "lpad");
+			appendStringInfoString(out, "(__plx_v, greatest(__plx_n, length(__plx_v))) END "
+								   "FROM (SELECT (");
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text AS __plx_v, (");
+			go_emit_range(g, as[wa], ae[wa], out);
+			appendStringInfoString(out, ")::integer AS __plx_n OFFSET 0) AS __plx_w)");
+		}
+		else if (wlen == 0)
+		{
+			appendStringInfoChar(out, '(');
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text");
+		}
+		else if (ae[ai] - as[ai] == 1 && g->t[as[ai]].kind != GO_LP)
+		{
+			/*
+			 * A Go width is a minimum and never cuts, but lpad/rpad cut a
+			 * longer string to the width, so pad to greatest(width, length).
+			 * A single-token operand can safely be written twice.
+			 */
+			appendStringInfoString(out, dash ? "rpad((" : "lpad((");
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text, greatest(");
 			appendBinaryStringInfo(out, raw.data + wstart, wlen);
-			appendStringInfoChar(out, ')');
+			appendStringInfoString(out, ", length((");
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text)))");
+		}
+		else
+		{
+			/*
+			 * any other operand is evaluated once, in a subquery that OFFSET
+			 * 0 keeps the planner from pulling up and copying
+			 */
+			appendStringInfoString(out, dash ? "(SELECT rpad(__plx_v, greatest("
+								   : "(SELECT lpad(__plx_v, greatest(");
+			appendBinaryStringInfo(out, raw.data + wstart, wlen);
+			appendStringInfoString(out, ", length(__plx_v))) FROM (SELECT (");
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text AS __plx_v OFFSET 0) AS __plx_w)");
 		}
 		if (diag)
 			appendStringInfoString(out, ", '')");
@@ -702,9 +1204,16 @@ go_read_type(Go *g, StringInfo dest)
 
 	while (go_cur(g)->kind == GO_OP && go_cur(g)->len == 1 && go_cur(g)->s[0] == '*')
 		g->pos++;								/* pointer: drop the * */
+	g->arrlen = -1;
 	if (go_cur(g)->kind == GO_LBRACK)			/* []T or [N]T -> T[] */
 	{
+		GoTok	   *n;
+
 		g->pos++;
+		n = go_cur(g);
+		if (n->kind == GO_NUM && g->t[g->pos + 1].kind == GO_RBRACK &&
+			n->len <= 9 && strspn(n->s, "0123456789") >= (size_t) n->len)
+			g->arrlen = atoi(pnstrdup(n->s, n->len));
 		while (go_cur(g)->kind != GO_RBRACK && go_cur(g)->kind != GO_EOF)
 			g->pos++;							/* skip an optional array length */
 		if (go_cur(g)->kind == GO_RBRACK)
@@ -733,6 +1242,20 @@ go_read_type(Go *g, StringInfo dest)
 		appendStringInfoString(dest, "[]");
 }
 
+/* true when a Go numeric literal is a float (has a '.' or a decimal exponent) */
+static bool
+go_num_is_float(const GoTok *tk)
+{
+	int			i;
+
+	if (tk->len > 1 && tk->s[0] == '0' && (tk->s[1] == 'x' || tk->s[1] == 'X'))
+		return false;			/* hex: 'e' and 'E' are digits */
+	for (i = 0; i < tk->len; i++)
+		if (tk->s[i] == '.' || tk->s[i] == 'e' || tk->s[i] == 'E')
+			return true;
+	return false;
+}
+
 /* infer a PostgreSQL type from an initializer range [a,b); NULL if unknown */
 static const char *
 go_infer_type(Go *g, int a, int b)
@@ -742,17 +1265,9 @@ go_infer_type(Go *g, int a, int b)
 		GoTok	   *tk = &g->t[a];
 
 		if (tk->kind == GO_NUM)
-		{
-			int			i;
-
-			for (i = 0; i < tk->len; i++)
-				if (tk->s[i] == '.' ||
-					((tk->s[i] == 'e' || tk->s[i] == 'E') && tk->len > 2 && tk->s[1] != 'x'))
-					return "double precision";
-			return "integer";
-		}
+			return go_num_is_float(tk) ? "double precision" : "integer";
 		if (tk->kind == GO_STR)
-			return "text";
+			return go_is_rune(tk) ? "integer" : "text";
 		if (go_ci(tk, "true") || go_ci(tk, "false"))
 			return "boolean";
 		return NULL;
@@ -777,16 +1292,29 @@ go_infer_type(Go *g, int a, int b)
 		if (tc)
 			return tc;
 	}
+	/* a call that returns a string, or a concatenation */
+	if (go_expr_kind(g, a, b) == 's')
+		return "text";
 	return NULL;
 }
 
-/* index of the ')' / '}' / ']' matching the opener at idx, within [.,limit) */
+/*
+ * index of the ')' / '}' / ']' matching the opener at idx, within [.,limit).
+ * Brackets of any kind count alike. For an opener, the table go_lex built
+ * gives the same answer as the scan below, in constant time.
+ */
 static int
 go_match(Go *g, int idx, int limit)
 {
 	int			depth = 0,
 				i;
+	GoKind		k0;
 
+	if (idx >= limit)
+		return -1;
+	k0 = g->t[idx].kind;
+	if (k0 == GO_LP || k0 == GO_LBRACE || k0 == GO_LBRACK)
+		return (g->mt[idx] >= 0 && g->mt[idx] < limit) ? g->mt[idx] : -1;
 	for (i = idx; i < limit; i++)
 	{
 		GoKind		k = g->t[i].kind;
@@ -800,6 +1328,200 @@ go_match(Go *g, int idx, int limit)
 	return -1;
 }
 
+/*
+ * What the operand [a,b) of an integer conversion is known to be: 'i' for an
+ * integer (an integer literal, or a local or parameter of an integer type),
+ * 'f' for a value trunc() handles exactly (a float or numeric literal, local
+ * or parameter), and 0 when plx cannot tell (an expression, a call, a row
+ * field). A row field carries no Go type, so it can be anything.
+ */
+static char
+go_operand_kind(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	PlxLocal2  *l;
+	int			i;
+
+	if (b - a != 1)
+		return 0;
+	if (tk->kind == GO_NUM)
+		return go_num_is_float(tk) ? 'f' : 'i';
+	if (go_is_rune(tk))
+		return 'i';
+	if (tk->kind != GO_WORD)
+		return 0;
+	l = plx_local_find(g->cx, tk->s, tk->len);
+	if (l)
+	{
+		if (!l->typ)
+			return 0;
+		if (strcmp(l->typ, "integer") == 0 || strcmp(l->typ, "smallint") == 0 ||
+			strcmp(l->typ, "bigint") == 0)
+			return 'i';
+		if (strcmp(l->typ, "double precision") == 0 ||
+			strcmp(l->typ, "real") == 0 || strcmp(l->typ, "numeric") == 0)
+			return 'f';
+		return 0;
+	}
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return 0;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+		{
+			Oid			t = g->cx->meta->argtypes[i];
+
+			if (t == INT2OID || t == INT4OID || t == INT8OID)
+				return 'i';
+			if (t == FLOAT4OID || t == FLOAT8OID || t == NUMERICOID)
+				return 'f';
+			return 0;
+		}
+	}
+	return 0;
+}
+
+static bool go_op_is(const GoTok *tk, const char *op);
+static int	go_binop_prec(const GoTok *tk);
+static int	go_split_binops(Go *g, int a, int b, int *ops);
+static char go_name_kind(Go *g, const GoTok *tk);
+static void go_kind_enter(Go *g);
+static void go_kind_leave(Go *g);
+static char go_int_class(Go *g, int a, int b);
+
+/* go_int_class of a value of the PostgreSQL type typ */
+static char
+go_typ_int_class(const char *typ)
+{
+	if (!typ)
+		return 0;
+	if (strcmp(typ, "integer") == 0 || strcmp(typ, "smallint") == 0 ||
+		strcmp(typ, "bigint") == 0)
+		return 'i';
+	if (strcmp(typ, "real") == 0 || strcmp(typ, "double precision") == 0 ||
+		strcmp(typ, "numeric") == 0 || strcmp(typ, "boolean") == 0)
+		return 'x';
+	return 0;
+}
+
+/*
+ * go_int_class of one operand [a,b) with no top-level binary operator: a
+ * literal, a name, a bracketed expression, a slice element, a conversion or a
+ * call plx maps.
+ */
+static char
+go_int_operand_class(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	char		c;
+
+	c = go_operand_kind(g, a, b);
+	if (c)
+		return c == 'i' ? 'i' : 'x';
+	if (b - a == 1)
+	{
+		if (go_ci(tk, "true") || go_ci(tk, "false"))
+			return 'x';
+		/* go_operand_kind has typed the integer and float names already */
+		if (tk->kind == GO_WORD && go_name_kind(g, tk) == 'n')
+			return 'x';
+		return 0;
+	}
+	if (go_op_is(tk, "!"))
+		return 'x';
+	/* a bracketed expression */
+	if (tk->kind == GO_LP && go_match(g, a, b) == b - 1)
+	{
+		go_kind_enter(g);
+		c = go_int_class(g, a + 1, b - 1);
+		go_kind_leave(g);
+		return c;
+	}
+	/* an element s[i] of a slice local */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LBRACK &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+		int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+		if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+			return go_typ_int_class(pnstrdup(l->typ, tl - 2));
+		return 0;
+	}
+	/* pkg.Func(...): only the calls plx maps */
+	if (tk->kind == GO_WORD && b - a >= 5 && g->t[a + 1].kind == GO_DOT &&
+		g->t[a + 2].kind == GO_WORD && g->t[a + 3].kind == GO_LP &&
+		go_match(g, a + 3, b) == b - 1)
+	{
+		GoTok	   *m = &g->t[a + 2];
+
+		if (go_ci(tk, "strconv") && go_ci(m, "Atoi"))
+			return 'i';
+		if (go_ci(tk, "strings") && go_ci(m, "Contains"))
+			return 'x';
+		if (go_ci(tk, "math"))
+			return 'x';
+		return 0;
+	}
+	/* T(x) for a base type T, and len(x) / cap(x) */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LP &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		const char *conv = go_base_type(tk->s, tk->len);
+
+		if (conv)
+			return go_typ_int_class(conv);
+		if (go_ci(tk, "len") || go_ci(tk, "cap"))
+			return 'i';
+	}
+	return 0;
+}
+
+/*
+ * Whether [a,b) is an integer, which string(x) needs to know: 'i' when plx can
+ * see it is an integer, 'x' when it can see it is a float, a numeric or a
+ * bool, and 0 when it cannot tell (a row field, an unmapped call). Operands
+ * joined by arithmetic or bitwise operators are an integer when all of them
+ * are, and a float, numeric or bool when any of them is.
+ */
+static char
+go_int_class(Go *g, int a, int b)
+{
+	int		   *ops;
+	int			n,
+				k;
+	char		r = 'i';
+
+	/* unary signs and ^ keep the class */
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+") ||
+					 go_op_is(&g->t[a], "^")))
+		a++;
+	if (b <= a)
+		return 0;
+	n = go_split_binops(g, a, b, NULL);
+	if (n < 0)
+		return 0;
+	if (n == 0)
+		return go_int_operand_class(g, a, b);
+	ops = palloc(sizeof(int) * n);
+	go_split_binops(g, a, b, ops);
+	for (k = 0; k < n; k++)
+		if (go_binop_prec(&g->t[ops[k]]) <= 3)
+			r = 'x';			/* a comparison, && or ||: a bool */
+	for (k = 0; k <= n && r != 'x'; k++)
+	{
+		char		c = go_int_class(g, k == 0 ? a : ops[k - 1] + 1,
+									 k == n ? b : ops[k]);
+
+		if (c != 'i')
+			r = c;
+	}
+	pfree(ops);
+	return r;
+}
+
 /* a stdlib / builtin / type-conversion call at index i; sets *ni on success */
 static bool
 go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
@@ -808,6 +1530,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	int			lp,
 				close;
 	const char *conv;
+	char		strc = 0;		/* go_int_class of the operand of string(x) */
 
 	/* qualified call: pkg.Method(...) */
 	if (tk->kind == GO_WORD && i + 2 < b && g->t[i + 1].kind == GO_DOT &&
@@ -843,6 +1566,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 		if (go_ci(pkg, "fmt") && go_ci(meth, "Sprintf") &&
 			close > lp + 1 && g->t[lp + 1].kind == GO_STR)
 		{
+			go_check_argindex(g, &g->t[lp + 1], "Sprintf");
 			if (go_emit_sprintf_concat(g, lp, close, out))
 			{
 				*ni = close + 1;
@@ -850,7 +1574,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 			}
 			go_sp(out);
 			appendStringInfoString(out, "format(");
-			go_emit_format_str(&g->t[lp + 1], out);
+			go_emit_format_str(g, &g->t[lp + 1], out);
 			if (lp + 2 < close)
 				go_emit_range(g, lp + 2, close, out);
 			appendStringInfoChar(out, ')');
@@ -867,7 +1591,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 				/* strconv.Itoa(x) -> (x)::text ; strconv.Atoi(x) -> (x)::integer */
 				if (r[k].pg == NULL)
 				{
-					bool		toint = (meth->len == 4);	/* "Atoi" */
+					bool		toint = (strncmp(meth->s, "Atoi", 4) == 0);
 
 					go_sp(out);
 					appendStringInfoChar(out, '(');
@@ -921,11 +1645,63 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	if (close < 0)
 		return false;
 
-	/* type conversion T(x) -> (x)::T for a base type T */
+	/*
+	 * type conversion T(x) -> (x)::T for a base type T. Go converts a float
+	 * to an integer type by truncating toward zero, but a SQL cast rounds, so
+	 * an integer conversion of an operand not known to be an integer goes
+	 * through trunc() first.
+	 */
 	conv = go_base_type(tk->s, tk->len);
-	if (conv)
+	/*
+	 * string(x) of an integer (such as a rune) is the character with that
+	 * code point in Go, not its decimal digits. Go rejects string(x) of a
+	 * float or a bool, and so does plx, rather than print a character for it.
+	 */
+	if (conv && strcmp(conv, "text") == 0)
+		strc = go_int_class(g, lp + 1, close);
+	if (strc == 'x')
+		plx_err(g->cx, tk->line, "string(x) of a float, numeric or bool value "
+				"does not compile in Go; format it with fmt.Sprintf");
+	if (strc == 'i')
 	{
 		go_sp(out);
+		appendStringInfoString(out, "chr((");
+		go_emit_range(g, lp + 1, close, out);
+		appendStringInfoString(out, ")::integer)");
+		*ni = close + 1;
+		return true;
+	}
+	if (conv)
+	{
+		char		kind = 'i';
+
+		if (strcmp(conv, "integer") == 0 || strcmp(conv, "smallint") == 0 ||
+			strcmp(conv, "bigint") == 0)
+			kind = go_operand_kind(g, lp + 1, close);
+		go_sp(out);
+		if (kind == 0)
+		{
+			/*
+			 * The operand's type is known only at run time. Evaluate it once
+			 * and choose by its type: an integer casts exactly, a float
+			 * truncates as a float, and anything else (numeric, text)
+			 * truncates as numeric, which is exact at any size. OFFSET 0
+			 * keeps the planner from pulling the subquery up and copying the
+			 * operand into each of its uses.
+			 */
+			appendStringInfoString(out, "(SELECT CASE WHEN pg_typeof(__plx_v) IN "
+								   "('smallint'::regtype, 'integer'::regtype, 'bigint'::regtype) ");
+			appendStringInfo(out, "THEN __plx_v::%s WHEN pg_typeof(__plx_v) IN "
+							 "('real'::regtype, 'double precision'::regtype) ", conv);
+			appendStringInfo(out, "THEN trunc(__plx_v::double precision)::%s "
+							 "ELSE trunc(__plx_v::numeric)::%s END FROM (SELECT (", conv, conv);
+			go_emit_range(g, lp + 1, close, out);
+			appendStringInfoString(out, ") AS __plx_v OFFSET 0) AS __plx_n)");
+			*ni = close + 1;
+			return true;
+		}
+		if (kind == 'f')
+			appendStringInfoString(out, "trunc");
 		appendStringInfoChar(out, '(');
 		go_emit_range(g, lp + 1, close, out);
 		appendStringInfo(out, ")::%s", conv);
@@ -959,9 +1735,538 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	return false;
 }
 
-/* emit tokens [a,b) as a plpgsql expression */
+/* token ends an operand, so an operator after it is binary */
+static bool
+go_operand_end(const GoTok *tk)
+{
+	return tk->kind == GO_WORD || tk->kind == GO_NUM || tk->kind == GO_STR ||
+		tk->kind == GO_RP || tk->kind == GO_RBRACK || tk->kind == GO_RBRACE;
+}
+
+static bool
+go_op_is(const GoTok *tk, const char *op)
+{
+	int			l = (int) strlen(op);
+
+	return tk->kind == GO_OP && tk->len == l && strncmp(tk->s, op, l) == 0;
+}
+
+/* Go precedence of a binary operator token (5 binds tightest); 0 if none */
+static int
+go_binop_prec(const GoTok *tk)
+{
+	static const char *const p5[] = {"*", "/", "%", "<<", ">>", "&", "&^", NULL};
+	static const char *const p4[] = {"+", "-", "|", "^", NULL};
+	static const char *const p3[] = {"==", "!=", "<", "<=", ">", ">=", NULL};
+	int			k;
+
+	for (k = 0; p5[k]; k++)
+		if (go_op_is(tk, p5[k]))
+			return 5;
+	for (k = 0; p4[k]; k++)
+		if (go_op_is(tk, p4[k]))
+			return 4;
+	for (k = 0; p3[k]; k++)
+		if (go_op_is(tk, p3[k]))
+			return 3;
+	if (go_op_is(tk, "&&"))
+		return 2;
+	if (go_op_is(tk, "||"))
+		return 1;
+	return 0;
+}
+
+static bool
+go_is_bitop(const GoTok *tk)
+{
+	return go_op_is(tk, "<<") || go_op_is(tk, ">>") || go_op_is(tk, "&") ||
+		go_op_is(tk, "|") || go_op_is(tk, "^") || go_op_is(tk, "&^");
+}
+
+/*
+ * True when [a,b) uses a binary bitwise operator outside any bracket. SQL
+ * ranks << >> & | below + and -, while Go ranks << >> & &^ with * and | ^
+ * with +; such a range is emitted fully parenthesized (go_emit_prec).
+ */
+static bool
+go_needs_prec(Go *g, int a, int b)
+{
+	int			i,
+				depth = 0;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && i > a && go_is_bitop(&g->t[i]) &&
+				 go_operand_end(&g->t[i - 1]))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * SQL precedence class of a Go binary operator. Operators of one class
+ * associate to the left in SQL as in Go, so a run of them needs no brackets
+ * of its own. 'c' (comparison) never chains in SQL, so it gets brackets each
+ * time.
+ */
+static char
+go_sql_class(const GoTok *tk)
+{
+	if (go_op_is(tk, "*") || go_op_is(tk, "/") || go_op_is(tk, "%"))
+		return 'm';
+	if (go_op_is(tk, "+") || go_op_is(tk, "-"))
+		return 'a';
+	if (go_op_is(tk, "&&"))
+		return 'A';
+	if (go_op_is(tk, "||"))
+		return 'O';
+	if (go_binop_prec(tk) == 3)
+		return 'c';
+	return 'o';					/* << >> & &^ | ^: SQL's "other" operators */
+}
+
+/*
+ * [a,b) is an integer constant expression: integer and rune literals and
+ * named integer constants joined by arithmetic and bitwise operators, with
+ * unary signs and brackets. It holds no variable, call or float, so Go types
+ * it by its context.
+ */
+static bool
+go_int_const(Go *g, int a, int b)
+{
+	static const char *const ops[] = {
+		"+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^", "&^", NULL
+	};
+	bool		lit = false;
+	int			i,
+				k;
+
+	for (i = a; i < b; i++)
+	{
+		GoTok	   *tk = &g->t[i];
+
+		CHECK_FOR_INTERRUPTS();
+		if ((tk->kind == GO_NUM && !go_num_is_float(tk)) || go_is_rune(tk))
+		{
+			lit = true;
+			continue;
+		}
+		/*
+		 * A named integer constant declared without a type (const mask =
+		 * 0xFF) is untyped too. One declared with a type (const m int32 = 3)
+		 * has that type, as in Go.
+		 */
+		if (tk->kind == GO_WORD)
+		{
+			PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+
+			if (l && l->is_const && l->untyped && go_typ_int_class(l->typ) == 'i')
+			{
+				lit = true;
+				continue;
+			}
+		}
+		if (tk->kind == GO_LP || tk->kind == GO_RP)
+			continue;
+		for (k = 0; ops[k]; k++)
+			if (go_op_is(tk, ops[k]))
+				break;
+		if (!ops[k])
+			return false;
+	}
+	return lit;
+}
+
+/*
+ * A shift whose count is not a small literal is emitted as a subquery that
+ * evaluates the value (__plx_a) and the count (__plx_c) once each and gives
+ * Go's result for every count. SQL takes the count mod 64 for a bigint and
+ * mod 32 for a smallint or integer, so 1 << 64 would be 1; Go gives 0 for <<,
+ * and 0 or -1 for >>. A negative count panics in Go, and fails here. plx maps
+ * Go's 64-bit int to a 32-bit integer, so an integer is shifted as a bigint
+ * and cast back: a shift that leaves the range of an int fails with "integer
+ * out of range" for every count. A bigint or smallint shift drops the bits
+ * that leave its width, as Go's int64 and int16 do. Neither error arm can be folded into an error while
+ * the planner simplifies the CASE, even with a constant value and count, as
+ * custom plans have: each one depends on || or pg_typeof(), which are stable.
+ * GO_SHIFT_WIDTH is the width of the value in bits. OFFSET 0 keeps the
+ * planner from pulling the subquery up, which would copy the value into each
+ * place __plx_a appears: shifts nested n deep would then grow as 6^n.
+ */
+#define GO_MAX_GUARDS 64
+#define GO_GUARDS_MSG "too many shifts by a count that is not a literal, nested in one another; split the expression"
+#define GO_SHIFT_WIDTH "CASE WHEN pg_typeof(__plx_a) = 'bigint'::regtype THEN 64 ELSE 32 END"
+static const char GO_SHL_OPEN[] =
+"(SELECT CASE WHEN __plx_c IS NULL THEN NULL"
+" WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
+" WHEN __plx_c < " GO_SHIFT_WIDTH " THEN CASE WHEN pg_typeof(__plx_a) = 'integer'::regtype"
+" THEN (__plx_a::bigint << __plx_c::integer)::integer ELSE __plx_a << __plx_c::integer END"
+" WHEN __plx_a = 0 OR pg_typeof(__plx_a) IN ('bigint'::regtype, 'smallint'::regtype) THEN __plx_a & 0"
+" ELSE (__plx_a::bigint << " GO_SHIFT_WIDTH ")::integer"
+" END FROM (SELECT (";
+static const char GO_SHR_OPEN[] =
+"(SELECT CASE WHEN __plx_c IS NULL THEN NULL"
+" WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
+" ELSE __plx_a >> least(__plx_c, " GO_SHIFT_WIDTH " - 1)::integer"
+" END FROM (SELECT (";
+static const char GO_SHIFT_MID[] = ") AS __plx_a, (";
+static const char GO_SHIFT_CLOSE[] = ") AS __plx_c OFFSET 0) AS __plx_s)";
+
+/*
+ * The PostgreSQL type of the operand [a,b) when it is one name: a local or a
+ * parameter of an integer type. NULL otherwise.
+ */
+static const char *
+go_operand_sqltype(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	PlxLocal2  *l;
+	int			i;
+
+	if (b - a != 1 || tk->kind != GO_WORD)
+		return NULL;
+	l = plx_local_find(g->cx, tk->s, tk->len);
+	if (l)
+		return go_typ_int_class(l->typ) == 'i' ? l->typ : NULL;
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return NULL;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+			return g->cx->meta->argtypes[i] == INT2OID ? "smallint" :
+				g->cx->meta->argtypes[i] == INT4OID ? "integer" :
+				g->cx->meta->argtypes[i] == INT8OID ? "bigint" : NULL;
+	}
+	return NULL;
+}
+
+/*
+ * [a,b) is a decimal literal below 32, a shift count that SQL takes as Go
+ * does for a value of any width, so the shift needs no guard.
+ */
+static bool
+go_small_count(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+
+	if (b - a != 1 || tk->kind != GO_NUM || tk->len > 2 ||
+		(tk->len == 2 && tk->s[0] == '0'))
+		return false;
+	if (tk->s[0] < '0' || tk->s[0] > '9' ||
+		(tk->len == 2 && (tk->s[1] < '0' || tk->s[1] > '9')))
+		return false;
+	return atoi(pnstrdup(tk->s, tk->len)) < 32;
+}
+
+/*
+ * Emit operands lo..hi of a split binary expression, nesting by Go
+ * precedence: os/oe bound each operand's tokens and op[k] is the operator
+ * between operands k and k+1. Each Go level goes in brackets, with an inner
+ * bracket wherever the SQL class changes, since Go ranks + - | ^ alike but
+ * SQL does not: a | b + c becomes ((a | b) + c). Each level recurses only into
+ * tighter levels, so the recursion is at most five deep per bracket.
+ */
 static void
-go_emit_range(Go *g, int a, int b, StringInfo out)
+go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int hi,
+			   StringInfo out)
+{
+	int			minp = 99,
+				k,
+				m = 0,
+				j;
+	int		   *sp;
+	bool	   *brk;
+	char	   *guard;			/* '<' or '>' for a guarded shift, else 0 */
+	int			nguard = 0;
+	bool		widen = false;	/* the first operator is an int << small count */
+
+	if (lo == hi)
+	{
+		go_emit_range(g, os[lo], oe[lo], out);
+		return;
+	}
+	for (k = lo; k < hi; k++)
+		minp = Min(minp, go_binop_prec(&g->t[op[k]]));
+	sp = palloc(sizeof(int) * (hi - lo));
+	brk = palloc0(sizeof(bool) * (hi - lo));
+	guard = palloc0(hi - lo);
+	for (k = lo; k < hi; k++)
+		if (go_binop_prec(&g->t[op[k]]) == minp)
+			sp[m++] = k;
+	for (j = 0; j < m; j++)
+	{
+		GoTok	   *o = &g->t[op[sp[j]]];
+
+		if (j > 0)
+		{
+			char		c = go_sql_class(o);
+
+			brk[j] = (c == 'c' || c != go_sql_class(&g->t[op[sp[j - 1]]]));
+		}
+		if ((go_op_is(o, "<<") || go_op_is(o, ">>")) &&
+			!go_small_count(g, os[sp[j] + 1], oe[j + 1 < m ? sp[j + 1] : hi]))
+		{
+			guard[j] = o->s[0];
+			nguard++;
+		}
+		else if (go_op_is(o, "<<"))
+		{
+			/*
+			 * A small literal count needs no guard, but an integer shifted
+			 * left can leave the range of an int: shift a bigint and cast
+			 * back, so that fails. A value plx cannot type takes the guard.
+			 */
+			const char *lt = (j == 0 && sp[0] == lo) ?
+				go_operand_sqltype(g, os[lo], oe[lo]) : NULL;
+
+			if (j == 0 && sp[0] == lo && go_int_const(g, os[lo], oe[lo]))
+				;				/* shifted as a bigint below */
+			else if (lt && strcmp(lt, "integer") == 0)
+				widen = true;
+			else if (!lt || strcmp(lt, "bigint") != 0)
+			{
+				if (!(lt && strcmp(lt, "smallint") == 0))
+				{
+					guard[j] = '<';
+					nguard++;
+				}
+			}
+		}
+	}
+	/* each guard nests a subquery around the shifts before it */
+	if (g->guards + nguard > GO_MAX_GUARDS)
+		go_err(g, GO_GUARDS_MSG);
+	g->guards += nguard;
+	go_sp(out);
+	appendStringInfoChar(out, '(');
+	/*
+	 * Open the bracket or guard that ends at each operator. The one that ends
+	 * first is innermost, so they open from the last operator back.
+	 */
+	for (j = m - 1; j >= 0; j--)
+	{
+		if (guard[j])
+			appendStringInfoString(out, guard[j] == '<' ? GO_SHL_OPEN : GO_SHR_OPEN);
+		else if (j > 0 && brk[j])
+			appendStringInfoChar(out, '(');
+	}
+	/*
+	 * An integer constant shifted by << or >>: Go gives the untyped constant
+	 * the type of its context, and Go's int64 is 64 bits wide. SQL types the
+	 * literal as a 32-bit integer and takes the shift count mod 32, so 1 << 32
+	 * is 1. Shift a bigint instead; a 32-bit target that cannot hold the
+	 * result then fails with "integer out of range" instead of wrapping. The
+	 * constant can be an expression, as in 2 * 1 << 40, which Go reads as
+	 * (2 * 1) << 40: making its first operand a bigint makes it all bigint.
+	 * Shifts bind tightest, with * and &, so they are all at this level.
+	 */
+	for (j = 0; j < m; j++)
+		if (go_op_is(&g->t[op[sp[j]]], "<<") || go_op_is(&g->t[op[sp[j]]], ">>"))
+			break;
+	if (widen || (j < m && lo == sp[0] && go_int_const(g, os[lo], oe[sp[j]])))
+	{
+		go_sp(out);
+		appendStringInfoString(out, widen ? "((" : "(");
+		go_emit_range(g, os[lo], oe[lo], out);
+		appendStringInfoString(out, ")::bigint");
+	}
+	else
+		go_emit_binary(g, os, oe, op, lo, sp[0], out);
+	for (j = 0; j < m; j++)
+	{
+		GoTok	   *o = &g->t[op[sp[j]]];
+		bool		andnot = go_op_is(o, "&^");
+
+		if (guard[j])
+		{
+			appendStringInfoString(out, GO_SHIFT_MID);
+			go_emit_binary(g, os, oe, op, sp[j] + 1, j + 1 < m ? sp[j + 1] : hi, out);
+			appendStringInfoString(out, GO_SHIFT_CLOSE);
+			continue;
+		}
+		if (j > 0 && brk[j])
+			appendStringInfoChar(out, ')');
+		go_sp(out);
+		if (go_op_is(o, "=="))
+			appendStringInfoChar(out, '=');
+		else if (go_op_is(o, "!="))
+			appendStringInfoString(out, "<>");
+		else if (go_op_is(o, "&&"))
+			appendStringInfoString(out, "AND");
+		else if (go_op_is(o, "||"))
+			appendStringInfoString(out, "OR");
+		else if (go_op_is(o, "^"))
+			appendStringInfoChar(out, '#');		/* XOR: SQL's ^ is a power */
+		else if (andnot)
+			appendStringInfoString(out, "& ~(");	/* AND NOT */
+		else
+			appendBinaryStringInfo(out, o->s, o->len);
+		go_emit_binary(g, os, oe, op, sp[j] + 1, j + 1 < m ? sp[j + 1] : hi, out);
+		if (j == 0 && widen)
+			appendStringInfoString(out, ")::integer");
+		if (andnot)
+			appendStringInfoChar(out, ')');
+	}
+	appendStringInfoChar(out, ')');
+	g->guards -= nguard;
+	pfree(sp);
+	pfree(brk);
+	pfree(guard);
+}
+
+/*
+ * Emit [a,b), which go_needs_prec flagged, fully parenthesized by Go
+ * precedence. A top-level comma list (call arguments, slice elements) is
+ * emitted element by element. Returns false, emitting nothing, when the
+ * range holds an operator this does not model; the caller then emits the
+ * tokens as written.
+ */
+static bool
+go_emit_prec(Go *g, int a, int b, StringInfo out)
+{
+	int			i,
+				depth = 0,
+				n = 0,
+				start = a;
+	int		   *os,
+			   *oe,
+			   *op;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_COMMA)
+		{
+			int			s = a,
+						j;
+
+			/* a comma list: emit each element on its own */
+			depth = 0;
+			for (j = a; j <= b; j++)
+			{
+				GoKind		kk = (j < b) ? g->t[j].kind : GO_COMMA;
+
+				if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+					depth++;
+				else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+					depth--;
+				else if (depth == 0 && kk == GO_COMMA)
+				{
+					if (s > a)
+						appendStringInfoChar(out, ',');
+					go_emit_range(g, s, j, out);
+					s = j + 1;
+				}
+			}
+			return true;
+		}
+	}
+
+	os = palloc(sizeof(int) * (b - a + 1));
+	oe = palloc(sizeof(int) * (b - a + 1));
+	op = palloc(sizeof(int) * (b - a + 1));
+	depth = 0;
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_OP && i > start &&
+				 go_operand_end(&g->t[i - 1]))
+		{
+			if (go_binop_prec(&g->t[i]) == 0)
+			{
+				pfree(os);
+				pfree(oe);
+				pfree(op);
+				return false;
+			}
+			os[n] = start;
+			oe[n] = i;
+			op[n] = i;
+			n++;
+			start = i + 1;
+		}
+	}
+	if (start >= b)						/* dangling operator: emit as written */
+	{
+		pfree(os);
+		pfree(oe);
+		pfree(op);
+		return false;
+	}
+	os[n] = start;
+	oe[n] = b;
+	go_emit_binary(g, os, oe, op, 0, n, out);
+	pfree(os);
+	pfree(oe);
+	pfree(op);
+	return true;
+}
+
+/*
+ * End (exclusive) of the operand of a unary operator that starts at i: any
+ * further unary operators, then a name, number, string or bracketed group,
+ * then any field selections, calls and subscripts. -1 when the tokens form no
+ * operand this recognises.
+ */
+static int
+go_unary_operand_end(Go *g, int i, int b)
+{
+	while (i < b && (go_op_is(&g->t[i], "-") || go_op_is(&g->t[i], "+") ||
+					 go_op_is(&g->t[i], "^") || go_op_is(&g->t[i], "!")))
+		i++;
+	if (i >= b)
+		return -1;
+	if (g->t[i].kind == GO_LP)
+	{
+		i = go_match(g, i, b);
+		if (i < 0)
+			return -1;
+		i++;
+	}
+	else if (g->t[i].kind == GO_WORD || g->t[i].kind == GO_NUM ||
+			 g->t[i].kind == GO_STR)
+		i++;
+	else
+		return -1;
+	while (i < b)
+	{
+		if (g->t[i].kind == GO_DOT && i + 1 < b && g->t[i + 1].kind == GO_WORD)
+			i += 2;
+		else if (g->t[i].kind == GO_LP || g->t[i].kind == GO_LBRACK)
+		{
+			int			m = go_match(g, i, b);
+
+			if (m < 0)
+				return -1;
+			i = m + 1;
+		}
+		else
+			break;
+	}
+	return i;
+}
+
+/* emit tokens [a,b) as a plpgsql expression, token by token */
+static void
+go_emit_tokens(Go *g, int a, int b, StringInfo out)
 {
 	int			i = a;
 
@@ -970,6 +2275,7 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 		GoTok	   *tk = &g->t[i];
 		int			ni;
 
+		CHECK_FOR_INTERRUPTS();
 		/* []T{ ... } array literal -> ARRAY[ ... ] */
 		if (tk->kind == GO_LBRACK && i + 1 < b && g->t[i + 1].kind == GO_RBRACK &&
 			i + 2 < b && g->t[i + 2].kind == GO_WORD &&
@@ -1001,6 +2307,10 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 				i++;
 				continue;
 			}
+			/* a field name after a dot and a function name before ( are not variables */
+			if ((i == 0 || g->t[i - 1].kind != GO_DOT) &&
+				(i + 1 >= b || g->t[i + 1].kind != GO_LP))
+				go_check_name(g, tk->s, tk->len);
 			go_sp(out);
 			appendBinaryStringInfo(out, tk->s, tk->len);
 			i++;
@@ -1016,14 +2326,27 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 		if (tk->kind == GO_STR)
 		{
 			go_sp(out);
-			go_emit_str(tk, out);
+			if (go_is_rune(tk))		/* a rune is an integer, its code point */
+				appendStringInfo(out, "%d", (int) go_rune_value(g, tk));
+			else
+				go_emit_str(g, tk, out);
 			i++;
 			continue;
 		}
 		if (tk->kind == GO_LP)
 		{
+			/* a bracketed group is an expression of its own (precedence) */
+			int			close = go_match(g, i, b);
+
 			go_sp(out);
 			appendStringInfoChar(out, '(');
+			if (close > 0)
+			{
+				go_emit_range(g, i + 1, close, out);
+				appendStringInfoChar(out, ')');
+				i = close + 1;
+				continue;
+			}
 			i++;
 			continue;
 		}
@@ -1105,6 +2428,33 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 				go_sp(out);
 				appendStringInfoString(out, "NOT ");
 			}
+			else if (tk->len == 1 && tk->s[0] == '^')
+			{
+				/* Go's XOR, or its unary bitwise NOT; SQL's ^ is a power */
+				bool		binary = (i > a && go_operand_end(&g->t[i - 1]));
+				int			pe = binary ? -1 : go_unary_operand_end(g, i + 1, b);
+
+				go_sp(out);
+				if (pe > i + 1)
+				{
+					/*
+					 * Go's unary operators bind tighter than any binary one,
+					 * but SQL's prefix ~ binds looser than + and *, so
+					 * bracket ^x with its operand: ^5 + 1 is (~ 5) + 1.
+					 */
+					appendStringInfoString(out, "(~");
+					go_emit_range(g, i + 1, pe, out);
+					appendStringInfoChar(out, ')');
+					i = pe;
+					continue;
+				}
+				appendStringInfoChar(out, binary ? '#' : '~');
+			}
+			else if (tk->len == 2 && tk->s[0] == '&' && tk->s[1] == '^')
+			{
+				go_sp(out);
+				appendStringInfoString(out, "& ~");
+			}
 			else
 			{
 				go_sp(out);
@@ -1115,6 +2465,516 @@ go_emit_range(Go *g, int a, int b, StringInfo out)
 		}
 		i++;
 	}
+}
+
+/*
+ * String concatenation with +.
+ *
+ * Go has no implicit conversions, so + with a string operand is always string
+ * concatenation, and both operands are strings. Where plx can see that every
+ * operand of a run of + is a string, it writes the + as SQL ||, which
+ * propagates NULL the way plx's interpolation does. Where it cannot see that,
+ * + stays +.
+ */
+
+#define GO_STRNUM_MSG "invalid operation: + between a string and a number; " \
+	"Go does not convert between them, so use strconv.Itoa or fmt.Sprintf"
+
+/* 's' for a string type, 'n' for a numeric or boolean type, 0 otherwise */
+static char
+go_type_kind(const char *typ)
+{
+	static const char *const num[] = {
+		"integer", "smallint", "bigint", "real", "double precision",
+		"numeric", "boolean", NULL
+	};
+	int			k;
+
+	if (!typ)
+		return 0;
+	if (strcmp(typ, "text") == 0 || strcmp(typ, "varchar") == 0 ||
+		strcmp(typ, "character varying") == 0)
+		return 's';
+	for (k = 0; num[k]; k++)
+		if (strcmp(typ, num[k]) == 0)
+			return 'n';
+	return 0;
+}
+
+/* the kind (as go_type_kind) of a local or parameter name; 0 if neither */
+static char
+go_name_kind(Go *g, const GoTok *tk)
+{
+	PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+	int			i;
+
+	if (l)
+		return go_type_kind(l->typ);
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return 0;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+		{
+			switch (g->cx->meta->argtypes[i])
+			{
+				case TEXTOID:
+				case VARCHAROID:
+					return 's';
+				case INT2OID:
+				case INT4OID:
+				case INT8OID:
+				case FLOAT4OID:
+				case FLOAT8OID:
+				case NUMERICOID:
+				case BOOLOID:
+					return 'n';
+				default:
+					return 0;
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+ * Guard for each level of recursion in the operand typing pass. It shares the
+ * emitter's depth count, so typing stops at the same nesting limit as
+ * emission, before it does the work for the deeper levels.
+ */
+static void
+go_kind_enter(Go *g)
+{
+	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
+	if (++g->cx->depth > PLX_MAX_DEPTH)
+		go_err(g, "expression nested too deeply");
+	g->edepth++;
+}
+
+static void
+go_kind_leave(Go *g)
+{
+	g->edepth--;
+	g->cx->depth--;
+}
+
+/*
+ * The kind of a single operand [a,b): 's' when plx can see it is a string, 'n'
+ * when it can see it is a number or a bool, and 0 when it cannot tell (a row
+ * field, an unmapped call, an expression).
+ */
+static char
+go_operand_type(Go *g, int a, int b)
+{
+	GoTok	   *tk;
+	bool		signed_op = false;
+
+	/* unary signs: a signed operand is a number or nothing plx can type */
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
+	{
+		CHECK_FOR_INTERRUPTS();
+		signed_op = true;
+		a++;
+	}
+	if (signed_op)
+		return go_operand_type(g, a, b) == 'n' ? 'n' : 0;
+	if (b <= a)
+		return 0;
+	tk = &g->t[a];
+	if (b - a == 1)
+	{
+		if (tk->kind == GO_STR)				/* a rune literal is a number */
+			return tk->s[0] == '\'' ? 'n' : 's';
+		if (tk->kind == GO_NUM || go_ci(tk, "true") || go_ci(tk, "false"))
+			return 'n';
+		if (tk->kind == GO_WORD)
+			return go_name_kind(g, tk);
+		return 0;
+	}
+	/* a bracketed expression, typed once per top-level expression */
+	if (tk->kind == GO_LP && go_match(g, a, b) == b - 1)
+	{
+		if (g->kgen[a] != g->gen)
+		{
+			go_kind_enter(g);
+			g->kmemo[a] = go_expr_kind(g, a + 1, b - 1);
+			g->kgen[a] = g->gen;
+			go_kind_leave(g);
+		}
+		return g->kmemo[a];
+	}
+	/* an element s[i] of a slice local */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LBRACK &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+		int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+		if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+			return go_type_kind(pnstrdup(l->typ, tl - 2));
+		return 0;
+	}
+	/* pkg.Func(...): only the calls plx maps */
+	if (tk->kind == GO_WORD && b - a >= 5 && g->t[a + 1].kind == GO_DOT &&
+		g->t[a + 2].kind == GO_WORD && g->t[a + 3].kind == GO_LP &&
+		go_match(g, a + 3, b) == b - 1)
+	{
+		GoTok	   *m = &g->t[a + 2];
+
+		if (go_ci(tk, "strconv"))
+			return go_ci(m, "Itoa") ? 's' : go_ci(m, "Atoi") ? 'n' : 0;
+		if (go_ci(tk, "fmt"))
+			return go_ci(m, "Sprintf") ? 's' : 0;
+		if (go_ci(tk, "strings"))
+			return (go_ci(m, "ToUpper") || go_ci(m, "ToLower") ||
+					go_ci(m, "TrimSpace") || go_ci(m, "ReplaceAll")) ? 's' :
+				go_ci(m, "Contains") ? 'n' : 0;
+		if (go_ci(tk, "math"))
+			return (go_ci(m, "Abs") || go_ci(m, "Floor") || go_ci(m, "Ceil") ||
+					go_ci(m, "Sqrt") || go_ci(m, "Pow") || go_ci(m, "Max") ||
+					go_ci(m, "Min") || go_ci(m, "Mod")) ? 'n' : 0;
+		return 0;
+	}
+	/* T(x) for a base type T, and len(x) / cap(x) */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LP &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		const char *conv = go_base_type(tk->s, tk->len);
+
+		if (conv)
+			return go_type_kind(conv);
+		if (go_ci(tk, "len") || go_ci(tk, "cap"))
+			return 'n';
+	}
+	return 0;
+}
+
+/*
+ * Split [a,b) at its top-level binary operators: ops[] receives their token
+ * indexes, or with ops NULL they are only counted. Returns the count, or -1
+ * when the range holds a top-level comma or an operator that is not a Go
+ * binary operator (such as : in a slice). A bracketed group that closes
+ * inside the range is skipped in one step, so the cost is the number of
+ * top-level tokens, not the length of the range.
+ */
+static int
+go_split_binops(Go *g, int a, int b, int *ops)
+{
+	int			i,
+				depth = 0,
+				n = 0;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		CHECK_FOR_INTERRUPTS();
+		if (depth == 0 && (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE) &&
+			g->mt[i] >= 0 && g->mt[i] < b)
+			i = g->mt[i];		/* the closer leaves depth at 0 */
+		else if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_COMMA)
+			return -1;
+		else if (depth == 0 && k == GO_OP && i > a && go_operand_end(&g->t[i - 1]))
+		{
+			if (go_binop_prec(&g->t[i]) == 0)
+				return -1;
+			if (ops)
+				ops[n] = i;
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
+ * The kind of the operands a..b joined by + at ops[lo..hi): 's' when all are
+ * strings, 'n' when all are numbers, 0 otherwise. A string and a number
+ * together is a Go compile error, and plx rejects it too.
+ *
+ * One string beside an operand plx cannot type (an array, jsonb, char(n), a
+ * row field, a raw SQL call) is 0, not 's'. Written as ||, such a run would
+ * mean array append, jsonb merge or a silent cast to text, where Go rejects
+ * the program. Left as +, it fails loudly instead.
+ */
+static char
+go_plus_run_kind(Go *g, int a, int b, const int *ops, int lo, int hi)
+{
+	bool		str = false,
+				num = false,
+				unknown = false;
+	int			k;
+
+	for (k = lo; k <= hi; k++)
+	{
+		int			s = (k == lo) ? a : ops[k - 1] + 1,
+					e = (k == hi) ? b : ops[k];
+		char		c = go_operand_type(g, s, e);
+
+		if (c == 's')
+			str = true;
+		else if (c == 'n')
+			num = true;
+		else
+			unknown = true;
+	}
+	if (str && num)
+		plx_err(g->cx, g->t[ops[lo]].line, "%s", GO_STRNUM_MSG);
+	if (unknown)
+		return 0;
+	return str ? 's' : num ? 'n' : 0;
+}
+
+/*
+ * The kind of the expression [a,b): an operand, or operands joined only by +.
+ * 0 for anything else.
+ */
+static char
+go_expr_kind(Go *g, int a, int b)
+{
+	int		   *ops;
+	int			n,
+				k;
+	char		r = 0;
+
+	if (b <= a)
+		return 0;
+	/* a new top-level expression starts a new generation of Go.kmemo */
+	if (g->edepth == 0)
+		g->gen++;
+	n = go_split_binops(g, a, b, NULL);
+	if (n <= 0)
+		return n == 0 ? go_operand_type(g, a, b) : 0;
+	ops = palloc(sizeof(int) * n);
+	n = go_split_binops(g, a, b, ops);
+	for (k = 0; k < n; k++)
+		if (!go_op_is(&g->t[ops[k]], "+"))
+			break;
+	if (k == n)
+		r = go_plus_run_kind(g, a, b, ops, 0, n);
+	pfree(ops);
+	return r;
+}
+
+/*
+ * Emit [a,b) with each run of + whose operands are all strings written as ||.
+ * The range is cut at the operators that bind looser than + in Go (the
+ * comparisons, && and ||), which SQL also ranks below ||. A run that joins
+ * its operands only with + and whose operands are all strings becomes
+ * ((x) || (y)) || (z), left to right as Go evaluates it; every other piece is
+ * emitted in brackets as before. A top-level comma list is handled element by
+ * element. Returns false, emitting nothing, when no run is all strings, so
+ * the caller emits the range as it always did. With out NULL it only says
+ * whether it would emit anything, and emits nothing: that costs typing only,
+ * so a probe of each element of a nested comma list does not emit the
+ * element twice per level.
+ */
+static bool
+go_emit_strcat(Go *g, int a, int b, StringInfo out)
+{
+	int		   *ops,
+			   *cut;
+	char	   *isstr;
+	int			n,
+				ncut = 0,
+				k,
+				lo;
+	bool		any = false;
+
+	if (b <= a)
+		return false;
+	n = go_split_binops(g, a, b, NULL);
+	if (n < 0)
+	{
+		/* a comma list: lower its elements one by one, if any needs it */
+		int			depth = 0,
+					s = a,
+					i,
+					ne = 0;
+		int		   *es,
+				   *ee;
+
+		/* count the top-level commas first, to size es[] and ee[] */
+		for (i = a; i < b; i++)
+		{
+			GoKind		kk = g->t[i].kind;
+
+			CHECK_FOR_INTERRUPTS();
+			if (depth == 0 && (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE) &&
+				g->mt[i] >= 0 && g->mt[i] < b)
+				i = g->mt[i];	/* skip a closed group in one step */
+			else if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+				depth++;
+			else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+				depth--;
+			else if (depth == 0 && kk == GO_COMMA)
+				ne++;
+		}
+		es = palloc(sizeof(int) * (ne + 1));
+		ee = palloc(sizeof(int) * (ne + 1));
+		ne = 0;
+		depth = 0;
+		for (i = a; i <= b; i++)
+		{
+			GoKind		kk = (i < b) ? g->t[i].kind : GO_COMMA;
+
+			CHECK_FOR_INTERRUPTS();
+			if (depth == 0 && i < b &&
+				(kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE) &&
+				g->mt[i] >= 0 && g->mt[i] < b)
+				i = g->mt[i];	/* skip a closed group in one step */
+			else if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+				depth++;
+			else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+				depth--;
+			else if (depth == 0 && kk == GO_COMMA)
+			{
+				es[ne] = s;
+				ee[ne] = i;
+				ne++;
+				s = i + 1;
+			}
+		}
+		if (ne < 2)
+			return false;			/* no comma: an operator plx does not model */
+		for (k = 0; k < ne && !any; k++)
+			any = go_emit_strcat(g, es[k], ee[k], NULL);
+		if (!any || out == NULL)
+			return any;
+		for (k = 0; k < ne; k++)
+		{
+			if (k > 0)
+				appendStringInfoChar(out, ',');
+			go_emit_range(g, es[k], ee[k], out);
+		}
+		return true;
+	}
+	if (n == 0)
+		return false;
+	ops = palloc(sizeof(int) * n);
+	n = go_split_binops(g, a, b, ops);
+
+	/* cut at the operators looser than + */
+	cut = palloc(sizeof(int) * (n + 2));
+	isstr = palloc(n + 1);
+	cut[ncut++] = -1;
+	for (k = 0; k < n; k++)
+		if (go_binop_prec(&g->t[ops[k]]) < 4)
+			cut[ncut++] = k;
+	cut[ncut] = n;
+
+	/* each piece runs over operands cut[j]+1 .. cut[j+1] */
+	for (k = 0; k < ncut; k++)
+	{
+		int			ol = cut[k] + 1,
+					oh = cut[k + 1],
+					s = (ol == 0) ? a : ops[ol - 1] + 1,
+					e = (oh == n) ? b : ops[oh],
+					j;
+
+		isstr[k] = false;
+		if (oh == ol)
+			continue;			/* one operand, no + */
+		for (j = ol; j < oh; j++)
+			if (!go_op_is(&g->t[ops[j]], "+"))
+				break;
+		if (j == oh && go_plus_run_kind(g, s, e, ops, ol, oh) == 's')
+			isstr[k] = any = true;
+	}
+	if (!any || out == NULL)
+	{
+		pfree(ops);
+		pfree(cut);
+		pfree(isstr);
+		return any;
+	}
+
+	for (k = 0; k < ncut; k++)
+	{
+		int			ol = cut[k] + 1,
+					oh = cut[k + 1],
+					s = (ol == 0) ? a : ops[ol - 1] + 1,
+					e = (oh == n) ? b : ops[oh];
+
+		if (k > 0)
+		{
+			GoTok	   *o = &g->t[ops[cut[k]]];
+
+			go_sp(out);
+			if (go_op_is(o, "=="))
+				appendStringInfoChar(out, '=');
+			else if (go_op_is(o, "!="))
+				appendStringInfoString(out, "<>");
+			else if (go_op_is(o, "&&"))
+				appendStringInfoString(out, "AND");
+			else if (go_op_is(o, "||"))
+				appendStringInfoString(out, "OR");
+			else
+				appendBinaryStringInfo(out, o->s, o->len);
+		}
+		go_sp(out);
+		if (!isstr[k])
+		{
+			if (ncut > 1)
+				appendStringInfoChar(out, '(');
+			go_emit_range(g, s, e, out);
+			if (ncut > 1)
+				appendStringInfoChar(out, ')');
+			continue;
+		}
+		for (lo = ol; lo < oh; lo++)
+			appendStringInfoChar(out, '(');
+		appendStringInfoChar(out, '(');
+		go_emit_range(g, s, ops[ol], out);
+		appendStringInfoChar(out, ')');
+		for (lo = ol; lo < oh; lo++)
+		{
+			appendStringInfoString(out, " || (");
+			go_emit_range(g, ops[lo] + 1, lo + 1 < oh ? ops[lo + 1] : e, out);
+			appendStringInfoString(out, "))");
+		}
+	}
+	pfree(ops);
+	pfree(cut);
+	pfree(isstr);
+	return true;
+}
+
+/* emit tokens [a,b) as a plpgsql expression */
+static void
+go_emit_range_inner(Go *g, int a, int b, StringInfo out)
+{
+	if (go_emit_strcat(g, a, b, out))
+		return;
+	if (go_needs_prec(g, a, b) && go_emit_prec(g, a, b, out))
+		return;
+	go_emit_tokens(g, a, b, out);
+}
+
+/*
+ * Recursion guard for the expression emitter. Nested calls, subscripts and
+ * literals recurse through here once per level; without check_stack_depth()
+ * hostile nesting overflows the C stack and crashes the backend (SIGSEGV).
+ */
+static void
+go_emit_range(Go *g, int a, int b, StringInfo out)
+{
+	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
+	if (g->edepth == 0)
+		g->gen++;				/* a new top-level expression: see Go.kmemo */
+	if (++g->cx->depth > PLX_MAX_DEPTH)
+		go_err(g, "expression nested too deeply");
+	g->edepth++;
+	go_emit_range_inner(g, a, b, out);
+	g->edepth--;
+	g->cx->depth--;
 }
 
 /* end of a simple statement: the next top-level ; (brackets/braces nest) */
@@ -1174,11 +3034,33 @@ go_eat_semi(Go *g)
 		g->pos++;
 }
 
+/*
+ * Go's zero value for a declared type, as a SQL literal. NULL when SQL has no
+ * literal for it: a nil slice is already modelled by NULL, and a PostgreSQL
+ * type named in the body has no Go zero value.
+ */
+static const char *
+go_zero_value(const char *typ)
+{
+	if (strcmp(typ, "integer") == 0 || strcmp(typ, "smallint") == 0 ||
+		strcmp(typ, "bigint") == 0 || strcmp(typ, "real") == 0 ||
+		strcmp(typ, "double precision") == 0)
+		return "0";
+	if (strcmp(typ, "text") == 0)
+		return "''";
+	if (strcmp(typ, "boolean") == 0)
+		return "false";
+	return NULL;
+}
+
 /* declare a name with an inferred/explicit type and optional initializer */
 static void
 go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isconst, int ind)
 {
-	PlxLocal2  *l = plx_local_add(g->cx, name, (int) strlen(name));
+	PlxLocal2  *l;
+
+	go_check_name(g, name, (int) strlen(name));
+	l = plx_local_add(g->cx, name, (int) strlen(name));
 
 	if (typ && typ->len)
 		l->typ = pstrdup(typ->data);
@@ -1196,6 +3078,8 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 	if (isconst && e1 <= e0)
 		plx_err(g->cx, g->t[e0 < g->nt ? e0 : g->nt - 1].line,
 				"a constant needs a value (const %s = ...)", name);
+	/* untyped: no type named, and the value is an untyped constant */
+	l->untyped = isconst && !(typ && typ->len) && e1 > e0 && go_int_const(g, e0, e1);
 	l->is_const = isconst;
 	if (e1 > e0)
 	{
@@ -1216,6 +3100,37 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 			appendStringInfoString(&g->cx->out, ";\n");
 		}
 	}
+	else if (!isconst && l->typ)
+	{
+		/*
+		 * Go starts a variable declared without a value at its type's zero
+		 * value, and does so each time the declaration runs: a var inside a
+		 * loop body is reset on every iteration. So assign the zero value at
+		 * the declaration, not in the hoisted DECLARE.
+		 */
+		const char *zero = go_zero_value(l->typ);
+		int			tl = (int) strlen(l->typ);
+
+		if (zero)
+		{
+			plx_indent(&g->cx->out, ind);
+			appendStringInfo(&g->cx->out, "%s := %s;\n", name, zero);
+		}
+		else if (g->arrlen >= 0 && tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+		{
+			/* [N]T: Go's zero value is N zero elements, not a nil slice */
+			char	   *el = pnstrdup(l->typ, tl - 2);
+
+			zero = go_zero_value(el);
+			if (zero)
+			{
+				plx_indent(&g->cx->out, ind);
+				appendStringInfo(&g->cx->out, "%s := array_fill((%s)::%s, ARRAY[%d]);\n",
+								 name, zero, el, g->arrlen);
+			}
+		}
+	}
+	g->arrlen = -1;
 }
 
 /* var x T [= e]  |  var x = e  |  var ( ... )  |  const ... */
@@ -1289,7 +3204,7 @@ go_simple(Go *g, int ind, int stop)
 	int			i,
 				depth = 0,
 				opidx = -1;
-	char		opc = 0;
+	const char *opc = NULL;		/* SQL operator of a compound assignment */
 	bool		shortdecl = false;
 
 	/* an empty statement range means a stray closer/terminator (e.g. ')' or ']')
@@ -1324,7 +3239,27 @@ go_simple(Go *g, int ind, int stop)
 			if (o->len == 2 && o->s[1] == '=' && strchr("+-*/%", o->s[0]))
 			{
 				opidx = i;
-				opc = o->s[0];
+				opc = pnstrdup(o->s, 1);
+				break;
+			}
+			/* bitwise compound assignments; Go's ^ is SQL's #, &^ is & ~ */
+			if (go_op_is(o, "<<=") || go_op_is(o, ">>=") ||
+				go_op_is(o, "&=") || go_op_is(o, "|="))
+			{
+				opidx = i;
+				opc = pnstrdup(o->s, o->len - 1);
+				break;
+			}
+			if (go_op_is(o, "^="))
+			{
+				opidx = i;
+				opc = "#";
+				break;
+			}
+			if (go_op_is(o, "&^="))
+			{
+				opidx = i;
+				opc = "& ~";
 				break;
 			}
 		}
@@ -1383,6 +3318,10 @@ go_simple(Go *g, int ind, int stop)
 				int			d = 0,
 							comma = -1,
 							j;
+
+				if (g->t[lp + 1].kind == GO_STR)
+					go_check_argindex(g, &g->t[lp + 1],
+									  go_ci(m, "Printf") ? "Printf" : "Sprintf");
 
 				for (j = lp + 1; j < close; j++)
 				{
@@ -1565,14 +3504,55 @@ go_simple(Go *g, int ind, int stop)
 		}
 	}
 
+	/*
+	 * s += x on a string appends. plxgo string locals are text, so a plain ||
+	 * is enough (no string builder), and it propagates NULL as + chains do.
+	 * When plx cannot see that x is a string, the append stays s := s + (x),
+	 * which fails loudly; || would cast a number or a jsonb value to text,
+	 * where Go rejects the program.
+	 */
+	if (opc && strcmp(opc, "+") == 0 && go_expr_kind(g, e0, opidx) == 's')
+	{
+		char		rk = go_expr_kind(g, opidx + 1, e1);
+
+		if (rk == 'n')
+			plx_err(g->cx, g->t[opidx].line, "%s", GO_STRNUM_MSG);
+		if (rk == 's')
+		{
+			plx_indent(&g->cx->out, ind);
+			go_emit_range(g, e0, opidx, &g->cx->out);
+			appendStringInfoString(&g->cx->out, " :=");
+			go_emit_range(g, e0, opidx, &g->cx->out);
+			appendStringInfoString(&g->cx->out, " || (");
+			go_emit_range(g, opidx + 1, e1, &g->cx->out);
+			appendStringInfoString(&g->cx->out, ");\n");
+			g->pos = e1;
+			return;
+		}
+	}
+
 	/* plain assignment: LHS <op> RHS */
 	plx_indent(&g->cx->out, ind);
 	go_emit_range(g, e0, opidx, &g->cx->out);
 	appendStringInfoString(&g->cx->out, " :=");
-	if (opc)
+	if (opc && (strcmp(opc, "<<") == 0 || strcmp(opc, ">>") == 0) &&
+		!go_small_count(g, opidx + 1, e1))
+	{
+		/* x <<= n: the shift takes Go's result for every count */
+		if (++g->guards > GO_MAX_GUARDS)
+			go_err(g, GO_GUARDS_MSG);
+		appendStringInfoString(&g->cx->out, opc[0] == '<' ? GO_SHL_OPEN : GO_SHR_OPEN);
+		go_emit_range(g, e0, opidx, &g->cx->out);
+		appendStringInfoString(&g->cx->out, GO_SHIFT_MID);
+		go_emit_range(g, opidx + 1, e1, &g->cx->out);
+		appendStringInfoString(&g->cx->out, GO_SHIFT_CLOSE);
+		g->guards--;
+		appendStringInfoString(&g->cx->out, ";\n");
+	}
+	else if (opc)
 	{
 		go_emit_range(g, e0, opidx, &g->cx->out);
-		appendStringInfo(&g->cx->out, " %c (", opc);
+		appendStringInfo(&g->cx->out, " %s (", opc);
 		go_emit_range(g, opidx + 1, e1, &g->cx->out);
 		appendStringInfoString(&g->cx->out, ");\n");
 	}
@@ -1646,6 +3626,73 @@ go_if(Go *g, int ind)
 	plx_indent(&g->cx->out, ind);
 	appendStringInfoString(&g->cx->out, "END IF;\n");
 	g->cx->depth--;
+}
+
+/*
+ * The body of a loop whose continue plpgsql's CONTINUE already gets right
+ * (range, condition-only and infinite loops): hide any enclosing three-clause
+ * loop's continue label, and any enclosing switch's break label, while it is
+ * parsed.
+ */
+static void
+go_loop_body(Go *g, int ind)
+{
+	const char *save_label = g->cont_label;
+	const char *save_brk = g->brk_label;
+
+	g->cont_label = NULL;
+	g->brk_label = NULL;
+	g->cx->loopdepth++;
+	go_block(g, ind);
+	g->cx->loopdepth--;
+	g->cont_label = save_label;
+	g->brk_label = save_brk;
+}
+
+/*
+ * The PostgreSQL type of a three-clause for loop's variable, from its start
+ * expression [a,b); NULL when it cannot be told. Go gives an arithmetic
+ * expression the type of its typed operand (untyped constants adapt to it),
+ * so the first plain variable in the expression decides, as "name%TYPE".
+ */
+static char *
+go_loop_var_type(Go *g, int a, int b)
+{
+	const char *inf = go_infer_type(g, a, b);
+	bool		isfloat = false;
+	int			i;
+
+	if (inf)
+		return pstrdup(inf);
+	for (i = a; i < b; i++)
+	{
+		GoTok	   *tk = &g->t[i];
+
+		if (tk->kind == GO_WORD)
+		{
+			if (i + 1 < b && g->t[i + 1].kind == GO_LBRACK)
+			{
+				/* an element of a slice declared in the body: its element type */
+				PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+				int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+				if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+					return pnstrdup(l->typ, tl - 2);
+				return NULL;
+			}
+			if (i + 1 < b && (g->t[i + 1].kind == GO_LP ||
+							  g->t[i + 1].kind == GO_DOT))
+				return NULL;	/* a call or a field: type unknown */
+			if (go_ci(tk, "true") || go_ci(tk, "false") || go_ci(tk, "nil"))
+				return NULL;
+			return psprintf("%s%%TYPE", go_ident(tk->s, tk->len));
+		}
+		if (tk->kind == GO_NUM)
+			isfloat = isfloat || go_num_is_float(tk);
+		else if (tk->kind != GO_OP && tk->kind != GO_LP && tk->kind != GO_RP)
+			return NULL;
+	}
+	return pstrdup(isfloat ? "double precision" : "integer");
 }
 
 /* for { } | for cond { } | for init; cond; post { } | for k,v := range e { } */
@@ -1727,6 +3774,7 @@ go_for(Go *g, int ind)
 
 			if (!rowname)
 				go_err(g, "range over query() needs a row variable (for _, row := range query(...))");
+			go_check_name(g, rowname, (int) strlen(rowname));
 			if (!plx_local_find(g->cx, rowname, (int) strlen(rowname)))
 			{
 				PlxLocal2  *l = plx_local_add(g->cx, rowname, (int) strlen(rowname));
@@ -1738,9 +3786,7 @@ go_for(Go *g, int ind)
 			go_emit_range(g, rs + 2, close, &g->cx->out);
 			appendStringInfoString(&g->cx->out, " LOOP\n");
 			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
+			go_loop_body(g, ind + 1);
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END LOOP;\n");
 			go_eat_semi(g);
@@ -1752,6 +3798,7 @@ go_for(Go *g, int ind)
 		/* single var: the index -> FOR i IN 0 .. n-1 (Go 1.22 integer range) */
 		if (idxname)
 		{
+			go_check_name(g, idxname, (int) strlen(idxname));
 			if (!plx_local_find(g->cx, idxname, (int) strlen(idxname)))
 			{
 				PlxLocal2  *l = plx_local_add(g->cx, idxname, (int) strlen(idxname));
@@ -1763,9 +3810,7 @@ go_for(Go *g, int ind)
 			go_emit_range(g, rs, hb, &g->cx->out);
 			appendStringInfoString(&g->cx->out, ") - 1 LOOP\n");
 			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
+			go_loop_body(g, ind + 1);
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END LOOP;\n");
 			go_eat_semi(g);
@@ -1774,6 +3819,7 @@ go_for(Go *g, int ind)
 		/* range over a slice -> FOREACH v IN ARRAY e */
 		if (!valname)
 			go_err(g, "range needs a value variable (for _, v := range s)");
+		go_check_name(g, valname, (int) strlen(valname));
 		if (!plx_local_find(g->cx, valname, (int) strlen(valname)))
 		{
 			/* infer the element type from a plain slice local (var s []T) */
@@ -1801,144 +3847,163 @@ go_for(Go *g, int ind)
 		go_emit_range(g, rs, hb, &g->cx->out);
 		appendStringInfoString(&g->cx->out, " LOOP\n");
 		g->pos = hb;
-		g->cx->loopdepth++;
-		go_block(g, ind + 1);
-		g->cx->loopdepth--;
+		go_loop_body(g, ind + 1);
 		plx_indent(&g->cx->out, ind);
 		appendStringInfoString(&g->cx->out, "END LOOP;\n");
 		go_eat_semi(g);
 		return;
 	}
 
-	/* for init; cond; post { } */
-	if (semi1 >= 0 && semi2 >= 0)
-	{
-		/*
-		 * The canonical counting loop -- for i := A; i < B; i++  (or <=, or
-		 * i += S) -- becomes a plpgsql integer FOR. This is not just tidier:
-		 * plpgsql CONTINUE jumps to the loop's own increment, whereas in a
-		 * hand-built WHILE it would skip the post statement and loop forever.
-		 */
-		int			ivar = -1;
-		bool		inclusive = false;
-		char		dir = 0;			/* 'u' counts up (++/+=), 'd' down (--/-=) */
-		char		condc = 0;			/* comparison direction: '<' or '>' */
-		int			step0 = -1,
-					step1 = -1;
-
-		/* init: <var> :=|= <A> */
-		if (g->t[h0].kind == GO_WORD && h0 + 2 <= semi1 &&
-			g->t[h0 + 1].kind == GO_OP &&
-			((g->t[h0 + 1].len == 2 && g->t[h0 + 1].s[0] == ':' && g->t[h0 + 1].s[1] == '=') ||
-			 (g->t[h0 + 1].len == 1 && g->t[h0 + 1].s[0] == '=')))
-			ivar = h0;
-		/* post: <var>++ / <var>-- / <var> += S / <var> -= S sets the direction */
-		if (ivar >= 0 && g->t[semi2 + 1].kind == GO_WORD &&
-			g->t[semi2 + 1].len == g->t[ivar].len &&
-			strncmp(g->t[semi2 + 1].s, g->t[ivar].s, g->t[ivar].len) == 0 &&
-			g->t[semi2 + 2].kind == GO_OP && g->t[semi2 + 2].len == 2)
-		{
-			GoTok	   *po = &g->t[semi2 + 2];
-
-			if (po->s[0] == '+' && po->s[1] == '+')
-				dir = 'u';
-			else if (po->s[0] == '-' && po->s[1] == '-')
-				dir = 'd';
-			else if (po->s[0] == '+' && po->s[1] == '=')
-			{
-				dir = 'u';
-				step0 = semi2 + 3;
-				step1 = hb;
-			}
-			else if (po->s[0] == '-' && po->s[1] == '=')
-			{
-				dir = 'd';
-				step0 = semi2 + 3;
-				step1 = hb;
-			}
-		}
-		if (!dir)
-			ivar = -1;
-		/* cond: <var> </<= (up) or >/>= (down), comparison immediately after var */
-		if (ivar >= 0 && g->t[semi1 + 1].kind == GO_WORD &&
-			g->t[semi1 + 1].len == g->t[ivar].len &&
-			strncmp(g->t[semi1 + 1].s, g->t[ivar].s, g->t[ivar].len) == 0 &&
-			g->t[semi1 + 2].kind == GO_OP &&
-			(g->t[semi1 + 2].s[0] == '<' || g->t[semi1 + 2].s[0] == '>') &&
-			(g->t[semi1 + 2].len == 1 ||
-			 (g->t[semi1 + 2].len == 2 && g->t[semi1 + 2].s[1] == '=')))
-		{
-			condc = g->t[semi1 + 2].s[0];
-			inclusive = (g->t[semi1 + 2].len == 2);
-		}
-		else
-			ivar = -1;
-		/* the comparison must agree with the increment direction */
-		if (ivar >= 0 && ((dir == 'u' && condc != '<') || (dir == 'd' && condc != '>')))
-			ivar = -1;
-
-		if (ivar >= 0)
-		{
-			plx_indent(&g->cx->out, ind);
-			appendStringInfo(&g->cx->out, "FOR %s IN%s", go_ident(g->t[ivar].s, g->t[ivar].len),
-							 dir == 'd' ? " REVERSE" : "");
-			go_emit_range(g, ivar + 2, semi1, &g->cx->out);		/* A (loop start) */
-			appendStringInfoString(&g->cx->out, " ..");
-			if (inclusive)
-				go_emit_range(g, semi1 + 3, semi2, &g->cx->out);	/* B (bound) */
-			else
-			{
-				appendStringInfoString(&g->cx->out, " (");
-				go_emit_range(g, semi1 + 3, semi2, &g->cx->out);	/* B */
-				appendStringInfo(&g->cx->out, ") %c 1", dir == 'd' ? '+' : '-');
-			}
-			if (step0 >= 0)
-			{
-				if (step1 <= step0)
-					go_err(g, "for loop step (+=/-=) is missing its amount");
-				appendStringInfoString(&g->cx->out, " BY");
-				go_emit_range(g, step0, step1, &g->cx->out);
-			}
-			appendStringInfoString(&g->cx->out, " LOOP\n");
-			g->pos = hb;
-			g->cx->loopdepth++;
-			go_block(g, ind + 1);
-			g->cx->loopdepth--;
-			plx_indent(&g->cx->out, ind);
-			appendStringInfoString(&g->cx->out, "END LOOP;\n");
-			go_eat_semi(g);
-			return;
-		}
-	}
-
-	/* general C-style for -> [init;] WHILE cond LOOP body post; END LOOP.
-	 * (continue re-tests the condition without running the post statement, as
-	 * in plpgsql; use the counting form above when that matters.) */
+	/*
+	 * for init; cond; post { } becomes
+	 *
+	 *     [DECLARE v T := A; BEGIN]  when init is "v := A": v belongs to the loop
+	 *     [init;]                    any other init statement
+	 *     WHILE cond LOOP
+	 *         [<<__plx_cN>> BEGIN] body [END;]
+	 *         post;
+	 *     END LOOP;
+	 *     [END;]
+	 *
+	 * A plpgsql integer FOR is not equivalent: it evaluates its bound once,
+	 * keeps its own counter (so the body cannot move the loop variable, and a
+	 * variable declared before the loop is never updated), and rounds a float
+	 * start to an integer. Go re-tests cond before every iteration. continue
+	 * leaves the labelled body block, so post still runs.
+	 */
 	if (semi1 >= 0)
 	{
-		if (semi1 > h0)					/* init statement */
+		const char *save_label = g->cont_label;
+		const char *save_brk = g->brk_label;
+		char	   *label = NULL;
+		char	   *lvar = NULL;
+		PlxLocal2  *lv = NULL;		/* the loop variable while the body is emitted */
+		char	   *lv_saved = NULL;
+		bool		lv_added = false,
+					lv_const = false,
+					lv_untyped = false;
+		int			bodyend = go_match(g, hb, g->nt);
+		int			bind = ind;
+		int			j;
+
+		if (g->t[h0].kind == GO_WORD && h0 + 2 < semi1 &&
+			g->t[h0 + 1].kind == GO_OP && g->t[h0 + 1].len == 2 &&
+			g->t[h0 + 1].s[0] == ':' && g->t[h0 + 1].s[1] == '=')
 		{
-			go_simple(g, ind, semi1);
+			char	   *ltyp;
+
+			/*
+			 * The DECLARE below hides any local or parameter that plpgsql
+			 * folds to the same name, so reject one spelled another way.
+			 */
+			plx_check_loop_var(g->cx, g->t[h0].s, g->t[h0].len);
+			lvar = go_ident(g->t[h0].s, g->t[h0].len);
+			ltyp = go_loop_var_type(g, h0 + 2, semi1);
+			if (!ltyp)
+				plx_err(g->cx, g->t[h0].line,
+						"cannot infer a PostgreSQL type for loop variable \"%s\"; declare it before the loop (var %s T) and write for %s = ...",
+						lvar, lvar, lvar);
+			/*
+			 * The start value is the DECLARE default: plpgsql evaluates it
+			 * before the new variable is in scope, so for i := i reads the
+			 * outer i, as in Go.
+			 */
+			plx_indent(&g->cx->out, ind);
+			appendStringInfo(&g->cx->out, "DECLARE\n");
+			plx_indent(&g->cx->out, ind + 1);
+			appendStringInfo(&g->cx->out, "%s %s :=", lvar, ltyp);
+			go_emit_range(g, h0 + 2, semi1, &g->cx->out);
+			appendStringInfoString(&g->cx->out, ";\n");
+			plx_indent(&g->cx->out, ind);
+			appendStringInfoString(&g->cx->out, "BEGIN\n");
+			bind = ind + 1;
+
+			/*
+			 * Type the name as the loop variable for the body, so string(j) and
+			 * the operand typing see an integer, and restore it after the loop.
+			 * A local shadows a parameter of the same name in the type lookups,
+			 * as the loop variable shadows it in Go and in the DECLARE above.
+			 */
+			lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
+			if (lv)
+			{
+				/* a shadowed constant: the loop variable is not constant */
+				lv_saved = lv->typ;
+				lv_const = lv->is_const;
+				lv_untyped = lv->untyped;
+				lv->is_const = lv->untyped = false;
+			}
+			else
+			{
+				lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
+				lv_added = true;
+			}
+			lv->typ = ltyp;
 		}
+		else if (semi1 > h0)				/* any other init statement */
+			go_simple(g, bind, semi1);
+
 		g->pos = hb;
-		plx_indent(&g->cx->out, ind);
+		plx_indent(&g->cx->out, bind);
 		appendStringInfoString(&g->cx->out, "WHILE");
 		if (semi2 > semi1 + 1)
 			go_emit_range(g, semi1 + 1, semi2, &g->cx->out);
 		else
 			appendStringInfoString(&g->cx->out, " true");
 		appendStringInfoString(&g->cx->out, " LOOP\n");
-		go_block(g, ind + 1);
+
+		/* a continue anywhere in the body needs the labelled block */
+		for (j = hb; j < bodyend; j++)
+			if (go_ci(&g->t[j], "continue"))
+			{
+				label = psprintf("__plx_c%d", ++g->cx->subq);
+				break;
+			}
+		g->cx->loopdepth++;
+		g->brk_label = NULL;
+		if (label)
+		{
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfo(&g->cx->out, "<<%s>>\n", label);
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfoString(&g->cx->out, "BEGIN\n");
+			g->cont_label = label;
+			go_block(g, bind + 2);
+			g->cont_label = save_label;
+			plx_indent(&g->cx->out, bind + 1);
+			appendStringInfoString(&g->cx->out, "END;\n");
+		}
+		else
+		{
+			g->cont_label = NULL;
+			go_block(g, bind + 1);
+			g->cont_label = save_label;
+		}
+		g->cx->loopdepth--;
+		g->brk_label = save_brk;
 		if (semi2 >= 0 && hb > semi2 + 1)		/* post statement */
 		{
 			int			save = g->pos;
 
 			g->pos = semi2 + 1;
-			go_simple(g, ind + 1, hb);
+			go_simple(g, bind + 1, hb);
 			g->pos = save;
 		}
-		plx_indent(&g->cx->out, ind);
+		plx_indent(&g->cx->out, bind);
 		appendStringInfoString(&g->cx->out, "END LOOP;\n");
+		if (lvar)
+		{
+			plx_indent(&g->cx->out, ind);
+			appendStringInfoString(&g->cx->out, "END;\n");
+		}
+		if (lv_added)
+			plx_local_drop(g->cx, lv);
+		else if (lv)
+		{
+			lv->typ = lv_saved;
+			lv->is_const = lv_const;
+			lv->untyped = lv_untyped;
+		}
 		go_eat_semi(g);
 		return;
 	}
@@ -1954,24 +4019,41 @@ go_for(Go *g, int ind)
 	else
 		appendStringInfoString(&g->cx->out, "LOOP\n");
 	g->pos = hb;
-	g->cx->loopdepth++;
-	go_block(g, ind + 1);
-	g->cx->loopdepth--;
+	go_loop_body(g, ind + 1);
 	plx_indent(&g->cx->out, ind);
 	appendStringInfoString(&g->cx->out, "END LOOP;\n");
 	go_eat_semi(g);
 }
 
-/* switch [tag] { case a, b: ...; default: ... } -> IF/ELSIF/ELSE */
+/*
+ * switch tag { case a, b: ...; default: ... } -> CASE tag WHEN a, b ... END CASE
+ * switch { case c: ...; default: ... }          -> IF/ELSIF/ELSE
+ *
+ * Go evaluates the tag once. plpgsql's simple CASE does too, and compares it
+ * with each WHEN value as a whole (tag IN (a, b)), so `case a || b` means
+ * tag = (a OR b), as in Go. A CASE with no match and no ELSE raises
+ * case_not_found, so a tagged switch always gets an ELSE.
+ *
+ * Go runs default only when no case matches, wherever default stands, so its
+ * body is emitted into a buffer of its own and appended as the final ELSE.
+ * break inside a switch leaves only the switch: when the switch holds a
+ * break, the chain goes in a labelled block and break lowers to EXIT label.
+ */
 static void
 go_switch(Go *g, int ind)
 {
 	int			hb,
 				t0,
 				tag0 = -1,
-				tag1 = -1;
+				tag1 = -1,
+				close,
+				sind = ind,
+				j;
 	bool		first = true,
 				had_default = false;
+	char	   *label = NULL;
+	const char *save_brk = g->brk_label;
+	StringInfoData defbuf;
 
 	g->pos++;								/* switch */
 	t0 = g->pos;
@@ -1985,11 +4067,29 @@ go_switch(Go *g, int ind)
 		g->pos = hb;
 	if (go_cur(g)->kind != GO_LBRACE)
 		go_err(g, "expected { after switch");
+	close = go_match(g, g->pos, g->nt);
+	for (j = g->pos; close > 0 && j < close; j++)
+		if (go_ci(&g->t[j], "break"))
+		{
+			label = psprintf("__plx_s%d", ++g->cx->subq);
+			break;
+		}
+	if (label)
+	{
+		plx_indent(&g->cx->out, ind);
+		appendStringInfo(&g->cx->out, "<<%s>>\n", label);
+		plx_indent(&g->cx->out, ind);
+		appendStringInfoString(&g->cx->out, "BEGIN\n");
+		sind = ind + 1;
+	}
+	g->brk_label = label;
+	initStringInfo(&defbuf);
 	g->pos++;								/* { */
 	go_eat_semi(g);
 	while (go_cur(g)->kind != GO_RBRACE && go_cur(g)->kind != GO_EOF)
 	{
 		bool		is_default = go_ci(go_cur(g), "default");
+		StringInfoData save_out;
 
 		if (!go_ci(go_cur(g), "case") && !is_default)
 			go_err(g, "expected case or default in switch");
@@ -1999,7 +4099,6 @@ go_switch(Go *g, int ind)
 			/* case values up to the ':' ; multiple values are OR-ed */
 			int			cv0 = g->pos,
 						colon = -1,
-						j,
 						depth = 0;
 
 			for (j = g->pos; j < g->nt; j++)
@@ -2018,8 +4117,16 @@ go_switch(Go *g, int ind)
 			}
 			if (colon < 0)
 				go_err(g, "expected : after case");
-			plx_indent(&g->cx->out, ind);
-			appendStringInfoString(&g->cx->out, first ? "IF" : "ELSIF");
+			if (tag0 >= 0 && first)
+			{
+				plx_indent(&g->cx->out, sind);
+				appendStringInfoString(&g->cx->out, "CASE (");
+				go_emit_range(g, tag0, tag1, &g->cx->out);
+				appendStringInfoString(&g->cx->out, ")\n");
+			}
+			plx_indent(&g->cx->out, sind);
+			appendStringInfoString(&g->cx->out,
+								   tag0 >= 0 ? "WHEN" : first ? "IF" : "ELSIF");
 			/* split the case values on top-level commas */
 			{
 				int			s = cv0,
@@ -2037,14 +4144,11 @@ go_switch(Go *g, int ind)
 					else if (k == GO_COMMA && d == 0)
 					{
 						if (nc)
-							appendStringInfoString(&g->cx->out, " OR");
-						if (tag0 >= 0)
-						{
-							appendStringInfoChar(&g->cx->out, ' ');
-							go_emit_range(g, tag0, tag1, &g->cx->out);
-							appendStringInfoString(&g->cx->out, " =");
-						}
+							appendStringInfoString(&g->cx->out,
+												   tag0 >= 0 ? "," : " OR");
+						appendStringInfoString(&g->cx->out, " (");
 						go_emit_range(g, s, j, &g->cx->out);
+						appendStringInfoChar(&g->cx->out, ')');
 						s = j + 1;
 						nc++;
 					}
@@ -2056,9 +4160,10 @@ go_switch(Go *g, int ind)
 		}
 		else
 		{
-			int			colon = -1,
-						j;
+			int			colon = -1;
 
+			if (had_default)
+				go_err(g, "multiple defaults in switch");
 			for (j = g->pos; j < g->nt; j++)
 				if (g->t[j].kind == GO_OP && g->t[j].len == 1 && g->t[j].s[0] == ':')
 				{
@@ -2067,31 +4172,81 @@ go_switch(Go *g, int ind)
 				}
 			if (colon < 0)
 				go_err(g, "expected : after default");
-			plx_indent(&g->cx->out, ind);
-			appendStringInfoString(&g->cx->out, first ? "IF true THEN\n" : "ELSE\n");
 			g->pos = colon + 1;
 			had_default = true;
-			first = false;
 		}
 		go_eat_semi(g);
+		/* the default body goes to its own buffer, emitted last */
+		if (is_default)
+		{
+			save_out = g->cx->out;
+			g->cx->out = defbuf;
+		}
 		/* the case body runs until the next case/default or the closing } */
 		while (!go_ci(go_cur(g), "case") && !go_ci(go_cur(g), "default") &&
 			   go_cur(g)->kind != GO_RBRACE && go_cur(g)->kind != GO_EOF)
 		{
 			if (go_ci(go_cur(g), "fallthrough"))
 				go_err(g, "fallthrough is not supported");
-			go_stmt(g, ind + 1);
+			go_stmt(g, sind + 1);
+		}
+		if (is_default)
+		{
+			defbuf = g->cx->out;
+			g->cx->out = save_out;
 		}
 	}
 	if (go_cur(g)->kind == GO_RBRACE)
 		g->pos++;
 	go_eat_semi(g);
-	if (!first)
+	if (first && tag0 >= 0 && had_default)
 	{
-		(void) had_default;
-		plx_indent(&g->cx->out, ind);
+		/* no case: Go still evaluates the tag once, then runs default */
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "PERFORM (");
+		go_emit_range(g, tag0, tag1, &g->cx->out);
+		appendStringInfoString(&g->cx->out, ");\n");
+	}
+	if (first && had_default)
+	{
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "IF true THEN\n");
+		appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		plx_indent(&g->cx->out, sind);
 		appendStringInfoString(&g->cx->out, "END IF;\n");
 	}
+	else if (!first && tag0 >= 0)
+	{
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "ELSE\n");
+		if (had_default)
+			appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		else
+		{
+			plx_indent(&g->cx->out, sind + 1);
+			appendStringInfoString(&g->cx->out, "NULL;\n");
+		}
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "END CASE;\n");
+	}
+	else if (!first)
+	{
+		if (had_default)
+		{
+			plx_indent(&g->cx->out, sind);
+			appendStringInfoString(&g->cx->out, "ELSE\n");
+			appendBinaryStringInfo(&g->cx->out, defbuf.data, defbuf.len);
+		}
+		plx_indent(&g->cx->out, sind);
+		appendStringInfoString(&g->cx->out, "END IF;\n");
+	}
+	pfree(defbuf.data);
+	if (label)
+	{
+		plx_indent(&g->cx->out, ind);
+		appendStringInfoString(&g->cx->out, "END;\n");
+	}
+	g->brk_label = save_brk;
 }
 
 /* return [expr] */
@@ -2154,14 +4309,20 @@ go_stmt(Go *g, int ind)
 	{
 		g->pos++;
 		plx_indent(&g->cx->out, ind);
-		appendStringInfoString(&g->cx->out, "EXIT;\n");
+		if (g->brk_label)		/* leave the switch, not a loop around it */
+			appendStringInfo(&g->cx->out, "EXIT %s;\n", g->brk_label);
+		else
+			appendStringInfoString(&g->cx->out, "EXIT;\n");
 		go_eat_semi(g);
 	}
 	else if (go_ci(tk, "continue"))
 	{
 		g->pos++;
 		plx_indent(&g->cx->out, ind);
-		appendStringInfoString(&g->cx->out, "CONTINUE;\n");
+		if (g->cont_label)		/* leave the body block; post still runs */
+			appendStringInfo(&g->cx->out, "EXIT %s;\n", g->cont_label);
+		else
+			appendStringInfoString(&g->cx->out, "CONTINUE;\n");
 		go_eat_semi(g);
 	}
 	else if (go_ci(tk, "func"))
@@ -2200,7 +4361,25 @@ plx_go_parse_body(Ctx *cx)
 
 	memset(&g, 0, sizeof(g));
 	g.cx = cx;
+	g.arrlen = -1;
 	go_lex(&g, cx->body);
+
+	/*
+	 * make(...) has no lowering. Left alone it reaches plpgsql as written, and
+	 * the error names something else (a syntax error at "[", a type that
+	 * cannot be inferred, or a case clash with the type name), so reject it
+	 * here first. A field or method named make (x.make(...)) is not the
+	 * builtin.
+	 */
+	{
+		int			i;
+
+		for (i = 0; i + 1 < g.nt; i++)
+			if (go_ci(&g.t[i], "make") && g.t[i + 1].kind == GO_LP &&
+				(i == 0 || g.t[i - 1].kind != GO_DOT))
+				plx_err(cx, g.t[i].line,
+						"make is not supported; use a slice literal such as []int{1, 2}, or array_fill(0, []int{n}) for n zeros");
+	}
 	go_eat_semi(&g);
 
 	/* an outer { ... } wrapping the whole body is unwrapped */

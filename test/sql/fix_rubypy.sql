@@ -1,0 +1,320 @@
+-- Regression tests for bugs found by the 2026-11-19 audit (fix_rubypy).
+-- Each case names its audit finding (A<n>).
+-- A20: an integer for-loop variable keeps its last value after the loop
+SET client_min_messages = warning;
+CREATE FUNCTION fr_a20_py_break() RETURNS int LANGUAGE plxpython3 AS $$
+i = 100
+for i in range(10):
+    if i * i > 20:
+        break
+return i
+$$;
+SELECT fr_a20_py_break() AS py_expect_5;
+CREATE FUNCTION fr_a20_py_done() RETURNS int LANGUAGE plxpython3 AS $$
+i = 0
+for i in range(5):
+    pass
+return i
+$$;
+SELECT fr_a20_py_done() AS py_expect_4;
+CREATE FUNCTION fr_a20_py_after() RETURNS int LANGUAGE plxpython3 AS $$
+for k in range(2, 12, 3):
+    pass
+return k
+$$;
+SELECT fr_a20_py_after() AS py_expect_11;
+CREATE FUNCTION fr_a20_py_empty() RETURNS int LANGUAGE plxpython3 AS $$
+i = 7
+for i in range(0):
+    pass
+return i
+$$;
+SELECT fr_a20_py_empty() AS py_expect_7;
+CREATE FUNCTION fr_a20_py_param(n int) RETURNS int LANGUAGE plxpython3 AS $$
+for n in range(n):
+    pass
+return n
+$$;
+SELECT fr_a20_py_param(3) AS py_expect_2;
+CREATE FUNCTION fr_a20_rb_done() RETURNS int LANGUAGE plxruby AS $$
+i = 0
+for i in 1..5
+  x = 1
+end
+return i
+$$;
+SELECT fr_a20_rb_done() AS rb_expect_5;
+CREATE FUNCTION fr_a20_rb_break() RETURNS int LANGUAGE plxruby AS $$
+i = 100
+for i in 0...10 do
+  break if i * i > 20
+end
+return i
+$$;
+SELECT fr_a20_rb_break() AS rb_expect_5;
+-- a loop variable used only inside the loop still compiles to a plain FOR
+CREATE FUNCTION fr_a20_py_local() RETURNS int LANGUAGE plxpython3 AS $$
+t = 0
+for j in range(4):
+    t = t + j
+return t
+$$;
+SELECT fr_a20_py_local() AS py_expect_6;
+SELECT prosrc ~ 'FOR j IN 0' AS plain_for FROM pg_proc WHERE proname = 'fr_a20_py_local';
+-- A21: plxpython3 except with an unknown class is rejected, not turned into WHEN OTHERS
+\set VERBOSITY terse
+CREATE FUNCTION fr_a21_unknown() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except KeyError:
+    return "caught by KeyError handler"
+$$;
+CREATE FUNCTION fr_a21_typo() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except PG::UniqueVoilation as e:
+    return "typo caught"
+$$;
+CREATE FUNCTION fr_a21_tuple_miss() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, PG::CheckViolation) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_miss();
+CREATE FUNCTION fr_a21_tuple_hit() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except (PG::UniqueViolation, ZeroDivisionError) as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_tuple_hit();
+CREATE FUNCTION fr_a21_tuple_bad() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    return "ok"
+except (PG::UniqueViolation, KeyError):
+    return "caught"
+$$;
+CREATE FUNCTION fr_a21_exception() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except Exception as e:
+    return f"caught: {e.message}"
+$$;
+SELECT fr_a21_exception();
+CREATE FUNCTION fr_a21_bare() RETURNS text LANGUAGE plxpython3 AS $$
+try:
+    perform("SELECT 1/0")
+    return "ok"
+except:
+    return "caught"
+$$;
+SELECT fr_a21_bare();
+\set VERBOSITY default
+-- A24: plxruby each_with_index over an array or a range sets the index
+CREATE FUNCTION fr_a24_array() RETURNS int LANGUAGE plxruby AS $$
+i = 42
+total = 0
+v #:: int
+[10, 20, 30].each_with_index do |v, i|
+  total = total + i
+end
+return total
+$$;
+SELECT fr_a24_array() AS rb_expect_3;
+CREATE FUNCTION fr_a24_range() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each_with_index do |v, i|
+  total = total + v * 10 + i
+end
+return total
+$$;
+SELECT fr_a24_range() AS rb_expect_183;
+\set VERBOSITY terse
+CREATE FUNCTION fr_a24_noidx() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each_with_index do |v|
+  total = total + v
+end
+return total
+$$;
+CREATE FUNCTION fr_a24_each2() RETURNS int LANGUAGE plxruby AS $$
+total = 0
+(5..7).each do |v, i|
+  total = total + i
+end
+return total
+$$;
+\set VERBOSITY default
+-- A49: plxpython3 rejects string prefixes other than f. Triple-quoted strings
+-- are lexed as one literal since fix/engine (A22), so they now compile.
+\set VERBOSITY terse
+CREATE FUNCTION fr_a49_tq_dq() RETURNS text LANGUAGE plxpython3 AS $$
+return """ab"""
+$$;
+CREATE FUNCTION fr_a49_tq_sq() RETURNS text LANGUAGE plxpython3 AS $$
+return '''ab'''
+$$;
+CREATE FUNCTION fr_a49_ftq() RETURNS text LANGUAGE plxpython3 AS $$
+return f"""a{1}b"""
+$$;
+CREATE FUNCTION fr_a49_raw() RETURNS text LANGUAGE plxpython3 AS $$
+return r"a\nb"
+$$;
+CREATE FUNCTION fr_a49_bytes() RETURNS text LANGUAGE plxpython3 AS $$
+return b'ab'
+$$;
+CREATE FUNCTION fr_a49_uni() RETURNS text LANGUAGE plxpython3 AS $$
+return u"ab"
+$$;
+CREATE FUNCTION fr_a49_rawf() RETURNS text LANGUAGE plxpython3 AS $$
+return rf"a{1}"
+$$;
+CREATE FUNCTION fr_a49_nested() RETURNS text LANGUAGE plxpython3 AS $$
+return f"{r'a\nb'}"
+$$;
+CREATE FUNCTION fr_a49_nested_tq() RETURNS text LANGUAGE plxpython3 AS $$
+return f"{'''x'''}"
+$$;
+-- plain strings and f-strings still work
+CREATE FUNCTION fr_a49_plain() RETURNS text LANGUAGE plxpython3 AS $$
+br = "x"
+return f"{br}'q'"
+$$;
+SELECT fr_a49_plain();
+SELECT fr_a49_tq_dq() AS expect_ab, fr_a49_tq_sq() AS expect_ab,
+       fr_a49_ftq() AS expect_a1b, fr_a49_nested_tq() AS expect_x;
+\set VERBOSITY default
+-- A20: (review) a Ruby parameter, a use only inside a string, and nested reuse
+CREATE FUNCTION fr_a20_rb_param(n int) RETURNS int LANGUAGE plxruby AS $$
+for n in 0...n
+  x = 1
+end
+return n
+$$;
+SELECT fr_a20_rb_param(3) AS rb_expect_2;
+CREATE FUNCTION fr_a20_py_fstr() RETURNS text LANGUAGE plxpython3 AS $$
+for k in range(4):
+    pass
+return f"k={k}"
+$$;
+SELECT fr_a20_py_fstr() AS py_expect_k3;
+CREATE FUNCTION fr_a20_rb_interp() RETURNS text LANGUAGE plxruby AS $$
+for k in 1...4
+  x = 1
+end
+return "k=#{k}"
+$$;
+SELECT fr_a20_rb_interp() AS rb_expect_k3;
+CREATE FUNCTION fr_a20_py_nested() RETURNS int LANGUAGE plxpython3 AS $$
+t = 0
+for i in range(3):
+    for i in range(2):
+        t = t + 1
+return i * 10 + t
+$$;
+SELECT fr_a20_py_nested() AS py_expect_16;
+CREATE FUNCTION fr_a20_rb_nested() RETURNS int LANGUAGE plxruby AS $$
+t = 0
+for i in 0..2
+  for i in 0..1
+    t = t + 1
+  end
+end
+return i * 10 + t
+$$;
+SELECT fr_a20_rb_nested() AS rb_expect_16;
+-- A24: (review) the each_with_index index is local to the block
+CREATE FUNCTION fr_a24_arr_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+v #:: int
+[10, 20].each_with_index do |v, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_arr_param(7) AS rb_expect_701;
+CREATE FUNCTION fr_a24_rng_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+(1..2).each_with_index do |v, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_rng_param(7) AS rb_expect_701;
+CREATE FUNCTION fr_a24_qry_param(i int) RETURNS int LANGUAGE plxruby AS $$
+x = 0
+x = i
+t = 0
+query("SELECT g FROM generate_series(1, 3) g").each_with_index do |r, i|
+  t = t + i
+end
+return x * 100 + t
+$$;
+SELECT fr_a24_qry_param(7) AS rb_expect_703;
+CREATE FUNCTION fr_a24_outer() RETURNS int LANGUAGE plxruby AS $$
+i = 42
+v #:: int
+t = 0
+[10, 20, 30].each_with_index do |v, i|
+  t = t + i
+end
+return i * 100 + t
+$$;
+SELECT fr_a24_outer() AS rb_expect_4203;
+CREATE FUNCTION fr_a24_outer_text() RETURNS text LANGUAGE plxruby AS $$
+i = "x"
+v #:: int
+t = 0
+[10, 20, 30].each_with_index do |v, i|
+  t = t + v + i
+end
+return "#{i}#{t}"
+$$;
+SELECT fr_a24_outer_text() AS rb_expect_x63;
+CREATE FUNCTION fr_a24_interp() RETURNS text LANGUAGE plxruby AS $$
+s = ""
+(5..6).each_with_index do |v, i|
+  s = "#{s}#{i}:#{v} "
+end
+return s
+$$;
+SELECT fr_a24_interp() AS rb_expect_0_5_1_6;
+\set VERBOSITY terse
+CREATE FUNCTION fr_a24_same() RETURNS int LANGUAGE plxruby AS $$
+t = 0
+(5..7).each_with_index do |v, v|
+  t = t + v
+end
+return t
+$$;
+\set VERBOSITY default
+-- Merge of fix/rubypy with fix/engine: the each_with_index index is declared
+-- in a nested plpgsql block, so it hides a local or parameter that differs
+-- only by case. It must go through the A5 spelling check like a loop variable.
+\set VERBOSITY terse
+CREATE FUNCTION fr_merge_idx_local() RETURNS int LANGUAGE plxruby AS $$
+i = 100
+s = 0
+(1..3).each_with_index do |v, I|
+  s += i
+end
+return s
+$$;
+CREATE FUNCTION fr_merge_idx_param(i int) RETURNS int LANGUAGE plxruby AS $$
+s = 0
+(1..3).each_with_index do |v, I|
+  s += i
+end
+return s
+$$;
+\set VERBOSITY default

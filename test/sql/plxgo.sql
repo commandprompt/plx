@@ -246,3 +246,25 @@ CREATE FUNCTION g_panic_msg(who text) RETURNS int LANGUAGE plxgo AS $$
 $$;
 DO $d$ BEGIN PERFORM g_panic_msg(NULL);
 EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'caught: [%]', SQLERRM; END $d$;
+
+-- hostile nesting raises a clean error instead of overflowing the C stack
+DO $d$ BEGIN
+  EXECUTE 'CREATE FUNCTION g_deep() RETURNS int LANGUAGE plxgo AS $b$return '
+    || repeat('int(', 2000) || '1' || repeat(')', 2000) || E'\n$b$';
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+
+-- a Sprintf directive without a letter verb stays inside the literal
+CREATE FUNCTION g_badverb(x text) RETURNS text LANGUAGE plxgo AS $$
+	return fmt.Sprintf("%' || version() || '", x)
+$$;
+SELECT g_badverb('v');
+
+-- strconv.Itoa converts to text (it used to cast to integer) and strconv.Atoi
+-- to integer
+CREATE FUNCTION g_itoa_len(n int) RETURNS int LANGUAGE plxgo AS $$
+	return len(strconv.Itoa(n))
+$$;
+CREATE FUNCTION g_atoi(s text) RETURNS int LANGUAGE plxgo AS $$
+	return strconv.Atoi(s) + 1
+$$;
+SELECT g_itoa_len(12345), g_atoi('41');

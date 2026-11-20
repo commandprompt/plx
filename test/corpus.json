@@ -165,11 +165,20 @@
     {
       "id": "execute-dynamic-interp-using",
       "category": "execute-dynamic",
-      "description": "execute(expr, bind) is always dynamic; interpolation #{tbl} becomes runtime string concatenation || (tbl)::text and the extra arg becomes USING.",
-      "ruby_create": "CREATE FUNCTION c5(tbl text, note text) RETURNS void LANGUAGE plxruby AS $$\nexecute(\"INSERT INTO #{tbl}(msg) VALUES ($1)\", note)\nreturn\n$$;",
-      "expected_plpgsql_body": "BEGIN\n  EXECUTE 'INSERT INTO ' || (tbl)::text || '(msg) VALUES ($1)' USING note;\nEND;",
+      "description": "execute(expr, bind) is always dynamic. #{ident(tbl)} puts the table name into the query text as a quoted identifier (|| quote_ident((tbl)::text) ||), and the extra arg becomes USING.",
+      "ruby_create": "CREATE FUNCTION c5(tbl text, note text) RETURNS void LANGUAGE plxruby AS $$\nexecute(\"INSERT INTO #{ident(tbl)}(msg) VALUES ($1)\", note)\nreturn\n$$;",
+      "expected_plpgsql_body": "BEGIN\n  EXECUTE 'INSERT INTO ' || quote_ident((tbl)::text) || '(msg) VALUES ($1)' USING note;\n  RETURN;\nEND;",
       "test_sql": "CREATE TEMP TABLE aud(msg text);\nSELECT c5('aud','hello');\nSELECT msg FROM aud;",
       "expected_output": " c5 \n----\n \n(1 row)\n\n  msg  \n-------\n hello\n(1 row)"
+    },
+    {
+      "id": "execute-dynamic-interp-bare-identifier",
+      "category": "execute-dynamic",
+      "description": "Since 3.0.0 a bare #{tbl} in execute() is bound as a value: it becomes the next placeholder ($2) and joins USING. A placeholder cannot stand for a table name, so CREATE succeeds and the call fails with a syntax error at run time. Identifiers need #{ident(...)}.",
+      "ruby_create": "CREATE FUNCTION c5i(tbl text, note text) RETURNS void LANGUAGE plxruby AS $$\nexecute(\"INSERT INTO #{tbl}(msg) VALUES ($1)\", note)\nreturn\n$$;",
+      "expected_plpgsql_body": "BEGIN\n  EXECUTE 'INSERT INTO $2(msg) VALUES ($1)' USING note, tbl;\n  RETURN;\nEND;",
+      "test_sql": "CREATE TEMP TABLE aud(msg text);\nSELECT c5i('aud','hello');",
+      "expected_output": "ERROR:  syntax error at or near \"$2\"\nCONTEXT:  PL/pgSQL function c5i(text,text) line 3 at EXECUTE"
     },
     {
       "id": "setof-emit-returns-table",
@@ -277,7 +286,7 @@
       "ruby_create": "CREATE FUNCTION e_case(x int) RETURNS text LANGUAGE plxruby AS $$\ncase x\nwhen 1\n  return 'one'\nelse\n  return 'other'\nend\n$$;",
       "expected_plpgsql_body": "BEGIN\n  CASE x\n  WHEN 1 THEN RETURN 'one';\n  ELSE RETURN 'other';\n  END CASE;\nEND;",
       "test_sql": "SELECT e_case(1) AS r;",
-      "expected_output": " r  \n-----\n one\n(1 row)"
+      "expected_output": "  r  \n-----\n one\n(1 row)"
     },
     {
       "id": "reject-nested-def",
@@ -286,7 +295,7 @@
       "ruby_create": "CREATE FUNCTION e_def(x int) RETURNS int LANGUAGE plxruby AS $$\ndef helper(a)\n  return a + 1\nend\nreturn helper(x)\n$$;",
       "expected_plpgsql_body": "-- none: transpile aborts at CREATE time; ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED)); no prosrc rewritten",
       "test_sql": "CREATE FUNCTION e_def(x int) RETURNS int LANGUAGE plxruby AS $$\ndef helper(a)\n  return a + 1\nend\nreturn helper(x)\n$$;",
-      "expected_output": "ERROR:  plxruby: 'def' (nested function definition) is not supported"
+      "expected_output": "ERROR:  plxruby: nested 'def' is not supported"
     },
     {
       "id": "reject-uninferable-local",
@@ -295,7 +304,7 @@
       "ruby_create": "CREATE FUNCTION e_infer(x int) RETURNS text LANGUAGE plxruby AS $$\nlabel = compute_thing(x)\nreturn label\n$$;",
       "expected_plpgsql_body": "-- none: transpile aborts at CREATE time; ereport(ERROR) demanding a #:: annotation; no prosrc rewritten",
       "test_sql": "CREATE FUNCTION e_infer(x int) RETURNS text LANGUAGE plxruby AS $$\nlabel = compute_thing(x)\nreturn label\n$$;",
-      "expected_output": "ERROR:  plxruby: cannot infer a PostgreSQL type for local variable \"label\" (first assigned at line 1); add an annotation, e.g. label = ... #:: text"
+      "expected_output": "ERROR:  plxruby: cannot infer a PostgreSQL type for local variable \"label\""
     },
     {
       "id": "cobol-scalar-return",

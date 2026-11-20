@@ -1,6 +1,6 @@
 # Go cookbook
 
-Practical recipes for the plxgo dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxgo chapter](plxgo.md) for the full language reference.
+Practical recipes for the plxgo dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxgo chapter](../plxgo.md) for the full language reference.
 
 ## Scalar function with branching
 
@@ -32,7 +32,7 @@ SELECT grade(95), grade(83), grade(72), grade(40);
 
 ## Accumulating loop
 
-A counting `for i := 1; i <= n; i++` lowers to a plpgsql integer `FOR`. The accumulator uses the short declaration `sum := 0`, so plx infers its type as `integer` from the literal. Initialize it to `0`: a bare `var sum int` starts as `NULL`, and `NULL += i` stays `NULL`.
+A three-clause `for i := 1; i <= n; i++` lowers to a plpgsql `WHILE` loop that tests `i <= n` before every pass, as Go does. The accumulator uses the short declaration `sum := 0`, so plx infers its type as `integer` from the literal. A bare `var sum int` works too: it starts at 0, Go's zero value.
 
 ```go
 CREATE FUNCTION sum_to(n int) RETURNS int LANGUAGE plxgo AS $$
@@ -54,15 +54,15 @@ SELECT sum_to(5), sum_to(100);
      15 |   5050
 ```
 
-## Build a text result without `+`
+## Join many values into one text result
 
-plxgo does not translate `+` on strings (it cannot tell numeric addition from concatenation without type information). Build text by appending to a `[]string` slice and joining it. `append` maps to `array_append`, and `array_to_string` is a PostgreSQL function called directly. `string(i)` converts the integer to text with a `::text` cast.
+To join many values with a separator, append them to a `[]string` slice and join it. (To join a few strings, `+` works when plx can see that every operand is a string; see [String concatenation with `+`](../plxgo.md#string-concatenation-with).) `append` maps to `array_append`, and `array_to_string` is a PostgreSQL function called directly. `strconv.Itoa(i)` formats the integer as decimal text. (`string(i)` would give the character with code point `i`, as in Go.)
 
 ```go
 CREATE FUNCTION csv_range(n int) RETURNS text LANGUAGE plxgo AS $$
 	var parts []string
 	for i := 1; i <= n; i++ {
-		parts = append(parts, string(i))
+		parts = append(parts, strconv.Itoa(i))
 	}
 	return array_to_string(parts, ",")
 $$;
@@ -290,7 +290,7 @@ SELECT slice_demo();
 
 ## Type conversions and the standard library
 
-`float64(x)` and `int(x)` become `::double precision` and `::integer` casts, and `string(x)` becomes `::text`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
+`float64(x)` becomes a `::double precision` cast, and `strconv.Itoa(x)` formats an integer as decimal text. `int(x)` truncates toward zero, as in Go, and then casts to `::integer`. A short `:=` cannot infer the type of a plain function call, so `root` is declared with `var root float64` before `math.Sqrt` assigns to it. `strings.ToUpper` and `math.Sqrt` are part of the mapped standard library subset.
 
 ```go
 CREATE FUNCTION describe_num(x int) RETURNS text LANGUAGE plxgo AS $$
@@ -299,7 +299,7 @@ CREATE FUNCTION describe_num(x int) RETURNS text LANGUAGE plxgo AS $$
 	root = math.Sqrt(f)
 	var parts []string
 	parts = append(parts, strings.ToUpper("sqrt"))
-	parts = append(parts, string(int(root)))
+	parts = append(parts, strconv.Itoa(int(root)))
 	return array_to_string(parts, "=")
 $$;
 ```

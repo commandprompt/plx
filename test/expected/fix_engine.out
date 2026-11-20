@@ -1,0 +1,1063 @@
+-- Regression tests for bugs found by the 2026-11-19 audit (fix_engine).
+-- Each case names its audit finding (A<n>).
+CREATE EXTENSION IF NOT EXISTS plx;
+NOTICE:  extension "plx" already exists, skipping
+SET client_min_messages = warning;
+-- A5: names that differ only by case are rejected, not merged into one variable
+CREATE FUNCTION fe_a5_param_rb(n int) RETURNS int LANGUAGE plxruby AS $$
+N = 10
+return n
+$$;
+ERROR:  plxruby: identifiers "N" and "n" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_local_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 1;
+let A = 2;
+return a;
+$$;
+ERROR:  plxjs: identifiers "a" and "A" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_local_py() RETURNS int LANGUAGE plxpython3 AS $$
+a = 1
+A = 2
+return a
+$$;
+ERROR:  plxpython3: identifiers "a" and "A" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_param_php(x int) RETURNS int LANGUAGE plxphp AS $$
+$X = 5;
+return $x;
+$$;
+ERROR:  plxphp: identifiers "X" and "x" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+-- A5: one consistent spelling of a parameter that SQL folded to lower case still works
+CREATE FUNCTION fe_a5_camel_js(userId int) RETURNS int LANGUAGE plxjs AS $$
+userId = userId + 1;
+return userId;
+$$;
+SELECT fe_a5_camel_js(1);
+ fe_a5_camel_js 
+----------------
+              2
+(1 row)
+
+-- A5: a variable read with a second spelling is rejected, not read as the first
+CREATE FUNCTION fe_a5_ref_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 1;
+return A + 1;
+$$;
+ERROR:  plxjs: identifiers "a" and "A" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+-- A5: names that differ only after byte 63 are the same name to plpgsql
+CREATE FUNCTION fe_a5_long_js() RETURNS int LANGUAGE plxjs AS $$
+let abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX = 1;
+let abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcY = 2;
+return abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX;
+$$;
+ERROR:  plxjs: identifiers "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcX" and "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcY" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+-- A5: a counting-loop variable spelled like an earlier local or parameter is rejected
+CREATE FUNCTION fe_a5_loop_js() RETURNS int LANGUAGE plxjs AS $$
+let i = 100;
+let s = 0;
+for (let I = 1; I <= 3; I++) { s += i; }
+return s;
+$$;
+ERROR:  plxjs: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_py() RETURNS int LANGUAGE plxpython3 AS $$
+i = 100
+s = 0
+for I in range(3):
+    s += i
+return s
+$$;
+ERROR:  plxpython3: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_rb(n int) RETURNS int LANGUAGE plxruby AS $$
+s = 0
+for N in 1..3
+  s += n
+end
+return s
+$$;
+ERROR:  plxruby: identifiers "N" and "n" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+CREATE FUNCTION fe_a5_loop_go() RETURNS int LANGUAGE plxgo AS $$
+i := 100
+s := 0
+for I := 1; I <= 3; I++ {
+	s += i
+}
+return s
+$$;
+ERROR:  plxgo: identifiers "i" and "I" are the same name to plpgsql, which ignores case
+HINT:  Rename one of them.
+-- A5: a TypeScript type after "as" is not a variable
+CREATE FUNCTION fe_a5_as_ts(x int) RETURNS int LANGUAGE plxts AS $$
+let num: number = x as Num;
+return num;
+$$;
+SELECT fe_a5_as_ts(4);
+ fe_a5_as_ts 
+-------------
+           4
+(1 row)
+
+-- A6: an integer literal with a leading zero is octal in Ruby, PHP and JS
+CREATE FUNCTION fe_a6_rb() RETURNS int LANGUAGE plxruby AS $$
+x = 0755
+return x + 0_17
+$$;
+SELECT fe_a6_rb();
+ fe_a6_rb 
+----------
+      508
+(1 row)
+
+CREATE FUNCTION fe_a6_php() RETURNS int LANGUAGE plxphp AS $$
+$x = 0755;
+return $x;
+$$;
+SELECT fe_a6_php();
+ fe_a6_php 
+-----------
+       493
+(1 row)
+
+CREATE FUNCTION fe_a6_js() RETURNS int LANGUAGE plxjs AS $$
+return 0755;
+$$;
+SELECT fe_a6_js();
+ fe_a6_js 
+----------
+      493
+(1 row)
+
+-- A6: a leading zero does not make a decimal fraction octal
+CREATE FUNCTION fe_a6_float_rb() RETURNS numeric LANGUAGE plxruby AS $$
+return 00.5 + 0
+$$;
+SELECT fe_a6_float_rb();
+ fe_a6_float_rb 
+----------------
+            0.5
+(1 row)
+
+-- A6: COBOL numbers are decimal, leading zeros included
+CREATE FUNCTION fe_a6_cob() RETURNS int LANGUAGE plxcobol AS $$
+       PROCEDURE DIVISION.
+           RETURN 0755.
+$$;
+SELECT fe_a6_cob();
+ fe_a6_cob 
+-----------
+       755
+(1 row)
+
+-- A6: Python and TypeScript reject a leading zero; 8 and 9 are not octal digits
+CREATE FUNCTION fe_a6_py() RETURNS int LANGUAGE plxpython3 AS $$
+return 0755
+$$;
+ERROR:  plxpython3: leading zeros in an integer literal are not allowed: 0755
+DETAIL:  at plxpython3 source line 2
+HINT:  Write 0o755 for an octal number.
+CREATE FUNCTION fe_a6_ts() RETURNS int LANGUAGE plxts AS $$
+return 0755;
+$$;
+ERROR:  plxts: leading zeros in an integer literal are not allowed: 0755
+DETAIL:  at plxts source line 2
+HINT:  Write 0o755 for an octal number.
+CREATE FUNCTION fe_a6_bad_rb() RETURNS int LANGUAGE plxruby AS $$
+return 0789
+$$;
+ERROR:  plxruby: invalid digit in octal literal: 0789
+DETAIL:  at plxruby source line 2
+-- A6: Go integer literals keep their base: 0755 and 0o755 are octal
+CREATE FUNCTION fe_a6_go() RETURNS text LANGUAGE plxgo AS $$
+a := 0755
+var b int = 0o17 + 0x1F + 0b101 + 1_000
+var c float64 = 00.5 + 0.5
+return fmt.Sprintf("%d %d %v", a, b, c)
+$$;
+SELECT fe_a6_go();
+  fe_a6_go  
+------------
+ 493 1051 1
+(1 row)
+
+CREATE FUNCTION fe_a6_go_bad() RETURNS int LANGUAGE plxgo AS $$
+return 0789
+$$;
+ERROR:  plxgo: invalid number literal "0789"
+DETAIL:  at plxgo source line 2
+-- A7: ^ is bitwise XOR in Ruby, PHP, JS, TS and Python, not SQL exponent
+CREATE FUNCTION fe_a7_xor_rb(a int, b int) RETURNS int LANGUAGE plxruby AS $$
+return a ^ b
+$$;
+SELECT fe_a7_xor_rb(6, 3);
+ fe_a7_xor_rb 
+--------------
+            5
+(1 row)
+
+CREATE FUNCTION fe_a7_xor_js() RETURNS int LANGUAGE plxjs AS $$
+return 5 ^ 3;
+$$;
+SELECT fe_a7_xor_js();
+ fe_a7_xor_js 
+--------------
+            6
+(1 row)
+
+-- A7: Go ^ is XOR or NOT, not a power, and &^ is AND NOT (A30 in
+-- fix_go computes them; 6 ^ 3 is 5 and 7 &^ 2 is 5, as in Go)
+CREATE FUNCTION fe_a7_xor_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
+return a ^ b
+$$;
+SELECT fe_a7_xor_go(6, 3);
+ fe_a7_xor_go 
+--------------
+            5
+(1 row)
+
+CREATE FUNCTION fe_a7_andnot_go(a int, b int) RETURNS int LANGUAGE plxgo AS $$
+a &^= b
+return a
+$$;
+SELECT fe_a7_andnot_go(7, 2);
+ fe_a7_andnot_go 
+-----------------
+               5
+(1 row)
+
+-- A7: SQL gives ^, &, | and the shifts one precedence, so a mix that
+-- the dialect would group differently is rejected instead of computed wrong
+CREATE FUNCTION fe_a7_mix_py(a int, b int, c int) RETURNS int LANGUAGE plxpython3 AS $$
+return a ^ b & c
+$$;
+ERROR:  plxpython3: mixed bitwise operators need parentheses: SQL reads &, |, ^, << and >> from left to right
+HINT:  Group the operator that should go first, for example a ^ (b & c).
+CREATE FUNCTION fe_a7_mix_js(a int, b int) RETURNS int LANGUAGE plxjs AS $$
+return a ^ b << 2;
+$$;
+ERROR:  plxjs: mixed bitwise operators need parentheses: SQL reads &, |, ^, << and >> from left to right
+HINT:  Group the operator that should go first, for example a ^ (b & c).
+CREATE FUNCTION fe_a7_mix_php(a int, b int, c int) RETURNS int LANGUAGE plxphp AS $$
+return ($a | $b & $c) + 1;
+$$;
+ERROR:  plxphp: mixed bitwise operators need parentheses: SQL reads &, |, ^, << and >> from left to right
+HINT:  Group the operator that should go first, for example a ^ (b & c).
+-- A7: a mix that SQL already groups the same way still works
+CREATE FUNCTION fe_a7_mixok_js(a int, b int, c int) RETURNS int LANGUAGE plxjs AS $$
+return (a & b | c) * 100 + ((a ^ b) & c) * 10 + (a ^ (b << 1));
+$$;
+SELECT fe_a7_mixok_js(1, 3, 2);
+ fe_a7_mixok_js 
+----------------
+            327
+(1 row)
+
+CREATE FUNCTION fe_a7_mixok_rb(a int, b int, c int) RETURNS int LANGUAGE plxruby AS $$
+return a | b ^ c
+$$;
+SELECT fe_a7_mixok_rb(1, 2, 3);
+ fe_a7_mixok_rb 
+----------------
+              0
+(1 row)
+
+-- A7: ** is right-associative and binds tighter than unary minus
+CREATE FUNCTION fe_a7_pow_py() RETURNS numeric LANGUAGE plxpython3 AS $$
+return 2 ** 3 ** 2
+$$;
+SELECT fe_a7_pow_py();
+ fe_a7_pow_py 
+--------------
+          512
+(1 row)
+
+CREATE FUNCTION fe_a7_powneg_rb() RETURNS numeric LANGUAGE plxruby AS $$
+return -2 ** 2
+$$;
+SELECT fe_a7_powneg_rb();
+ fe_a7_powneg_rb 
+-----------------
+              -4
+(1 row)
+
+CREATE FUNCTION fe_a7_pow_js(x int) RETURNS numeric LANGUAGE plxjs AS $$
+return (x + 1) ** 2 * 2 + abs(-x) ** 2 ** 1;
+$$;
+SELECT fe_a7_pow_js(2);
+ fe_a7_pow_js 
+--------------
+           22
+(1 row)
+
+CREATE FUNCTION fe_a7_pow_php() RETURNS numeric LANGUAGE plxphp AS $$
+return 2 ** -1;
+$$;
+SELECT fe_a7_pow_php();
+ fe_a7_pow_php 
+---------------
+           0.5
+(1 row)
+
+-- A7: a power inside a call or a parenthesized receiver stays inside it
+CREATE FUNCTION fe_a7_powcall_py(x int) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{int(x ** 0.5)} {str(x ** 2)} {float(x ** 2)}"
+$$;
+SELECT fe_a7_powcall_py(17);
+ fe_a7_powcall_py 
+------------------
+ 4 289 289
+(1 row)
+
+CREATE FUNCTION fe_a7_powrecv_rb(x int) RETURNS int LANGUAGE plxruby AS $$
+return (x ** 2).to_i + (x + 1) * (2 ** x)
+$$;
+SELECT fe_a7_powrecv_rb(3);
+ fe_a7_powrecv_rb 
+------------------
+               41
+(1 row)
+
+CREATE FUNCTION fe_a7_powarg_js(x int) RETURNS numeric LANGUAGE plxjs AS $$
+return abs(-(x ** 2)) + greatest(1, x ** 3);
+$$;
+SELECT fe_a7_powarg_js(2);
+ fe_a7_powarg_js 
+-----------------
+              12
+(1 row)
+
+-- A8: chained assignment a = b = v is rejected, not compiled to a := (b = v)
+CREATE FUNCTION fe_a8_js() RETURNS text LANGUAGE plxjs AS $$
+let a = "x";
+let b = "y";
+a = b = "z";
+return `${a},${b}`;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 4
+CREATE FUNCTION fe_a8_py() RETURNS int LANGUAGE plxpython3 AS $$
+a = 0
+b = 0
+a = b = 1
+return a + b
+$$;
+ERROR:  plxpython3: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxpython3 source line 4
+CREATE FUNCTION fe_a8_rb() RETURNS int LANGUAGE plxruby AS $$
+a = 0
+b = 0
+a += b = 1
+return a + b
+$$;
+ERROR:  plxruby: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxruby source line 4
+-- A8: a chained assignment to a field or element target is rejected too
+CREATE FUNCTION fe_a8_field_js() RETURNS trigger LANGUAGE plxjs AS $$
+let b = 0;
+NEW.x = b = 1;
+return NEW;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 3
+-- A8: a compound assignment such as <<=, &= or ??= inside a right-hand side is rejected too
+CREATE FUNCTION fe_a8_shift_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 1;
+a = b <<= 2;
+return a;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 4
+CREATE FUNCTION fe_a8_and_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 6;
+a = b &= 3;
+return a;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 4
+CREATE FUNCTION fe_a8_nullish_js() RETURNS int LANGUAGE plxjs AS $$
+let a = 0;
+let b = 1;
+a = b ??= 4;
+return a;
+$$;
+ERROR:  plxjs: chained assignment is not supported; assign each variable in its own statement
+DETAIL:  at plxjs source line 4
+-- A8: == in a right-hand side is a comparison, not an assignment
+CREATE FUNCTION fe_a8_ok_rb(x int) RETURNS boolean LANGUAGE plxruby AS $$
+ok = x == 1 #:: boolean
+return ok
+$$;
+SELECT fe_a8_ok_rb(1);
+ fe_a8_ok_rb 
+-------------
+ t
+(1 row)
+
+-- A11: escape sequences keep their meaning: \x41 is A, \v is a vertical tab
+CREATE FUNCTION fe_a11_js() RETURNS text LANGUAGE plxjs AS $$
+return "[\x41][\v][\b][\f][\u0042][\u{e9}]";
+$$;
+SELECT encode(convert_to(fe_a11_js(), 'UTF8'), 'hex') AS js;
+                   js                   
+----------------------------------------
+ 5b415d5b0b5d5b085d5b0c5d5b425d5bc3a95d
+(1 row)
+
+CREATE FUNCTION fe_a11_py() RETURNS text LANGUAGE plxpython3 AS $$
+return "[\x41][\a][\101][\u00e9][\q]"
+$$;
+SELECT encode(convert_to(fe_a11_py(), 'UTF8'), 'hex') AS py;
+                 py                 
+------------------------------------
+ 5b415d5b075d5b415d5bc3a95d5b5c715d
+(1 row)
+
+CREATE FUNCTION fe_a11_rb() RETURNS text LANGUAGE plxruby AS $$
+return "[\x41][\e][\s][\101][\u{41 42}][\q]"
+$$;
+SELECT encode(convert_to(fe_a11_rb(), 'UTF8'), 'hex') AS rb;
+                   rb                   
+----------------------------------------
+ 5b415d5b1b5d5b205d5b415d5b41425d5b715d
+(1 row)
+
+CREATE FUNCTION fe_a11_php() RETURNS text LANGUAGE plxphp AS $$
+return "[\x41][\e][\101][\u{41}][\q][\a][\$x]";
+$$;
+SELECT encode(convert_to(fe_a11_php(), 'UTF8'), 'hex') AS php;
+                       php                        
+--------------------------------------------------
+ 5b415d5b1b5d5b415d5b415d5b5c715d5b5c615d5b24785d
+(1 row)
+
+-- A11: a NUL character cannot be stored in text, so \0 is rejected
+CREATE FUNCTION fe_a11_nul_js() RETURNS text LANGUAGE plxjs AS $$
+return "a\0b";
+$$;
+ERROR:  plxjs: a string cannot contain a NUL character (\0)
+DETAIL:  at plxjs source line 2
+CREATE FUNCTION fe_a11_nul_rb() RETURNS text LANGUAGE plxruby AS $$
+return "a\0b"
+$$;
+ERROR:  plxruby: a string cannot contain a NUL character (\0)
+DETAIL:  at plxruby source line 2
+-- A11: Go escapes keep their meaning too
+CREATE FUNCTION fe_a11_go() RETURNS text LANGUAGE plxgo AS $$
+return "[\x41][\101][\v][\u00e9][\U0001F600][\a]"
+$$;
+SELECT encode(convert_to(fe_a11_go(), 'UTF8'), 'hex') AS go;
+                      go                      
+----------------------------------------------
+ 5b415d5b415d5b0b5d5bc3a95d5bf09f98805d5b075d
+(1 row)
+
+CREATE FUNCTION fe_a11_nul_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\x00b"
+$$;
+ERROR:  plxgo: a string literal cannot contain a NUL character
+DETAIL:  at plxgo source line 2
+CREATE FUNCTION fe_a11_bad_go() RETURNS text LANGUAGE plxgo AS $$
+return "a\xffb"
+$$;
+ERROR:  plxgo: a string literal's escapes do not form valid text in the database encoding
+DETAIL:  at plxgo source line 2
+-- A12: ? and : inside a template literal are text, not a ternary
+CREATE FUNCTION fe_a12_js(x int) RETURNS text LANGUAGE plxjs AS $$
+let s = `is it ${x}? yes: no`;
+return s;
+$$;
+SELECT fe_a12_js(1);
+    fe_a12_js     
+------------------
+ is it 1? yes: no
+(1 row)
+
+CREATE FUNCTION fe_a12_ts() RETURNS text LANGUAGE plxts AS $$
+return `a? b: c`;
+$$;
+SELECT fe_a12_ts();
+ fe_a12_ts 
+-----------
+ a? b: c
+(1 row)
+
+-- A12: a real ternary with template-literal branches still works
+CREATE FUNCTION fe_a12_tern_js(x int) RETURNS text LANGUAGE plxjs AS $$
+return x > 0 ? `pos? ${x}` : `neg: ${x}`;
+$$;
+SELECT fe_a12_tern_js(2), fe_a12_tern_js(-2);
+ fe_a12_tern_js | fe_a12_tern_js 
+----------------+----------------
+ pos? 2         | neg: -2
+(1 row)
+
+-- A22: adjacent string literals concatenate, as in Ruby and Python
+CREATE FUNCTION fe_a22_rb() RETURNS text LANGUAGE plxruby AS $$
+return "a""b"
+$$;
+SELECT fe_a22_rb();
+ fe_a22_rb 
+-----------
+ ab
+(1 row)
+
+CREATE FUNCTION fe_a22_py() RETURNS text LANGUAGE plxpython3 AS $$
+return 'a''b' "c"
+$$;
+SELECT fe_a22_py();
+ fe_a22_py 
+-----------
+ abc
+(1 row)
+
+-- A22: an escape string next to a raw string ending in a backslash stays closed
+CREATE FUNCTION fe_a22_esc_rb() RETURNS text LANGUAGE plxruby AS $$
+x = "\n"'x\\' #:: text
+return x
+$$;
+SELECT replace(fe_a22_esc_rb(), E'\n', '|');
+ replace 
+---------
+ |x\
+(1 row)
+
+-- A22: a Python triple-quoted string is one literal
+CREATE FUNCTION fe_a22_triple_py() RETURNS text LANGUAGE plxpython3 AS $$
+return """hello"""
+$$;
+SELECT fe_a22_triple_py();
+ fe_a22_triple_py 
+------------------
+ hello
+(1 row)
+
+CREATE FUNCTION fe_a22_triple2_py(n int) RETURNS text LANGUAGE plxpython3 AS $$
+s = f"""say "hi" {n}
+it's '''here'''""" #:: text
+return s
+$$;
+SELECT replace(fe_a22_triple2_py(1), E'\n', '|');
+          replace           
+----------------------------
+ say "hi" 1|it's '''here'''
+(1 row)
+
+-- A22: line numbers after a multi-line triple-quoted string stay right
+CREATE FUNCTION fe_a22_line_py() RETURNS int LANGUAGE plxpython3 AS $$
+s = """a
+b
+c"""
+break
+return 1
+$$;
+ERROR:  plxpython3: break outside a loop
+DETAIL:  at plxpython3 source line 5
+-- A1: a typed array, varchar(n) or char(n) local keeps its type when appended to
+CREATE FUNCTION fe_a1_push_rb(a text[]) RETURNS text[] LANGUAGE plxruby AS $$
+b = a #:: text[]
+b << 'y'
+return b
+$$;
+SELECT fe_a1_push_rb('{x}');
+ fe_a1_push_rb 
+---------------
+ {x,y}
+(1 row)
+
+CREATE FUNCTION fe_a1_vc_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "" /*:: varchar(3) */;
+for (let i = 1; i <= 5; i++) { s += "z"; }
+return s;
+$$;
+CREATE FUNCTION fe_a1_vc_php() RETURNS text LANGUAGE plxphp AS $$
+$s = "" /*:: varchar(3) */;
+for ($i = 1; $i <= 5; $i++) { $s .= "z"; }
+return $s;
+$$;
+CREATE FUNCTION fe_a1_vc_rb() RETURNS text LANGUAGE plxruby AS $$
+s = "" #:: character varying(3)
+s << "ab"
+s << "cd"
+return s
+$$;
+CREATE FUNCTION fe_a1_ch_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "a" /*:: char(2) */;
+s += "bc";
+return s;
+$$;
+\set VERBOSITY terse
+SELECT fe_a1_vc_js();
+ERROR:  value too long for type character varying(3)
+SELECT fe_a1_vc_php();
+ERROR:  value too long for type character varying(3)
+SELECT fe_a1_vc_rb();
+ERROR:  value too long for type character varying(3)
+SELECT fe_a1_ch_js();
+ERROR:  value too long for type character(2)
+\set VERBOSITY default
+-- A1: plain text and varchar locals still use the string builder
+CREATE FUNCTION fe_a1_vc_ok_js() RETURNS text LANGUAGE plxjs AS $$
+let s = "" /*:: varchar */;
+let t = "" /*:: text */;
+for (let i = 1; i <= 5; i++) { s += "z"; t += i; }
+return `${s}${t}`;
+$$;
+SELECT fe_a1_vc_ok_js();
+ fe_a1_vc_ok_js 
+----------------
+ zzzzz12345
+(1 row)
+
+SELECT proname, prosrc LIKE '%s public.plx_strbuild%' AS s_builder,
+       prosrc LIKE '%t public.plx_strbuild%' AS t_builder
+FROM pg_proc WHERE proname IN ('fe_a1_vc_ok_js', 'fe_a1_vc_js', 'fe_a1_ch_js')
+ORDER BY proname;
+    proname     | s_builder | t_builder 
+----------------+-----------+-----------
+ fe_a1_ch_js    | f         | f
+ fe_a1_vc_js    | f         | f
+ fe_a1_vc_ok_js | t         | t
+(3 rows)
+
+-- A1: PHP .= on an array local is rejected instead of pushing an element
+CREATE FUNCTION fe_a1_arr_php(a text[]) RETURNS text LANGUAGE plxphp AS $$
+$b = $a /*:: text[] */;
+$b .= "y";
+return $b;
+$$;
+ERROR:  plxphp: cannot append a string to array "b"
+DETAIL:  at plxphp source line 3
+-- A2: ARRAY['x'] and jsonb subscripts are not rewritten to record field access
+CREATE FUNCTION fe_a2_arr_js() RETURNS text[] LANGUAGE plxjs AS $$
+return ARRAY['x'];
+$$;
+SELECT fe_a2_arr_js();
+ fe_a2_arr_js 
+--------------
+ {x}
+(1 row)
+
+CREATE FUNCTION fe_a2_arr_rb() RETURNS text[] LANGUAGE plxruby AS $$
+return array["x"]
+$$;
+SELECT fe_a2_arr_rb();
+ fe_a2_arr_rb 
+--------------
+ {x}
+(1 row)
+
+CREATE FUNCTION fe_a2_jsub_js(j jsonb) RETURNS jsonb LANGUAGE plxjs AS $$
+return j['a'];
+$$;
+CREATE FUNCTION fe_a2_jsub_py(j jsonb) RETURNS jsonb LANGUAGE plxpython3 AS $$
+d = j #:: jsonb
+return d["a"]
+$$;
+SELECT proname, prosrc LIKE '%RETURN j[''a''];%' AS j_kept,
+       prosrc LIKE '%RETURN d[''a''];%' AS d_kept
+FROM pg_proc WHERE proname IN ('fe_a2_jsub_js', 'fe_a2_jsub_py') ORDER BY proname;
+    proname    | j_kept | d_kept 
+---------------+--------+--------
+ fe_a2_jsub_js | t      | f
+ fe_a2_jsub_py | f      | t
+(2 rows)
+
+-- A2: a composite parameter and a query row still take field subscripts
+CREATE TYPE fe_a2_pt AS (name text, "a b" int);
+CREATE FUNCTION fe_a2_comp_js(r fe_a2_pt) RETURNS text LANGUAGE plxjs AS $$
+return r['name'];
+$$;
+SELECT fe_a2_comp_js(ROW('bob', 1)::fe_a2_pt);
+ fe_a2_comp_js 
+---------------
+ bob
+(1 row)
+
+CREATE FUNCTION fe_a2_row_rb() RETURNS int LANGUAGE plxruby AS $$
+query('SELECT 7 AS "a b"').each do |row|
+  return row["a b"]
+end
+return 0
+$$;
+SELECT fe_a2_row_rb();
+ fe_a2_row_rb 
+--------------
+            7
+(1 row)
+
+-- A2: a variable named array is not the ARRAY constructor. array is an SQL
+-- reserved word, so plpgsql cannot compile the generated "array.name" and
+-- CREATE FUNCTION rejects it (see LIMITATIONS.md). Turn the compile check off
+-- to store the functions and inspect what plx generated.
+SET check_function_bodies = off;
+CREATE FUNCTION fe_a2_var_php() RETURNS text LANGUAGE plxphp AS $$
+$array = fetch_one("SELECT 'bob'::text AS name");
+return $array['name'];
+$$;
+CREATE FUNCTION fe_a2_var_rb() RETURNS text LANGUAGE plxruby AS $$
+array = fetch_one("SELECT 'bob'::text AS name")
+return array['name']
+$$;
+RESET check_function_bodies;
+SELECT proname, prosrc LIKE '%RETURN array.name;%' AS field_read
+FROM pg_proc WHERE proname IN ('fe_a2_var_php', 'fe_a2_var_rb') ORDER BY proname;
+    proname    | field_read 
+---------------+------------
+ fe_a2_var_php | t
+ fe_a2_var_rb  | t
+(2 rows)
+
+-- A10: PHP "$r->prop" and "$a[key]" interpolate the property or element
+CREATE FUNCTION fe_a10_php(i int) RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'bob'::text AS name");
+$a = ARRAY['x', 'y'] /*:: text[] */;
+return "Hello $r->name! $r[name] $a[1] $a[$i] $r->name->x $r-> $a[";
+$$;
+SELECT fe_a10_php(2);
+                fe_a10_php                
+------------------------------------------
+ Hello bob! bob x y bob->x (bob)-> {x,y}[
+(1 row)
+
+-- A18: a comment inside a multi-line expression is not copied into the SQL
+CREATE FUNCTION fe_a18_php(a int) RETURNS int LANGUAGE plxphp AS $$
+return $a # 3
+  + 1;
+$$;
+SELECT fe_a18_php(10);
+ fe_a18_php 
+------------
+         11
+(1 row)
+
+CREATE FUNCTION fe_a18_js(a int) RETURNS int LANGUAGE plxjs AS $$
+return a + // first -- x
+  1;
+$$;
+SELECT fe_a18_js(1);
+ fe_a18_js 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_ts(a int) RETURNS int LANGUAGE plxts AS $$
+return a /* it's */ + 1;
+$$;
+SELECT fe_a18_ts(1);
+ fe_a18_ts 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_py(a int) RETURNS int LANGUAGE plxpython3 AS $$
+return (a  # it's
+        + 1)
+$$;
+SELECT fe_a18_py(1);
+ fe_a18_py 
+-----------
+         2
+(1 row)
+
+CREATE FUNCTION fe_a18_rb(a int) RETURNS int LANGUAGE plxruby AS $$
+return a +   # don't
+  2
+$$;
+SELECT fe_a18_rb(1);
+ fe_a18_rb 
+-----------
+         3
+(1 row)
+
+-- A18: comment markers inside strings are kept
+CREATE FUNCTION fe_a18_str_js() RETURNS text LANGUAGE plxjs AS $$
+return `a // b ${
+  1}`;
+$$;
+SELECT fe_a18_str_js();
+ fe_a18_str_js 
+---------------
+ a // b 1
+(1 row)
+
+CREATE FUNCTION fe_a18_str_php() RETURNS text LANGUAGE plxphp AS $$
+return "a # b /* c */";
+$$;
+SELECT fe_a18_str_php();
+ fe_a18_str_php 
+----------------
+ a # b /* c */
+(1 row)
+
+-- A23: int(x) and x.to_i truncate toward zero, as Python and Ruby do
+CREATE FUNCTION fe_a23_py(x numeric) RETURNS int LANGUAGE plxpython3 AS $$
+return int(x)
+$$;
+SELECT fe_a23_py(2.7) AS p27, fe_a23_py(-2.5) AS m25, fe_a23_py(-2.7) AS m27;
+ p27 | m25 | m27 
+-----+-----+-----
+   2 |  -2 |  -2
+(1 row)
+
+CREATE FUNCTION fe_a23_py_f(x float8, s text, b bool) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{int(x * 2)} {int(s)} {int(b)} {int(x > 1)} {int(True)} {int(x) + 1}"
+$$;
+SELECT fe_a23_py_f(1.4, '42', true);
+ fe_a23_py_f  
+--------------
+ 2 42 1 1 1 2
+(1 row)
+
+CREATE FUNCTION fe_a23_rb(x numeric) RETURNS int LANGUAGE plxruby AS $$
+return x.to_i
+$$;
+SELECT fe_a23_rb(2.7) AS p27, fe_a23_rb(-2.5) AS m25;
+ p27 | m25 
+-----+-----
+   2 |  -2
+(1 row)
+
+CREATE FUNCTION fe_a23_rb_f(x numeric, s text) RETURNS text LANGUAGE plxruby AS $$
+return "#{(x * 2).to_i} #{s.to_i} #{'4.7'.to_i} #{x.to_s.to_i} #{1 + x.to_i} #{x.to_f.to_i} #{abs(x).to_i}"
+$$;
+SELECT fe_a23_rb_f(-1.4, '12');
+    fe_a23_rb_f    
+-------------------
+ -2 12 4 -1 0 -1 1
+(1 row)
+
+-- A23: Python int() of a string does not accept a fraction, as in Python
+CREATE FUNCTION fe_a23_str_py(s text) RETURNS text LANGUAGE plxpython3 AS $$
+v = s #:: text
+return f"{int(s)} {int(v)} {int('12')} {int(' 7 ')}"
+$$;
+SELECT fe_a23_str_py('42');
+ fe_a23_str_py 
+---------------
+ 42 42 12 7
+(1 row)
+
+SELECT fe_a23_str_py('4.7');
+ERROR:  invalid input syntax for type integer: "4.7"
+CONTEXT:  PL/pgSQL function fe_a23_str_py(text) line 6 at RETURN
+CREATE FUNCTION fe_a23_lit_py() RETURNS int LANGUAGE plxpython3 AS $$
+return int("4.7")
+$$;
+-- fe_err(q) runs q and returns 'SQLSTATE: message' if it fails. The message
+-- leaves out the error position, which differs between PostgreSQL 13
+-- (plpgsql prefixes each expression with SELECT) and later versions.
+CREATE FUNCTION fe_err(q text) RETURNS text LANGUAGE plpgsql AS $h$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END $h$;
+SELECT fe_err($q$SELECT fe_a23_lit_py()$q$);
+                       fe_err                        
+-----------------------------------------------------
+ 22P02: invalid input syntax for type integer: "4.7"
+(1 row)
+
+-- A23: .to_i and .to_f on an interpolated string convert the whole string
+CREATE FUNCTION fe_a23_interp_rb(a int) RETURNS text LANGUAGE plxruby AS $$
+return "#{"#{a}5".to_i * 2} #{"#{a}.5".to_f * 2}"
+$$;
+SELECT fe_a23_interp_rb(1);
+ fe_a23_interp_rb 
+------------------
+ 30 3
+(1 row)
+
+-- A23: int() of a boolean plx cannot see fails; a comparison makes it visible
+CREATE FUNCTION fe_a23_hb_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
+return int(starts_with(s, 'a'))
+$$;
+CREATE FUNCTION fe_a23_hb2_py(s text) RETURNS int LANGUAGE plxpython3 AS $$
+return int(starts_with(s, 'a') == True)
+$$;
+\set VERBOSITY sqlstate
+SELECT fe_a23_hb_py('abc');
+ERROR:  42846
+\set VERBOSITY default
+SELECT fe_a23_hb2_py('abc');
+ fe_a23_hb2_py 
+---------------
+             1
+(1 row)
+
+-- A25: a quote or brace inside an interpolated expression stays in the expression
+CREATE FUNCTION fe_a25_py(x text) RETURNS text LANGUAGE plxpython3 AS $$
+return f"{concat('}', x)}|{x == '{'}"
+$$;
+SELECT fe_a25_py('a');
+ fe_a25_py 
+-----------
+ }a|false
+(1 row)
+
+CREATE FUNCTION fe_a25_rb(s text) RETURNS text LANGUAGE plxruby AS $$
+return "#{s} is #{s == "a" ? "A" : "other"}, #{concat(s, "}")}"
+$$;
+SELECT fe_a25_rb('a'), fe_a25_rb('b');
+ fe_a25_rb  |   fe_a25_rb    
+------------+----------------
+ a is A, a} | b is other, b}
+(1 row)
+
+CREATE FUNCTION fe_a25_rb_nest(s text) RETURNS text LANGUAGE plxruby AS $$
+return "<#{concat("[#{s}]", '}')}>"
+$$;
+SELECT fe_a25_rb_nest('a');
+ fe_a25_rb_nest 
+----------------
+ <[a]}>
+(1 row)
+
+CREATE FUNCTION fe_a25_js(x text) RETURNS text LANGUAGE plxjs AS $$
+return `${concat(x, "}")}`;
+$$;
+SELECT fe_a25_js('a');
+ fe_a25_js 
+-----------
+ a}
+(1 row)
+
+CREATE FUNCTION fe_a25_php() RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'bob'::text AS name");
+return "{$r["name"]}!";
+$$;
+SELECT fe_a25_php();
+ fe_a25_php 
+------------
+ bob!
+(1 row)
+
+-- A25: ? : and ** inside a string nested in an interpolation are text
+CREATE FUNCTION fe_a25_text_rb(s text) RETURNS text LANGUAGE plxruby AS $$
+return "[#{"a?b:c"}] #{s} #{"x**y"}"
+$$;
+SELECT fe_a25_text_rb('q');
+ fe_a25_text_rb 
+----------------
+ [a?b:c] q x**y
+(1 row)
+
+CREATE FUNCTION fe_a25_tern_rb(n int) RETURNS text LANGUAGE plxruby AS $$
+return n > 0 ? "#{"p:#{n}"}" : "neg"
+$$;
+SELECT fe_a25_tern_rb(2), fe_a25_tern_rb(-1);
+ fe_a25_tern_rb | fe_a25_tern_rb 
+----------------+----------------
+ p:2            | neg
+(1 row)
+
+-- A25: deeply nested interpolations stop with an error, not a crash
+\set VERBOSITY terse
+DO $d$ BEGIN
+EXECUTE 'CREATE FUNCTION fe_a25_deep() RETURNS text LANGUAGE plxruby AS $b$' || E'\n'
+  || 'return ' || repeat('"#{', 200000) || '1' || repeat('}"', 200000) || E'\n$b$';
+END $d$;
+ERROR:  stack depth limit exceeded
+\set VERBOSITY default
+SELECT 1 AS still_up;
+ still_up 
+----------
+        1
+(1 row)
+
+-- A9: a NULL in a raise option no longer replaces the error with 22004
+CREATE FUNCTION fe_a9_raise_opt(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user #{u} missing", errcode: "P0042", detail: "looked up #{u}", hint: "check #{u}"
+$$;
+CREATE FUNCTION fe_a9_raise_bare(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "user missing", errcode: "P0042", detail: u, hint: u
+$$;
+CREATE FUNCTION fe_a9_raise_col(u text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: "P0042", column: u, constraint: u
+$$;
+CREATE FUNCTION fe_a9_raise_code(c text) RETURNS void LANGUAGE plxruby AS $$
+raise "bad", errcode: c
+$$;
+CREATE FUNCTION fe_a9_catch(f text, a text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  EXECUTE format('SELECT %I($1)', f) USING a;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT, d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN format('[%s|%s|%s|%s]', s, m, d, h);
+END $f$;
+SELECT fe_a9_catch('fe_a9_raise_opt', 'bob');
+                   fe_a9_catch                    
+--------------------------------------------------
+ [P0042|user bob missing|looked up bob|check bob]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_opt', NULL);
+               fe_a9_catch               
+-----------------------------------------
+ [P0042|user  missing|looked up |check ]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_bare', NULL);
+      fe_a9_catch       
+------------------------
+ [P0042|user missing||]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_col', NULL);
+  fe_a9_catch  
+---------------
+ [P0042|bad||]
+(1 row)
+
+-- A9: a NULL errcode still fails with 22004: plx does not make up a SQLSTATE
+SELECT fe_a9_catch('fe_a9_raise_code', NULL);
+                   fe_a9_catch                   
+-------------------------------------------------
+ [22004|RAISE statement option cannot be null||]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_code', '22023');
+  fe_a9_catch  
+---------------
+ [22023|bad||]
+(1 row)
+
+-- A9: message: as the first argument is the message, with the same NULL fallback
+CREATE FUNCTION fe_a9_raise_msgkey(u text) RETURNS void LANGUAGE plxruby AS $$
+raise message: "m #{u}", errcode: "P0042", detail: u
+$$;
+SELECT fe_a9_catch('fe_a9_raise_msgkey', 'bob');
+    fe_a9_catch     
+--------------------
+ [P0042|m bob|bob|]
+(1 row)
+
+SELECT fe_a9_catch('fe_a9_raise_msgkey', NULL);
+ fe_a9_catch  
+--------------
+ [P0042|m ||]
+(1 row)
+
+-- A9: a message and message: together are rejected
+CREATE FUNCTION fe_a9_raise_twice() RETURNS void LANGUAGE plxruby AS $$
+raise "x", message: "y"
+$$;
+ERROR:  plxruby: raise has a message and a message: option; give only one
+DETAIL:  at plxruby source line 2
+\pset tuples_only on
+\pset format unaligned
+SELECT (regexp_match(prosrc, 'RAISE[^\n]*'))[1] FROM pg_proc WHERE proname = 'fe_a9_raise_opt';
+RAISE EXCEPTION '%', 'user ' || COALESCE((u)::text, '') || ' missing' USING ERRCODE = 'P0042', DETAIL = COALESCE(('looked up ' || COALESCE((u)::text, ''))::text, ''), HINT = COALESCE(('check ' || COALESCE((u)::text, ''))::text, '');
+\pset format aligned
+\pset tuples_only off

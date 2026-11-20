@@ -151,6 +151,99 @@ parse_py_while(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/*
+ * True when the variable of an integer for loop must keep its value outside
+ * the loop. A plpgsql integer FOR declares its own loop variable, which hides
+ * any variable of the same name, so after the loop the source variable would
+ * still hold its old value. That matters when the variable is a parameter, or
+ * when any token outside the loop's tokens [a, b) names it. A string token is
+ * checked too, because an interpolation inside it can name the variable. The
+ * match ignores case, so it may report a use that is not one; that only costs
+ * the hidden counter.
+ */
+static bool
+py_loop_var_escapes(Ctx *cx, int var, int a, int b)
+{
+	const Tok  *v = &cx->t[var];
+	int			i;
+
+	if (plx_is_param(cx, v->s, v->len))
+		return true;
+	for (i = 0; cx->t[i].kind != T_EOF; i++)
+	{
+		const Tok  *t = &cx->t[i];
+
+		if (i >= a && i < b)
+			continue;
+		if (t->kind == T_IDENT && t->len == v->len &&
+			pg_strncasecmp(t->s, v->s, v->len) == 0)
+			return true;
+		if (t->kind == T_STRING)
+		{
+			int			j;
+
+			for (j = 0; j + v->len <= t->len; j++)
+				if (pg_strncasecmp(t->s + j, v->s, v->len) == 0 &&
+					(j == 0 || !plx_is_ident(t->s[j - 1])) &&
+					(j + v->len == t->len || !plx_is_ident(t->s[j + v->len])))
+					return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Declare the variable of a counted loop as an integer local (unless it is a
+ * parameter or already typed) and return the hidden counter's name.
+ */
+static char *
+py_loop_counter(Ctx *cx, int var)
+{
+	const Tok  *v = &cx->t[var];
+
+	if (!plx_is_param(cx, v->s, v->len))
+	{
+		PlxLocal2  *l = plx_local_find(cx, v->s, v->len);
+
+		if (!l)
+			l = plx_local_add(cx, v->s, v->len);
+		if (!l->typ && !l->is_record)
+			l->typ = pstrdup("integer");
+	}
+	return psprintf("__plx_for_%d", cx->subq++);
+}
+
+/*
+ * If a rewritten range() step is a negative integer literal, such as -3 or
+ * (- 3), return its magnitude ("3"); else NULL. plpgsql's integer FOR takes
+ * only a positive BY, so a countdown is lowered to FOR ... REVERSE. A step
+ * whose sign is not known until run time stays as it is: if it is negative,
+ * plpgsql stops with "BY value of FOR loop must be greater than zero".
+ */
+static char *
+py_neg_step(const char *step)
+{
+	const char *p = step,
+			   *e = step + strlen(step),
+			   *d;
+
+	while (p < e && (*p == ' ' || *p == '('))
+		p++;
+	while (e > p && (e[-1] == ' ' || e[-1] == ')'))
+		e--;
+	if (p >= e || *p != '-')
+		return NULL;
+	p++;
+	while (p < e && *p == ' ')
+		p++;
+	if (p >= e)
+		return NULL;
+	for (d = p; d < e; d++)
+		if (*d < '0' || *d > '9')
+			return NULL;
+	return pnstrdup(p, e - p);
+}
+
 /* for VAR in <range(...)|query(...)|array>: */
 static void
 parse_py_for(Ctx *cx, int ind)
@@ -176,6 +269,10 @@ parse_py_for(Ctx *cx, int ind)
 	{
 		int			as[8], ae[8], after, n;
 		char	   *lo, *hi, *step = NULL;
+		StringInfoData saved;
+		char	   *body;
+		char	   *ctr = NULL;
+		char	   *down;
 
 		n = plx_parse_args(cx, ia, as, ae, 8, &after);
 		if (n == 1)
@@ -192,14 +289,43 @@ parse_py_for(Ctx *cx, int ind)
 		}
 		else
 			plx_err(cx, hd, "range requires 1 to 3 arguments");
-		plx_indent(o, ind);
-		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
-						 cx->t[var].len, cx->t[var].s, lo, hi,
-						 step ? " BY " : "", step ? step : "");
+		plx_check_loop_var(cx, cx->t[var].s, cx->t[var].len);
+		/* parse the body first: whether the variable escapes needs its end */
 		cx->pos = colon + 1;
+		saved = cx->out;
+		initStringInfo(&cx->out);
 		cx->loopdepth++;
 		parse_py_block(cx, ind + 1);
 		cx->loopdepth--;
+		body = cx->out.data;
+		cx->out = saved;
+		if (py_loop_var_escapes(cx, var, var - 1, cx->pos))
+			ctr = py_loop_counter(cx, var);
+		plx_indent(o, ind);
+		if (step && (down = py_neg_step(step)) != NULL)
+		{
+			/* range(a, b, -k) is a, a - k, ... while > b */
+			if (ctr)
+				appendStringInfo(o, "FOR %s IN REVERSE %s..((%s) + 1) BY %s LOOP\n",
+								 ctr, lo, hi, down);
+			else
+				appendStringInfo(o, "FOR %.*s IN REVERSE %s..((%s) + 1) BY %s LOOP\n",
+								 cx->t[var].len, cx->t[var].s, lo, hi, down);
+		}
+		else if (ctr)
+			appendStringInfo(o, "FOR %s IN %s..((%s) - 1)%s%s LOOP\n",
+							 ctr, lo, hi, step ? " BY " : "", step ? step : "");
+		else
+			appendStringInfo(o, "FOR %.*s IN %s..((%s) - 1)%s%s LOOP\n",
+							 cx->t[var].len, cx->t[var].s, lo, hi,
+							 step ? " BY " : "", step ? step : "");
+		if (ctr)
+		{
+			plx_indent(o, ind + 1);
+			appendStringInfo(o, "%.*s := %s;\n", cx->t[var].len, cx->t[var].s, ctr);
+		}
+		appendStringInfoString(o, body);
+		pfree(body);
 	}
 	else if (cx->t[ia].kind == T_IDENT && plx_name_eq(&cx->t[ia], "query") &&
 			 cx->t[ia + 1].kind == T_LPAREN)
@@ -207,6 +333,8 @@ parse_py_for(Ctx *cx, int ind)
 		int			as[16], ae[16], after, n;
 
 		n = plx_parse_args(cx, ia, as, ae, 16, &after);
+		if (n < 1)				/* as[0]/ae[0] are unset when n == 0 */
+			plx_err(cx, cx->t[ia].line, "query requires a SQL argument");
 		if (!plx_is_param(cx, cx->t[var].s, cx->t[var].len))
 		{
 			PlxLocal2  *l = plx_local_find(cx, cx->t[var].s, cx->t[var].len);
@@ -216,18 +344,13 @@ parse_py_for(Ctx *cx, int ind)
 			l->is_record = true;
 		}
 		plx_indent(o, ind);
-		if (n == 1 && plx_arg_is_string_literal(cx, as[0], ae[0]))
 		{
-			appendStringInfo(o, "FOR %.*s IN ", cx->t[var].len, cx->t[var].s);
-			plx_emit_string_as_sql(cx, &cx->t[as[0]], o);
-			appendStringInfoString(o, " LOOP\n");
-		}
-		else
-		{
-			char	   *sqlv = plx_rw_range(cx, as[0], ae[0], false);
-			char	   *binds = plx_binds_text(cx, as, ae, n);
+			char	   *sqlv, *binds;
 
-			if (binds)
+			if (!plx_sql_arg(cx, as, ae, n, false, &sqlv, &binds))
+				appendStringInfo(o, "FOR %.*s IN %s LOOP\n",
+								 cx->t[var].len, cx->t[var].s, sqlv);
+			else if (binds)
 				appendStringInfo(o, "FOR %.*s IN EXECUTE %s USING %s LOOP\n",
 								 cx->t[var].len, cx->t[var].s, sqlv, binds);
 			else
@@ -262,6 +385,55 @@ parse_py_for(Ctx *cx, int ind)
 	appendStringInfoString(o, "END LOOP;\n");
 }
 
+/*
+ * The plpgsql condition for the class list of an except clause, tokens [a, b).
+ * Exception maps to OTHERS. A tuple (A, B) maps to "a OR b". Any class plx
+ * does not know is an error: falling back to OTHERS would make a handler
+ * written for one condition catch every error.
+ */
+static const char *
+py_except_condition(Ctx *cx, int a, int b)
+{
+	StringInfoData r;
+	int			i, seg, depth = 0;
+	bool		tuple = (cx->t[a].kind == T_LPAREN && cx->t[b - 1].kind == T_RPAREN &&
+						 b - a > 2);
+
+	if (tuple)
+	{
+		a++;
+		b--;
+	}
+	initStringInfo(&r);
+	seg = a;
+	for (i = a; i <= b; i++)
+	{
+		if (i < b && (cx->t[i].kind == T_LPAREN || cx->t[i].kind == T_LBRACKET))
+			depth++;
+		else if (i < b && (cx->t[i].kind == T_RPAREN || cx->t[i].kind == T_RBRACKET))
+			depth--;
+		if (i == b && i == seg && r.len > 0)
+			break;				/* trailing comma: (A, B,) */
+		if (i == b || (tuple && depth == 0 && cx->t[i].kind == T_COMMA))
+		{
+			char	   *cls = (i > seg) ? plx_span_text(cx, seg, i) : pstrdup("");
+			const char *c;
+
+			if (strcmp(cls, "Exception") == 0)
+				return "OTHERS";
+			c = plx_exc_class_to_condition(cls, (int) strlen(cls));
+			if (!c)
+				plx_err(cx, cx->t[seg < b ? seg : a].line,
+						"unsupported exception class \"%s\"", cls);
+			if (r.len > 0)
+				appendStringInfoString(&r, " OR ");
+			appendStringInfoString(&r, c);
+			seg = i + 1;
+		}
+	}
+	return r.data;
+}
+
 /* try: <body> except [Class as e]: <handler> ... [finally: <body>] */
 static void
 parse_py_try(Ctx *cx, int ind)
@@ -274,11 +446,13 @@ parse_py_try(Ctx *cx, int ind)
 				arms;
 	int			nrescue = 0;
 	char	   *ensure_body = NULL;
+	PlxFin	   *fin;
 
 	colon = py_header_colon(cx, cx->pos + 1);
 	if (colon < 0)
 		plx_err(cx, hd, "try requires ':'");
 	cx->pos = colon + 1;
+	fin = plx_fin_push(cx);
 	saved = cx->out;
 	initStringInfo(&cx->out);
 	parse_py_block(cx, ind + 1);
@@ -315,13 +489,7 @@ parse_py_try(Ctx *cx, int ind)
 			int			cls_b = (as_at >= 0) ? as_at : colon;
 
 			if (cls_b > es + 1)
-			{
-				char	   *cls = plx_span_text(cx, es + 1, cls_b);
-				const char *c = plx_exc_class_to_condition(cls, (int) strlen(cls));
-
-				if (c)
-					cond = c;
-			}
+				cond = py_except_condition(cx, es + 1, cls_b);
 		}
 		cx->pos = colon + 1;
 		if (ev_a >= 0)
@@ -343,12 +511,14 @@ parse_py_try(Ctx *cx, int ind)
 		cx->exc_var = save_ev;
 		cx->exc_varlen = save_evl;
 
-		appendStringInfoSpaces(&arms, (ind + 1) * 2);
+		plx_indent(&arms, ind + 1);
 		appendStringInfo(&arms, "WHEN %s THEN\n", cond);
 		appendStringInfoString(&arms, pfx);
 		appendStringInfoString(&arms, hb);
+		pfree(hb);
 		nrescue++;
 	}
+	plx_fin_pop(cx, fin);
 	if (cx->t[cx->pos].kind == T_KW && cx->t[cx->pos].kw == KW_ENSURE)	/* finally */
 	{
 		colon = py_header_colon(cx, cx->pos + 1);
@@ -362,44 +532,7 @@ parse_py_try(Ctx *cx, int ind)
 		cx->out = saved;
 	}
 
-	if (!ensure_body)
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
-	else
-	{
-		plx_indent(o, ind);
-		appendStringInfoString(o, "BEGIN\n");
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "BEGIN\n");
-		appendStringInfoString(o, body);
-		if (nrescue)
-		{
-			plx_indent(o, ind + 1);
-			appendStringInfoString(o, "EXCEPTION\n");
-			appendStringInfoString(o, arms.data);
-		}
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "END;\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind);
-		appendStringInfoString(o, "EXCEPTION WHEN OTHERS THEN\n");
-		appendStringInfoString(o, ensure_body);
-		plx_indent(o, ind + 1);
-		appendStringInfoString(o, "RAISE;\n");
-		plx_indent(o, ind);
-		appendStringInfoString(o, "END;\n");
-	}
+	plx_emit_try(cx, o, ind, body, nrescue, arms.data, ensure_body, fin);
 }
 
 /* raise / raise Class("msg") */
@@ -463,10 +596,17 @@ parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 		cx->t[cx->pos + 2].kind == T_KW &&
 		(cx->t[cx->pos + 2].kw == KW_FOR || cx->t[cx->pos + 2].kw == KW_WHILE))
 	{
+		PlxLabel   *mark = cx->labels;
+
 		plx_indent(&cx->out, ind);
 		appendStringInfo(&cx->out, "<<%.*s>>\n", tk->len, tk->s);
+		plx_label_note(cx, tk->s, tk->len);
 		cx->pos += 2;
-		tk = &cx->t[cx->pos];
+		/* the label is in scope only inside its loop: a later loop may
+		 * reuse the name, and a break must not resolve to a closed one */
+		parse_py_stmt_inner(cx, ind, toplevel);
+		cx->labels = mark;
+		return;
 	}
 	if (tk->kind == T_KW)
 	{
@@ -487,8 +627,8 @@ parse_py_stmt_inner(Ctx *cx, int ind, bool toplevel)
 			case KW_PASS:
 				cx->pos = plx_stmt_end(cx, cx->pos);
 				return;
-			case KW_DEF:
-				plx_err(cx, tk->line, "def is not supported");
+			case KW_DEF:		/* def, class and lambda: name the one used */
+				plx_err(cx, tk->line, "%.*s is not supported", tk->len, tk->s);
 				return;
 			case KW_CASE:
 				plx_err(cx, tk->line, "match/case is not supported (use if/elif)");

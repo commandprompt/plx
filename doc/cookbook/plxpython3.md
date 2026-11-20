@@ -1,6 +1,6 @@
 # Python cookbook
 
-Practical recipes for the plxpython3 dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxpython3 chapter](plxpython3.md) for the full language reference.
+Practical recipes for the plxpython3 dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxpython3 chapter](../plxpython3.md) for the full language reference.
 
 ## Scalar function with branching
 
@@ -90,8 +90,9 @@ SELECT int_csv(5) AS csv;
 ## Looping over a query
 
 `for row in query(...)` iterates the rows of a result set. Each `row` is a
-record; access columns with `row.col`. The f-string interpolates the argument
-`g` into the SQL text.
+record; access columns with `row.col`. The argument `g` interpolated into the
+f-string is bound as a value, not written into the SQL text (see
+[Interpolation in SQL](../DYNAMIC-SQL.md)).
 
 ```python
 CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxpython3 AS $$
@@ -142,15 +143,18 @@ SELECT array_agg(d) AS divisors_of_12 FROM divisors(12) d;
 
 ## Error handling with try / except
 
-`try` / `except` maps to a plpgsql exception block. Name a specific condition
-with the `PG::` spelling; `PG::DivisionByZero` catches `division_by_zero`. The
+`try` / `except` maps to a plpgsql exception block. Name the condition with
+one of the classes plx knows: `ZeroDivisionError` catches `division_by_zero`.
+Any other class makes `CREATE FUNCTION` fail with
+`unsupported exception class`; the
+[plxpython3 chapter](../plxpython3.md#handling) lists the known classes. The
 `e.message` accessor reads `SQLERRM`.
 
 ```python
 CREATE FUNCTION safe_divide(a int, b int) RETURNS int LANGUAGE plxpython3 AS $$
 try:
     return a / b
-except PG::DivisionByZero as e:
+except ZeroDivisionError as e:
     raise("notice", f"caught: {e.message}")
     return -1
 $$;
@@ -201,13 +205,15 @@ SELECT id, label, code FROM widget ORDER BY id;
 
 ## Dynamic SQL with bind parameters
 
-Interpolate identifiers you control (a table name) with an f-string, but pass
-untrusted values as bind parameters: `$1` in the SQL text and an extra argument
-to `fetch_one`. This keeps the value out of the SQL string and avoids injection.
+Interpolate an identifier (a table name) with `{ident(tbl)}`, which quotes it
+with `quote_ident`, and pass values as bind parameters: `$1` in the SQL text and
+an extra argument to `fetch_one`. An interpolated value would be bound as well;
+only `ident()`, `literal()` and `raw()` put text into the SQL itself. See
+[Interpolation in SQL](../DYNAMIC-SQL.md).
 
 ```python
 CREATE FUNCTION count_at_least(tbl text, threshold int) RETURNS bigint LANGUAGE plxpython3 AS $$
-r = fetch_one(f"SELECT count(*) AS c FROM {tbl} WHERE amount >= $1", threshold)
+r = fetch_one(f"SELECT count(*) AS c FROM {ident(tbl)} WHERE amount >= $1", threshold)
 return r.c
 $$;
 ```

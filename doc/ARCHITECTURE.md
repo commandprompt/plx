@@ -18,7 +18,8 @@ dialect syntax and emits plpgsql; the execution engine is plpgsql.
 
 ## Catalog wiring
 
-For each dialect, `plx--1.0.sql` creates a language whose parts are:
+For each dialect, the install script (`plx--3.0.0.sql` for the current release)
+creates a language whose parts are:
 
 - `HANDLER` is `plx_call_handler`, which is bound to plpgsql's exported
   `plpgsql_call_handler` symbol (`AS '$libdir/plpgsql', 'plpgsql_call_handler'`).
@@ -42,12 +43,19 @@ validator (in `plx_core.c`, `plx_generic_validator`):
 
 1. Reads the raw dialect body from `pg_proc.prosrc`.
 2. If the text already begins with the plx sentinel (`/*plx:v1:...*/`), it is
-   already plpgsql (a restore or a repeated validation), so it returns without
-   change. This makes the pass idempotent and keeps dump and restore correct.
+   already plpgsql (a restore or a repeated validation), so it skips step 3.
+   This makes the pass idempotent and keeps dump and restore correct.
 3. Otherwise it builds a `PlxFuncMeta` from the pg_proc row (argument names,
    types, and modes via `get_func_arg_info`; return type; `proretset`; prokind),
    calls the dialect's `transpile` function, and rewrites `pg_proc.prosrc` with
    the resulting plpgsql via `CatalogTupleUpdate`.
+4. Makes the checks `plpgsql_validator` makes. It cannot call that function,
+   because `CheckFunctionValidatorAccess` requires a validator to belong to
+   the function's language. It rejects pseudo-type arguments and results that
+   plpgsql does not allow; this check runs first, before step 1. When
+   `check_function_bodies` is on, it test-compiles the stored plpgsql with
+   `plpgsql_compile`, which it looks up in `plpgsql.so` with
+   `load_external_function`.
 
 The stored text is:
 
@@ -120,7 +128,8 @@ per-dialect branching in the driver.
 ## Files
 
 ```
-plx.control, plx--1.0.sql     extension control and install SQL
+plx.control, plx--3.0.0.sql   extension control and install SQL
+plx--X--Y.sql                 upgrade scripts between releases
 src/plx.h                     public ABI (PlxDialect, PlxFuncMeta)
 src/plx_int.h                 internal ABI (PlxSurface, canonical keywords)
 src/plx_engine.h              engine interface: PlxCtx, tokens, symtab, and the
@@ -151,12 +160,15 @@ is a new `plx_dialect_X.c` (a surface with its `parse_body`, plus a few
 
 The plx languages are declared `TRUSTED`. A plx function executes as plpgsql
 through plpgsql's call handler, so it can do what a plpgsql function can do and
-nothing more: no filesystem, no network, no arbitrary native code, and all SQL
-runs with the caller's privileges. plx embeds no language runtime, which is the
+nothing more: no filesystem, no network, no arbitrary native code, and SQL runs
+with the caller's privileges (or the owner's, for a `SECURITY DEFINER`
+function), exactly as in plpgsql. plx embeds no language runtime, which is the
 difference from the native PL/Ruby and PL/PHP, which are untrusted because they
 load a full interpreter into the backend. The transpiler is C that parses
 untrusted input at `CREATE FUNCTION` time; it has a recursion-depth limit and is
-fuzzed (see `test/fuzz.py`).
+fuzzed (see `test/fuzz.py`). See the user guide's
+[Trust and security](USERGUIDE.md#trust-and-security) section for who can use
+the languages and how to restrict them.
 
 ## Testing
 
@@ -168,11 +180,17 @@ is the record of what each dialect accepts and what plpgsql it produces.
 
 `test/run_corpus.py` replays a corpus of Ruby programs and compares their
 output to a recorded expectation, including the programs that are supposed to
-be rejected.
+be rejected. `make corpuscheck` runs it against `contrib_regression`, and CI
+runs that target. `make differentialcheck` also runs its self-test
+(`python3 test/run_corpus.py --selftest`), which checks the comparison and
+needs no server.
 
 `test/fuzz.py` feeds mutated and pathological sources to every front end. It
 asserts nothing about the output; it asserts that the transpiler does not
-crash, hang, or exhaust memory on input written to break it.
+crash, hang, or exhaust memory on input written to break it. You run the fuzzer
+by hand. `make differentialcheck` runs only its self-test
+(`python3 test/fuzz.py --selftest`), which checks how the fuzzer classifies
+psql output and needs no server.
 
 `make differentialcheck` runs `test/differential.py`, which answers the
 question the other three cannot. Each case is one small program written once
@@ -180,20 +198,26 @@ as a plpgsql reference and once per dialect, then called with the same
 arguments. The reference is the plpgsql a PostgreSQL developer would have
 written for the same logic, so it acts as an oracle: plx claims a dialect body
 transpiles to plpgsql that behaves the same way, and a disagreement is a defect
-rather than a difference of opinion. Values are compared by their text form,
-with NULL distinguished from the empty string, and a case that raises must
-raise the same SQLSTATE.
+rather than a difference of opinion. Each call result is recorded as one line
+of JSON: null when the call returns SQL NULL, a JSON string holding the text
+form of a returned value, or {"error": "<SQLSTATE>"} when the call raises. A
+returned value is always a JSON string, so it can never be mistaken for NULL
+or for an error, whatever text it contains. Two results agree when their JSON
+is identical. A case that raises must raise the same SQLSTATE.
 
 Some divergences are intended, and a case records them in a `documented` entry
-naming the dialects, the calls, and the reason. Those are reported separately
-rather than failing. The check also fails when a recorded divergence stops
+naming the dialects, the calls, the reason, and the exact result the dialect
+gives instead. Those are reported separately rather than failing. Only the
+recorded result is exempt: if the dialect starts to give any other wrong
+result, the check fails. The check also fails when a recorded divergence stops
 happening, so a limitation cannot quietly outlive the documentation that
 describes it. Where a case cannot cover a dialect, the run prints the gap
 instead of passing over it.
 
 ## Related documents
 
-- [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification.
+- [TRANSPILER.md](TRANSPILER.md): the original transpiler design specification
+  (historical; the dialect chapters are authoritative where they differ).
 - [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
 - The per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
   [plxjs](plxjs.md), [plxts](plxts.md), [plxpython3](plxpython3.md),

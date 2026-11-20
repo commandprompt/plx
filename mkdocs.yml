@@ -54,6 +54,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - User guide: USERGUIDE.md
+  - Interpolation in SQL: DYNAMIC-SQL.md
   - Migrating to PostgreSQL: MIGRATION.md
   - Dialects:
       - Ruby (plxruby): plxruby.md
@@ -81,7 +82,7 @@ nav:
       - Gaps and limitations: LIMITATIONS.md
       - Compatibility: COMPATIBILITY.md
       - Architecture: ARCHITECTURE.md
-      - Transpiler: TRANSPILER.md
+      - Transpiler design (historical): TRANSPILER.md
       - Debugging: DEBUGGING.md
 
 extra:

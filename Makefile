@@ -3,12 +3,12 @@ MODULE_big = plx
 OBJS = src/plx_core.o src/plx_transpile.o src/plx_strbuild.o src/plx_dialect_ruby.o src/plx_dialect_php.o src/plx_dialect_js.o src/plx_dialect_python.o src/plx_dialect_cobol.o src/plx_dialect_plsql.o src/plx_dialect_ts.o src/plx_dialect_tsql.o src/plx_dialect_go.o src/plx_parse_brace.o
 
 EXTENSION = plx
-DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.3.2.sql plx--2.0.0.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql plx--1.3.1--1.3.2.sql plx--1.3.2--2.0.0.sql
+DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.3.2.sql plx--2.0.0.sql plx--3.0.0.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql plx--1.3.1--1.3.2.sql plx--1.3.2--2.0.0.sql plx--2.0.0--3.0.0.sql
 
 # pg_regress suite (make installcheck). test/run_corpus.py is an additional
-# Ruby corpus runner, and test/differential.py checks each dialect against a
+# Ruby corpus runner (make corpuscheck), and test/differential.py checks each dialect against a
 # plpgsql reference (make differentialcheck).
-REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_output plx_strbuild plx_errors
+REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_scs_off plx_output plx_strbuild plx_errors plx_privileges fix_core fix_engine fix_brace fix_rubypy fix_go fix_cobol fix_tsqlplsql fix_sqltpl fix_engine3
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Point at the source-built PG 18 (not any distro pg_config on PATH).
@@ -25,9 +25,31 @@ PLX_PYTHON ?= python3
 # Differential check: run every dialect's version of a program against the
 # plpgsql the same program would have been written in, and require them to
 # agree. Needs the extension installed and a running server, like installcheck.
+# It first runs the self-tests of the fuzzer and the corpus runner, which need
+# no server, so that their classifier and comparison are checked on every run.
 .PHONY: differentialcheck
 differentialcheck:
+	$(PLX_PYTHON) test/fuzz.py --selftest
+	$(PLX_PYTHON) test/run_corpus.py --selftest
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/finally_diff.py 300 1
+
+# Corpus check: replay the Ruby corpus in test/corpus.json and compare each
+# case's output to its recorded expectation. Needs the extension installed and
+# a running server. It drops and re-creates the plx extension in
+# contrib_regression, so run it after installcheck, which creates that
+# database.
+.PHONY: corpuscheck
+corpuscheck:
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/run_corpus.py
+
+# Upgrade check: ALTER EXTENSION plx UPDATE in situations that need more
+# than one session. Needs the extension installed and a running server.
+.PHONY: upgradecheck
+upgradecheck:
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" bash test/upgrade_check.sh
 
 # Check META.json against the PGXN Meta Spec. PGXN validates at upload time,
 # which is after a release is tagged and published, so check it before then.

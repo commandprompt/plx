@@ -44,7 +44,7 @@ Then:
 SELECT plx_source('my_func(int)');
 ```
 
-returns exactly the Ruby / PHP / JavaScript / Python / COBOL body you wrote.
+returns exactly the dialect body you wrote.
 
 ## Why the error line differs from your source line
 

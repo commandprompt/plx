@@ -57,7 +57,7 @@ end
 return s
 $$;
 SELECT acc_rb(5);
--- the lowered plpgsql uses plx_strbuild + plx_sb_append
+-- the lowered plpgsql uses plx_strbuild + plx_sb_append_strict
 SELECT regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g') FROM pg_proc WHERE proname = 'acc_rb';
 
 CREATE FUNCTION acc_php(n int) RETURNS text LANGUAGE plxphp AS $$
@@ -135,3 +135,38 @@ end
 return s
 $$;
 SELECT acc_reset(4);
+
+-- generated code names plx_strbuild/plx_sb_append with the extension's schema,
+-- so a function with a hardened search_path still finds them ...
+CREATE FUNCTION sb_hardened(n int) RETURNS text LANGUAGE plxruby
+  SECURITY DEFINER SET search_path = pg_catalog AS $$
+  s = ""
+  for i in 1..n
+    s << "x"
+  end
+  return s
+$$;
+SELECT sb_hardened(3);
+
+-- ... and an object of the same name earlier on the path cannot stand in.
+-- The decoy has the name and argument types of the function the generated
+-- code calls for <<, so it would win if that call lost its schema.
+CREATE SCHEMA sb_evil;
+CREATE FUNCTION sb_evil.plx_sb_append_strict(public.plx_strbuild, text)
+  RETURNS public.plx_strbuild
+  LANGUAGE sql AS $$ SELECT 'hijacked'::text::public.plx_strbuild $$;
+CREATE FUNCTION sb_path(n int) RETURNS text LANGUAGE plxruby
+  SET search_path = sb_evil, public AS $$
+  s = ""
+  for i in 1..n
+    s << "y"
+  end
+  return s
+$$;
+SELECT sb_path(3);
+DROP SCHEMA sb_evil CASCADE;
+
+-- the extension is not relocatable, since stored functions name its schema
+CREATE SCHEMA sb_other;
+ALTER EXTENSION plx SET SCHEMA sb_other;
+DROP SCHEMA sb_other;

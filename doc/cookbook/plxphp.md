@@ -1,6 +1,6 @@
 # PHP cookbook
 
-Practical recipes for the plxphp dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxphp chapter](plxphp.md) for the full language reference.
+Practical recipes for the plxphp dialect. Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxphp chapter](../plxphp.md) for the full language reference.
 
 ## Scalar function with branching
 
@@ -78,7 +78,7 @@ SELECT csv_ints(5);
 
 ## Looping over a query result
 
-`foreach (query("...") as $r)` iterates a query. Each row is a record; read a column with `$r->col`. Values spliced with `{$g}` are interpolated into the SQL text.
+`foreach (query("...") as $r)` iterates a query. Each row is a record; read a column with `$r->col`. The interpolated `{$g}` is bound as a value, not written into the SQL text (see [Interpolation in SQL](../DYNAMIC-SQL.md)).
 
 ```php
 CREATE TABLE orders(id int, grp int, amount int);
@@ -186,13 +186,13 @@ SELECT id, name, tag FROM audit_item ORDER BY id;
 
 ## Dynamic SQL with bind parameters
 
-Interpolation (`{$tbl}`) builds the SQL text, while the untrusted value is passed as a bind parameter to `execute`, so it is never spliced into the statement. `row_count()` reports how many rows the last statement affected.
+The table name is an identifier, so it is interpolated with `{ident($tbl)}`, which quotes it with `quote_ident`. The value is passed as a bind parameter. (An interpolated value such as `{$val}` would be bound too; since 3.0 only `ident()`, `literal()` and `raw()` put text into the SQL itself. See [Interpolation in SQL](../DYNAMIC-SQL.md).) `row_count()` reports how many rows the last statement affected.
 
 ```php
 CREATE TABLE note(id serial, msg text);
 
 CREATE FUNCTION add_note(tbl text, val text) RETURNS bigint LANGUAGE plxphp AS $$
-execute("INSERT INTO {$tbl}(msg) VALUES ($1)", $val);
+execute("INSERT INTO {ident($tbl)}(msg) VALUES ($1)", $val);
 $n = row_count();
 return $n;
 $$;

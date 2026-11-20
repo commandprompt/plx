@@ -3,13 +3,13 @@
 This guide shows how to write functions in the plx dialects. Each example is
 taken from the PL/pgSQL chapter of the PostgreSQL documentation and is shown as
 the plpgsql from the manual and then the plxruby, plxphp, plxjs, plxpython3, and
-plxcobol versions. Because plx transpiles to plpgsql, the plpgsql form is also
-what the plx versions produce and run.
+plxcobol versions. Because plx transpiles to plpgsql, the plx versions produce
+plpgsql equivalent to the manual's form; the notes under each example point out
+where they differ.
 
-The dialects that restructure their input rather than rename keywords — plxplsql
-(Oracle PL/SQL), plxts (TypeScript), plxtsql (Transact-SQL), and plxgo (Go) — are
-covered in full in their own chapters (see Further reading); each produces the
-same plpgsql shown here.
+The dialects that restructure their input rather than rename keywords (plxplsql
+for Oracle PL/SQL, plxts for TypeScript, plxtsql for Transact-SQL, and plxgo for
+Go) are covered in full in their own chapters (see Further reading).
 
 Install the extension first:
 
@@ -502,6 +502,11 @@ PROCEDURE DIVISION.
 $$;
 ```
 
+Note: the plxruby, plxphp, plxjs, and plxpython3 forms catch every error
+(`WHEN OTHERS`), not only `division_by_zero`, and report the error text with
+`e.message`. The plxcobol form catches only `division_by_zero`, like the
+plpgsql.
+
 ## Raising errors
 
 PL/pgSQL manual, "Errors and messages".
@@ -541,6 +546,10 @@ plxcobol:
 ```sql
 RAISE EXCEPTION concat("Nonexistent ID --> ", USER-ID) SQLSTATE "P0002"
 ```
+
+Note: `throw` in plxphp and plxjs and `raise ValueError(...)` in plxpython3
+raise SQLSTATE P0001 (`raise_exception`). Only the plxruby and plxcobol forms
+set a specific SQLSTATE such as P0002 (`no_data_found`).
 
 ## Anonymous code blocks
 
@@ -592,6 +601,52 @@ PROCEDURE DIVISION.
 $$;
 ```
 
+## Procedures and transaction control
+
+PL/pgSQL manual, "Transaction Management". A body can also be a procedure,
+created with `CREATE PROCEDURE` and run with `CALL`. A procedure invoked outside
+an explicit transaction block can commit and roll back; a function cannot.
+
+plpgsql:
+
+```sql
+CREATE PROCEDURE load_batches(n int) AS $$
+BEGIN
+    FOR i IN 1..n LOOP
+        INSERT INTO batch_log VALUES (i);
+        COMMIT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+plxruby:
+
+```sql
+CREATE PROCEDURE load_batches(n int) LANGUAGE plxruby AS $$
+for i in 1..n
+  execute("INSERT INTO batch_log VALUES ($1)", i)
+  commit()
+end
+$$;
+```
+
+plxpython3:
+
+```sql
+CREATE PROCEDURE load_batches(n int) LANGUAGE plxpython3 AS $$
+for i in range(1, n + 1):
+    execute("INSERT INTO batch_log VALUES ($1)", i)
+    commit()
+$$;
+```
+
+plxphp, plxjs and plxts use the same `commit()` and `rollback()` calls,
+plxcobol uses the `COMMIT` and `ROLLBACK` verbs, and plxplsql uses `COMMIT;` as
+in PL/SQL. plxtsql and plxgo do not support transaction control. Calling
+`commit()` from a function, or from a procedure called inside an explicit transaction block,
+raises `invalid transaction termination`, as in plpgsql.
+
 ## Trust and security
 
 The plx languages are declared `TRUSTED`. This is correct for the following
@@ -599,30 +654,102 @@ reasons:
 
 - A plx function is transpiled to plpgsql and executed by plpgsql's call
   handler. It can do what a plpgsql function can do, and nothing more: no direct
-  filesystem access, no network access, no arbitrary native code. All SQL runs
-  with the privileges of the calling role.
+  filesystem access, no network access, no arbitrary native code. SQL runs with
+  the privileges of the calling role, or of the function owner for a
+  `SECURITY DEFINER` function, exactly as in plpgsql.
 - plx does not embed a language runtime. This is the difference from the native
   PL/PHP and PL/Ruby, which are untrusted because they load a full PHP or Ruby
   interpreter into the backend.
 
-Two points to keep in mind:
+Who can use the languages:
+
+- Installing plx (`CREATE EXTENSION plx`) requires a superuser.
+- Once installed, every role can create functions in the plx languages, because
+  PostgreSQL grants USAGE on a trusted language to PUBLIC, as it does for
+  plpgsql. Restrict this per language, for example
+  `REVOKE USAGE ON LANGUAGE plxruby FROM PUBLIC`.
+- Creating a function or running a `DO` block in a plx language also requires
+  USAGE on plpgsql. plx is a syntax layer over plpgsql, so a role with USAGE on
+  a plx language could otherwise run any plpgsql: a body that already begins
+  with the `/*plx:v1:...*/` header is stored without transpiling, so that dump
+  and restore work, and plxplsql accepts a body that is already close to
+  plpgsql. So `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC` also stops such a
+  role from using every plx language. It then gets:
+
+  ```
+  ERROR:  permission denied for language plpgsql
+  DETAIL:  Language plxplsql is executed as plpgsql, so using it requires USAGE on plpgsql.
+  ```
+
+  As with plpgsql, functions that already exist keep running, and superusers
+  are not affected.
+
+Points to keep in mind:
 
 - The transpiler is C code that parses the function body at `CREATE FUNCTION`
-  time. It has a recursion-depth limit and has been fuzzed with mutation and
-  pathological inputs across all dialects (see `test/fuzz.py`) with no crashes or
-  hangs. Continued fuzzing is recommended before relying on it in a hostile
-  multi-tenant deployment.
-- `query`, `perform`, `execute`, and `fetch_one` with interpolated values carry
-  the same SQL-injection responsibility as plpgsql `EXECUTE ... || value`. Use
-  bind parameters (`execute(sql, a, b)`) for untrusted input.
+  time. It limits expression and statement nesting depth, rejecting deeper
+  input with a `nested too deeply` error, and has been fuzzed with mutation and
+  pathological inputs across all dialects (see `test/fuzz.py`). Continued
+  fuzzing is recommended before relying on it in a hostile multi-tenant
+  deployment.
+- An interpolated value in the SQL argument of `query`, `fetch_one`,
+  `execute`, `perform` and the other SQL calls never becomes SQL text. plx
+  binds it as a parameter, with or without bind arguments, so data cannot
+  inject SQL:
+
+  ```ruby
+  r = fetch_one("SELECT count(*) AS c FROM ug WHERE name = '#{n}' LIMIT $1", lim)
+  ```
+
+  becomes
+
+  ```plpgsql
+  EXECUTE 'SELECT count(*) AS c FROM ug WHERE name = ($2) LIMIT $1' INTO r USING lim, n;
+  ```
+
+  To put text into the SQL itself, write `ident(e)` for an identifier (it
+  calls `quote_ident`), `literal(e)` for a quoted literal (`quote_nullable`),
+  or `raw(e)` for a SQL fragment. `raw()` inserts the text unquoted, so it
+  carries the same SQL-injection responsibility as plpgsql
+  `EXECUTE ... || value`: never pass it untrusted input. A SQL string built
+  earlier and passed to `execute` in a variable is ordinary string
+  concatenation, and plx does not bind the values in it. See
+  [Interpolation in SQL](DYNAMIC-SQL.md).
+- Functions that use the string-append operators name the extension's
+  `plx_strbuild` type and its append function with the schema plx is installed
+  in. They work whatever the function's `search_path` is, and a function
+  planted earlier on the path cannot take their place. Two limits follow:
+  - Functions created before 3.0.0 keep the unqualified names they were
+    generated with. Run their `CREATE FUNCTION` again to get the qualified
+    names.
+  - A restored function with a string append needs plx in the same schema as
+    in the source database. So does a plxtsql function with a conversion to
+    an integer type of a value whose type plx cannot see, which calls
+    `plx_tsql_int4` (or `plx_tsql_int2`, `plx_tsql_int8`) the same way. See
+    [LIMITATIONS.md](LIMITATIONS.md#constraints-shared-by-every-dialect).
+  - Grant `CREATE` on plx's schema only to roles you trust. No function
+    created there can take the place of these calls, but one with the same
+    name can make them ambiguous: a `plx_tsql_int4(record, int DEFAULT 0)`
+    makes every such plxtsql conversion fail with
+    `function ...plx_tsql_int4(record) is not unique`.
+- Pin the path on every `SECURITY DEFINER` function, as the PostgreSQL manual
+  advises, because the SQL in its body still finds your own tables and
+  functions through `search_path`. List only trusted schemas, with `pg_temp`
+  last. The schema plx is installed in does not have to be on it:
+
+  ```sql
+  ALTER FUNCTION app.note_list() SET search_path = app, pg_temp;
+  ```
 
 ## Further reading
 
-- `README.md`: build and install.
-- Per-dialect chapters: `doc/plxruby.md`, `doc/plxphp.md`, `doc/plxjs.md`,
-  `doc/plxpython3.md`, `doc/plxcobol.md`, `doc/plxplsql.md`, `doc/plxts.md`,
-  `doc/plxtsql.md`, `doc/plxgo.md` (full syntax, supported and rejected
-  constructs, semantic differences).
-- `doc/PARITY.md`: the plpgsql construct parity matrix.
-- `doc/ARCHITECTURE.md`: how plx maps to the plpgsql engine.
-- `doc/TRANSPILER.md`: transpiler specification.
+- [Home](index.md): build and install.
+- Per-dialect chapters: [plxruby](plxruby.md), [plxphp](plxphp.md),
+  [plxjs](plxjs.md), [plxpython3](plxpython3.md), [plxcobol](plxcobol.md),
+  [plxplsql](plxplsql.md), [plxts](plxts.md), [plxtsql](plxtsql.md),
+  [plxgo](plxgo.md) (full syntax, supported and rejected constructs, semantic
+  differences).
+- [PARITY.md](PARITY.md): the plpgsql construct parity matrix.
+- [ARCHITECTURE.md](ARCHITECTURE.md): how plx maps to the plpgsql engine.
+- [TRANSPILER.md](TRANSPILER.md): the original transpiler design
+  specification.

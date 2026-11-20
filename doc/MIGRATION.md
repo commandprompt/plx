@@ -111,9 +111,17 @@ END;
 $do$;
 ```
 
-`grade_pg` is a normal plpgsql function with no dependency on the extension.
-Applied across your functions, this is an exit: you keep the plpgsql and drop
-plx. The original dialect source is preserved in a trailing comment inside the
+`grade_pg` is a normal plpgsql function. It depends on the extension only if
+its body calls one of plx's objects: the string builder (`plx_strbuild`,
+`plx_sb_append_strict` and `plx_sb_append`, emitted for the string-append
+operators), or, in plxtsql, `plx_tsql_int2`, `plx_tsql_int4` or
+`plx_tsql_int8` (emitted for a conversion to an integer type of a value whose
+type plx cannot see). PostgreSQL records no dependency for these calls, so
+`DROP EXTENSION plx` succeeds and the function fails on its next call.
+Rewrite the appends as `||` or `string_agg`, and a `plx_tsql_int4(ROW(e))`
+call as `trunc(e)::integer` for a number (or `e::integer` for any other
+type), before dropping plx. Applied across your functions, this is an exit: you keep
+the plpgsql and drop plx. The original dialect source is preserved in a trailing comment inside the
 generated body, so recreating it as plpgsql does not throw away the source
 either. See [debugging](DEBUGGING.md) for the helper that decodes it.
 

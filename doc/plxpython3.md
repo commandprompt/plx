@@ -41,7 +41,9 @@ amount #:: numeric
 amount = principal * rate
 ```
 
-The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 e #:: emp%ROWTYPE
@@ -53,6 +55,11 @@ A constant uses the `const` suffix on the annotation:
 ```sql
 pi = 3.14159 #:: numeric const
 ```
+
+A constant becomes a plpgsql `CONSTANT`, whose value is computed when the
+function starts. So it can use literals, parameters and earlier constants, but
+not another local variable: that would read the variable's initial value, not
+the one assigned above it, and is rejected.
 
 ## Control flow
 
@@ -70,7 +77,12 @@ else:
 ### Loops
 
 `for ... in range(...)` is an integer loop. `range(n)` is 0 to n-1, `range(a, b)`
-is a to b-1, `range(a, b, step)` adds a step.
+is a to b-1, `range(a, b, step)` adds a step. A negative step counts down, as in
+`range(10, 0, -3)` (10, 7, 4, 1), but it must be written as a literal: a step
+held in a variable must be positive, or the function stops with
+`BY value of FOR loop must be greater than zero`. As in Python, the loop variable
+keeps its last value after the loop ends or after a `break`. If the range is
+empty, the variable keeps the value it had before the loop.
 
 ```sql
 for i in range(1, n + 1):
@@ -87,7 +99,7 @@ while n > 0:
 ```sql
 outer: for i in range(n):
     for j in range(n):
-        if i + j >= limit:
+        if i + j >= lim:
             break outer
 ```
 
@@ -150,7 +162,8 @@ close_cursor(c)
 
 ```sql
 rc = row_count()   # GET DIAGNOSTICS rc = ROW_COUNT
-found()            # the FOUND variable
+if found():        # the FOUND variable
+    return rc
 ```
 
 ### Set-returning functions
@@ -186,11 +199,26 @@ finally:
     perform("INSERT INTO log(msg) VALUES ('done')")
 ```
 
-`except Exception as e` maps to `WHEN OTHERS`. To catch a specific condition,
-name it with the `PG::` spelling (`except PG::UniqueViolation as e`), which maps
-to `unique_violation`. Accessors: `e.message` to `SQLERRM`, `e.sqlstate` to
+`except Exception as e` and a bare `except:` map to `WHEN OTHERS`. To catch a
+specific condition, name it with the `PG::` spelling (`except PG::UniqueViolation
+as e`), which maps to `unique_violation`. A tuple catches any of its classes:
+`except (PG::UniqueViolation, PG::CheckViolation) as e` maps to
+`WHEN unique_violation OR check_violation`. The known classes are
+`PG::UniqueViolation`, `PG::ForeignKeyViolation`, `PG::NotNullViolation`,
+`PG::CheckViolation`, `PG::NoDataFound`, `PG::RaiseException` and
+`ZeroDivisionError`. Any other class, such as `KeyError`, makes
+`CREATE FUNCTION` fail with `unsupported exception class`. Accessors: `e.message` to `SQLERRM`, `e.sqlstate` to
 `SQLSTATE`, and `e.detail`, `e.hint`, `e.constraint`, `e.column`, `e.table`,
 `e.schema`, `e.datatype` to the matching `GET STACKED DIAGNOSTICS` fields.
+
+The `finally` body runs once, whether the `try` block completes, returns,
+breaks, continues or raises an error. After an error it runs and then raises
+the error again, with its SQLSTATE, message, detail, hint and the names of
+the objects it is about (schema, table, column, constraint, type); the
+`CONTEXT` of the raised error points at the re-raise, not the original
+statement. It does not run when the statement is cancelled (a query cancel
+or `statement_timeout`) or an `assert` fails, because `WHEN OTHERS` does not
+catch those two errors; for the same reason `except Exception` does not catch them.
 
 ### Assertions
 
@@ -202,10 +230,29 @@ assert n > 0, "must be positive"
 
 - Interpolation: f-strings, `f"total is {amount}"`. Plain strings do not
   interpolate. `{{` and `}}` are literal braces.
+- Strings: a triple-quoted string (`"""..."""`, `'''...'''`, or `f"""..."""`)
+  is one literal and may span lines. Adjacent literals, `"a" "b"`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x is None` becomes `x IS NULL`
   and `x is not None` becomes `x IS NOT NULL`.
 - Boolean: `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that Python groups
+  differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: Python's `a if c else b` is not supported; use an explicit `if`.
+- Conversions: `str(x)` and `float(x)` become `(x)::text` and
+  `(x)::double precision`. `int(x)` becomes `trunc((x)::numeric)::integer`, so
+  it truncates toward zero as Python does: `int(2.7)` is 2 and `int(-2.7)` is
+  -2. When the argument is visibly boolean (`True`, `False`, a boolean variable,
+  or a comparison such as `int(a > b)`), `int(x)` becomes `(x)::integer`
+  instead, because a boolean has no numeric cast. A boolean value plx cannot
+  see, such as a function that returns boolean, fails with `cannot cast type
+  boolean to numeric`; write `int(f(x) == True)` or a `CASE`. When the argument
+  is visibly a string (a string literal, or a `text`, `varchar` or `char`
+  variable), `int(x)` also becomes `(x)::integer`, so `int("4.7")` fails with
+  `invalid input syntax for type integer`, as Python raises `ValueError`.
 - `None` becomes `NULL`.
 
 ## Building strings in a loop
@@ -221,6 +268,9 @@ for row in query("SELECT name FROM t ORDER BY id"):
     s += ","
 return s
 ```
+
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
 
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
@@ -251,29 +301,46 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   a comparison involving NULL is unknown. Use `is None` / `is not None` (which
   become `IS NULL` / `IS NOT NULL`) to test for NULL. A positive `if`/`while`
   condition treats NULL as false.
-- Integer division follows SQL rules, not Python's `/` (float) and `//` (floor).
-  Division and modulo truncate toward zero: `-7 // 2` is `-4` in Python but the
-  SQL result here is `-3`, and `-7 % 2` is `1` in Python but `-1` here.
+- Integer division follows SQL rules, not Python's. `/` on integers truncates
+  toward zero (`-7 / 2` is `-3`, where Python gives `-3.5`), and `%` takes the
+  sign of the dividend (`-7 % 2` is `-1`, where Python gives `1`). Floor
+  division `//` is not supported: it is passed through and fails when the
+  function runs with `operator does not exist: integer // integer`.
 - Interpolating a NULL in an f-string propagates it, so the whole string is
   NULL. It is neither the Python string `"None"` nor an empty string. In a
-  message being built for `raise` the value falls back to an empty string
-  instead, so one NULL cannot swallow the message.
+  `raise` message, including the `raise("level", ...)` call form, the value
+  falls back to an empty string instead, so one NULL cannot swallow the
+  message. An `assert` message gets no fallback: a NULL there replaces your
+  message with plpgsql's generic `assertion failed`.
 - Comparisons use SQL type resolution. `1 == "1"` compares an integer to a string
   literal, which SQL coerces and treats as equal; in Python it is false.
 - Python truthiness is not emulated. A condition must be a boolean expression. A
-  non-boolean condition is an error reported by plpgsql when the function runs.
+  non-boolean condition is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
 - Locals are function-scoped, matching Python function scope.
 
 ## Not supported
 
 Rejected at `CREATE FUNCTION` time with a line number:
 
-- `def`, `class`, `lambda`, decorators, comprehensions, generators.
-- `import`, modules, and the Python standard library.
-- Tuples, lists, dicts, and sets as general values.
+- `def`, `class`, decorators, `yield`.
+- `import`, `from`, and `with`.
 - `match`/`case`.
 - The conditional expression `a if c else b`.
-- Per-block local scope (locals are function-scoped by design).
+- The `\N{name}` string escape. Write `\u` or `\U` with the code point.
+- String prefixes other than `f`: raw strings (`r"..."`), byte strings
+  (`b"..."`), `u"..."`, and combined prefixes such as `rf"..."`.
+
+Not translated:
+
+- `lambda`, comprehensions, generator expressions, and tuple, list, dict, and
+  set literals. Unannotated, they fail at `CREATE FUNCTION` time
+  (`cannot infer a PostgreSQL type`); annotated, they pass through and fail when
+  the function runs.
+- The Python standard library: a call passes through and must name a
+  PostgreSQL function.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

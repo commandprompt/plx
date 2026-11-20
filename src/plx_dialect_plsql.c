@@ -54,6 +54,9 @@ typedef struct
 	Ctx		   *cx;
 	PlTok	   *t;
 	int			nt;
+	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
+	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
+	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
 } Pl;
 
 static bool
@@ -96,6 +99,7 @@ pl_lex(Pl *pl, const char *body)
 	{
 		const char *pre = p;
 
+		CHECK_FOR_INTERRUPTS();
 		/* accumulate leading trivia: whitespace and comments */
 		for (;;)
 		{
@@ -236,27 +240,52 @@ pl_word_map(PlTok *tk)
 	return NULL;
 }
 
+/*
+ * Pair every '(' with its ')' once, after lexing. A forward scan from each
+ * DBMS_OUTPUT.PUT_LINE( or RAISE_APPLICATION_ERROR( made unbalanced input cost
+ * O(n^2): every call rescanned to the end of the body. The same pass records
+ * the first two top-level commas inside each '(', so RAISE_APPLICATION_ERROR
+ * needs no scan of its argument list: nested calls with no comma failed one by
+ * one and rescanned each range.
+ */
+static void
+pl_pair_parens(Pl *pl)
+{
+	int		   *stack = palloc(sizeof(int) * (pl->nt + 1));
+	int			sp = 0,
+				i;
+
+	pl->match = palloc(sizeof(int) * (pl->nt + 1));
+	pl->comma1 = palloc(sizeof(int) * (pl->nt + 1));
+	pl->comma2 = palloc(sizeof(int) * (pl->nt + 1));
+	for (i = 0; i < pl->nt; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		pl->match[i] = -1;
+		pl->comma1[i] = -1;
+		pl->comma2[i] = -1;
+		if (pl_punct(&pl->t[i], '('))
+			stack[sp++] = i;
+		else if (pl_punct(&pl->t[i], ')') && sp > 0)
+			pl->match[stack[--sp]] = i;
+		else if (pl_punct(&pl->t[i], ',') && sp > 0)
+		{
+			int			top = stack[sp - 1];
+
+			if (pl->comma1[top] < 0)
+				pl->comma1[top] = i;
+			else if (pl->comma2[top] < 0)
+				pl->comma2[top] = i;
+		}
+	}
+	pfree(stack);
+}
+
 /* index of the ')' matching the '(' at index lp, or -1 */
 static int
 pl_match_paren(Pl *pl, int lp)
 {
-	int			depth = 0,
-				i;
-
-	for (i = lp; i < pl->nt; i++)
-	{
-		if (pl_punct(&pl->t[i], '('))
-			depth++;
-		else if (pl_punct(&pl->t[i], ')'))
-		{
-			depth--;
-			if (depth == 0)
-				return i;
-		}
-		else if (pl->t[i].kind == PL_EOF)
-			break;
-	}
-	return -1;
+	return pl->match[lp];
 }
 
 /* raw source text spanning tokens [a, b) (text only, not leading trivia of a) */
@@ -270,6 +299,78 @@ pl_emit_raw(Pl *pl, int a, int b, StringInfo out)
 						   (int) (pl->t[b - 1].s + pl->t[b - 1].len - pl->t[a].s));
 }
 
+/*
+ * Mark each INTO that needs STRICT. In Oracle, a SELECT ... INTO or an EXECUTE
+ * IMMEDIATE ... INTO that finds no row raises NO_DATA_FOUND, and one that finds
+ * more than one row raises TOO_MANY_ROWS. plpgsql does that only with INTO
+ * STRICT. One forward pass tracks the first word of each statement, the paren
+ * depth and the CASE ... END depth, so only an INTO at the top level of a
+ * SELECT (or WITH) or EXECUTE statement is marked. FETCH ... INTO and DML
+ * RETURNING ... INTO keep their plain INTO, as in Oracle. A top-level INSERT,
+ * UPDATE, DELETE or MERGE ends the marking, so WITH ... INSERT INTO t and
+ * WITH ... UPDATE ... RETURNING ... INTO stay as written. An INTO already
+ * followed by STRICT is left alone.
+ */
+static bool *
+pl_mark_strict_into(Pl *pl)
+{
+	bool	   *mark = palloc0(sizeof(bool) * (pl->nt + 1));
+	bool		at_start = true;
+	bool		wants = false;	/* current statement is SELECT/WITH/EXECUTE */
+	int			pdepth = 0,
+				cdepth = 0,
+				i;
+
+	for (i = 0; i < pl->nt && pl->t[i].kind != PL_EOF; i++)
+	{
+		PlTok	   *t = &pl->t[i];
+
+		CHECK_FOR_INTERRUPTS();
+		if (at_start)
+		{
+			at_start = false;
+			pdepth = 0;
+			cdepth = 0;
+			wants = pl_ci(t, "SELECT") || pl_ci(t, "WITH") || pl_ci(t, "EXECUTE");
+			/* a CASE statement: its WHEN ... THEN starts a statement list */
+			if (pl_ci(t, "CASE"))
+				continue;
+		}
+		if (pl_punct(t, '('))
+			pdepth++;
+		else if (pl_punct(t, ')'))
+		{
+			if (pdepth > 0)
+				pdepth--;
+		}
+		else if (pl_punct(t, ';'))
+			at_start = true;
+		else if (pdepth > 0)
+			continue;
+		else if (pl_ci(t, "CASE"))
+			cdepth++;
+		else if (pl_ci(t, "END"))
+		{
+			if (cdepth > 0)
+				cdepth--;
+			else
+				at_start = true;
+		}
+		else if (cdepth > 0)
+			continue;
+		else if (pl_ci(t, "BEGIN") || pl_ci(t, "THEN") || pl_ci(t, "ELSE") ||
+				 pl_ci(t, "LOOP") || pl_ci(t, "DECLARE") || pl_ci(t, "EXCEPTION"))
+			at_start = true;
+		else if (pl_ci(t, "INSERT") || pl_ci(t, "UPDATE") ||
+				 pl_ci(t, "DELETE") || pl_ci(t, "MERGE"))
+			wants = false;		/* WITH ... INSERT INTO / RETURNING ... INTO */
+		else if (wants && pl_ci(t, "INTO") &&
+				 !(i + 1 < pl->nt && pl_ci(&pl->t[i + 1], "STRICT")))
+			mark[i] = true;
+	}
+	return mark;
+}
+
 static void
 plx_plsql_parse_body(Ctx *cx)
 {
@@ -279,10 +380,13 @@ plx_plsql_parse_body(Ctx *cx)
 				first;
 	bool		need_declare;
 	bool		in_decls = true;	/* type names map only before the first BEGIN */
+	bool	   *strict_into;
 
 	memset(&pl, 0, sizeof(pl));
 	pl.cx = cx;
 	pl_lex(&pl, cx->body);
+	pl_pair_parens(&pl);
+	strict_into = pl_mark_strict_into(&pl);
 
 	/* find the first real token; if the body does not already open with BEGIN or
 	 * DECLARE, its leading declarations need a DECLARE keyword */
@@ -298,6 +402,7 @@ plx_plsql_parse_body(Ctx *cx)
 	{
 		PlTok	   *t = &pl.t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		/* leading trivia is always preserved verbatim */
 		if (t->prelen)
 			appendBinaryStringInfo(out, t->pre, t->prelen);
@@ -310,6 +415,15 @@ plx_plsql_parse_body(Ctx *cx)
 			 * reference like "SELECT number FROM t" is not rewritten */
 			if (in_decls && pl_ci(t, "BEGIN"))
 				in_decls = false;
+
+			/* SELECT/EXECUTE ... INTO -> INTO STRICT (Oracle row-count errors) */
+			if (strict_into[i])
+			{
+				appendBinaryStringInfo(out, t->s, t->len);
+				appendStringInfoString(out, " STRICT");
+				i++;
+				continue;
+			}
 
 			/* EXECUTE IMMEDIATE -> EXECUTE */
 			if (pl_ci(t, "EXECUTE") && i + 1 < pl.nt && pl_ci(&pl.t[i + 1], "IMMEDIATE"))
@@ -354,41 +468,13 @@ plx_plsql_parse_body(Ctx *cx)
 				pl_punct(&pl.t[i + 1], '('))
 			{
 				int			close = pl_match_paren(&pl, i + 1);
-				int			comma = -1,
-							depth = 0,
-							k;
+				int			comma = pl.comma1[i + 1];
 
-				for (k = i + 2; close > 0 && k < close; k++)
-				{
-					if (pl_punct(&pl.t[k], '('))
-						depth++;
-					else if (pl_punct(&pl.t[k], ')'))
-						depth--;
-					else if (depth == 0 && pl_punct(&pl.t[k], ','))
-					{
-						comma = k;
-						break;
-					}
-				}
 				if (close > 0 && comma > 0)
 				{
-					int			mend = close;
-					int			d2 = 0,
-								k2;
-
 					/* message runs to the next top-level comma or the ')' */
-					for (k2 = comma + 1; k2 < close; k2++)
-					{
-						if (pl_punct(&pl.t[k2], '('))
-							d2++;
-						else if (pl_punct(&pl.t[k2], ')'))
-							d2--;
-						else if (d2 == 0 && pl_punct(&pl.t[k2], ','))
-						{
-							mend = k2;
-							break;
-						}
-					}
+					int			mend = pl.comma2[i + 1] > 0 ? pl.comma2[i + 1] : close;
+
 					appendStringInfoString(out, "RAISE EXCEPTION '%', (");
 					pl_emit_raw(&pl, comma + 1, mend, out);
 					appendStringInfoChar(out, ')');

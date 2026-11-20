@@ -57,6 +57,8 @@ typedef struct
 	bool		sq;				/* single-quoted string */
 	bool		fstr;			/* Python f-string (interpolating) */
 	char		quote;			/* opening quote char: ' " or ` */
+	bool		triple;			/* Python triple-quoted string (three quote
+								 * chars at each end) */
 	const char *ann;			/* TYPEANN: type text start */
 	int			annlen;
 } Tok;
@@ -69,9 +71,48 @@ typedef struct PlxLocal2
 	char	   *typ;			/* plpgsql type text, or NULL if RECORD */
 	bool		is_record;
 	bool		is_const;		/* CONSTANT declaration */
+	bool		untyped;		/* plxgo: a constant declared without a type */
 	char	   *init;			/* folded initializer text, or NULL */
 	struct PlxLocal2 *next;
 } PlxLocal2;
+
+/* ------------------------------------------------------- try/finally frames */
+
+/*
+ * A frame is pushed while a try body and its catch arms are parsed. A return,
+ * break or continue that would leave the frame is emitted as a placeholder
+ * (PlxFinExit) because the parser does not yet know whether a finally follows;
+ * plx_emit_try resolves the placeholders once it does. See plx_emit_try.
+ */
+typedef enum
+{
+	PLX_EXIT_RETURN, PLX_EXIT_BREAK, PLX_EXIT_CONTINUE
+} PlxExitKind;
+
+typedef struct PlxFinExit
+{
+	PlxExitKind kind;
+	char	   *label;			/* loop label, or NULL */
+	char	   *value;			/* rewritten return value, or NULL */
+	int			code;			/* dispatch code once routed through finally */
+} PlxFinExit;
+
+typedef struct PlxFin
+{
+	int			id;
+	int			loopdepth;		/* cx->loopdepth when the try began */
+	struct PlxFin *outer;
+	PlxFinExit *exits;
+	int			nexits,
+				cap;
+} PlxFin;
+
+typedef struct PlxLabel
+{
+	char	   *name;
+	int			fin_id;			/* frame the labeled loop is in (0 = none) */
+	struct PlxLabel *next;
+} PlxLabel;
 
 /* ---------------------------------------------------------------- context */
 
@@ -89,15 +130,30 @@ typedef struct PlxCtx
 	const PlxSurface *surf;
 	StringInfoData out;			/* emitted BEGIN..END body */
 	PlxLocal2  *locals, *ltail;
+	struct HTAB *lhash;			/* lower-cased name -> local (see plx_local_find) */
 	int			loopdepth;
 	int			depth;			/* recursion depth guard */
 	int			handlerdepth;	/* inside a rescue handler body */
+	struct PlxFin *fin;			/* innermost enclosing try-with-finally frame */
+	int			fin_seq;		/* frame id counter */
+	struct PlxLabel *labels;	/* loop labels seen so far, most recent first */
+	bool		ret_declared;	/* __plx_ret hoisted (see plx_fin_ret_var) */
 	int			subq;			/* __plx_fo_N / __plx_p_N counter */
 	const char *exc_var;		/* current rescue exception var name */
 	int			exc_varlen;
 	int			diag_mask;		/* stacked-diagnostics fields used in this handler */
 	bool		diag_msg;		/* rewriting a RAISE message: interpolate NULL as '' */
+	bool		interp_plain;	/* a string's interpolation was unbalanced, so
+								 * strings are scanned by their quotes alone
+								 * from then on (see lex_string) */
+	int			ninterp;		/* string interpolations rendered so far; an
+								 * interpolating initializer is not folded */
 	bool		retset;
+	char	  **pspell;			/* per parameter: the first spelling the body
+								 * used for it (see plx_is_param) */
+	struct HTAB *last_use;		/* brace for-loops: last token naming each word */
+	struct HTAB *appended;		/* plxphp: names that are the target of a .=
+								 * somewhere in the body (see php_appended) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 
@@ -121,6 +177,8 @@ void plx_emit_raise_call(Ctx *cx, int a, int ind);
 void plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out);
 int plx_parse_args(Ctx *cx, int a, int *as, int *ae, int maxargs, int *after);
 char *plx_binds_text(Ctx *cx, int *as, int *ae, int nargs);
+bool plx_sql_arg(Ctx *cx, int *as, int *ae, int n, bool force_dynamic,
+				 char **sql, char **binds);
 bool plx_arg_is_string_literal(Ctx *cx, int as, int ae);
 const char *plx_exc_class_to_condition(const char *s, int len);
 char *plx_diag_prefix(int mask, int ind);
@@ -130,11 +188,25 @@ void plx_skip_seps(Ctx *cx);
 bool plx_is_ident(char c);
 bool plx_is_ident_start(char c);
 bool plx_tok_is(Tok *tk, const char *op);
+bool plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len);
 bool plx_name_eq(Tok *tk, const char *w);
 int plx_stmt_end(Ctx *cx, int from);
 void plx_indent(StringInfo o, int n);
+PlxFin *plx_fin_push(Ctx *cx);
+void plx_fin_pop(Ctx *cx, PlxFin *f);
+void plx_label_note(Ctx *cx, const char *name, int len);
+void plx_emit_exit(Ctx *cx, StringInfo o, int ind, PlxExitKind kind,
+				   const char *label, const char *value, const char *cond);
+void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
+				  char *arms, char *ensure_body, PlxFin *f);	/* frees its strings */
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+void plx_local_drop(Ctx *cx, PlxLocal2 *l);
+void plx_string_interps(Ctx *cx, Tok *tk, void (*fn) (void *arg, const char *s, int len),
+						void *arg);
+void plx_check_loop_var(Ctx *cx, const char *name, int len);
+void plx_locals_reset(Ctx *cx);
+char *plx_ext_object(const char *name);
 bool plx_is_param(Ctx *cx, const char *name, int len);
 
 /* ---------------------------------------------- dialect front ends (vtable) */

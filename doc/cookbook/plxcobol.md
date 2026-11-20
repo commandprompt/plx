@@ -1,6 +1,6 @@
 # COBOL cookbook
 
-Practical recipes for the plxcobol dialect (ISO/IEC 1989:2023). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxcobol chapter](plxcobol.md) for the full language reference.
+Practical recipes for the plxcobol dialect (ISO/IEC 1989:2023). Every recipe here was run on PostgreSQL; plx transpiles the body to plpgsql and the standard interpreter executes it. See the [plxcobol chapter](../plxcobol.md) for the full language reference.
 
 ## Absolute value with IF / ELSE
 
@@ -298,6 +298,8 @@ SELECT circle_area(2);
 ```
  circle_area 
 -------------
-     12.5664
+     12.5663
 (1 row)
 ```
+
+The exact area is 12.56636. `COMPUTE` stores it in `WS-A`, which has four decimal places, and drops the fifth, as COBOL does. To round instead, write `COMPUTE WS-A ROUNDED = PI * R ** 2`, which gives 12.5664.

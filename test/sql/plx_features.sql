@@ -143,3 +143,127 @@ rescue => e
 end
 $$;
 SELECT f_strict() AS strict_no_row;
+
+-- backslash literals and interpolation with standard_conforming_strings = off
+-- are tested in plx_scs_off, which has an alternative output for PostgreSQL 19+
+
+-- interpolation in a SQL argument: a value is bound (or quoted), never spliced
+-- as SQL text, wherever it sits; ident() quotes identifiers, literal() and raw()
+-- splice on request
+CREATE TABLE tpl_t (id int, name text);
+INSERT INTO tpl_t VALUES (1, 'alice'), (2, 'bob');
+CREATE TABLE "tpl Odd" (id int);
+INSERT INTO "tpl Odd" VALUES (7);
+CREATE TABLE tpl_log (m text);
+
+-- a value round-trips exactly in each position, in a planned statement ($n)
+-- and in a utility statement (quote_nullable), and nothing it contains runs
+CREATE FUNCTION tpl_roundtrip(v text) RETURNS text LANGUAGE plxjs AS $$
+  execute(`DELETE FROM tpl_log`);
+  execute(`INSERT INTO tpl_log VALUES (${v})`);
+  execute(`INSERT INTO tpl_log VALUES ('${v}')`);
+  execute(`INSERT INTO tpl_log VALUES ('<${v}>')`);
+  execute(`COMMENT ON TABLE tpl_log IS '${v}'`);
+  let r = fetch_one(`SELECT count(*) AS c FROM tpl_log
+                     WHERE m = $1 OR m = '<' || $1 || '>'`, v);
+  let d = fetch_one(`SELECT obj_description('tpl_log'::regclass) AS d`);
+  return `${r.c}|${d.d = v}`;
+$$;
+SELECT v, tpl_roundtrip(v) AS "rows|comment_ok"
+FROM (VALUES ($x$plain$x$), ($x$it's$x$), ($x$x'); DROP TABLE tpl_t; --$x$),
+             ($x$C:\$x$), ($x$a\'b$x$), ($x$$$; RAISE EXCEPTION 'boom'; $$$x$)) AS p(v);
+SELECT count(*) AS tpl_t_survives FROM tpl_t;
+
+-- the generated SQL: values become $n after the call's own binds
+CREATE FUNCTION tpl_fetch(uname text, lim int) RETURNS text LANGUAGE plxruby AS $$
+  u = fetch_one("SELECT name FROM tpl_t WHERE name = '#{uname}' LIMIT $1", lim)
+  return u.name
+$$;
+SELECT tpl_fetch('bob', 1), tpl_fetch($x$x' OR name = 'bob$x$, 1) IS NULL AS injection_blocked;
+SELECT regexp_replace(prosrc, '^.*?BEGIN\n|END;\n/\*plx-orig.*$', '', 'gs')
+FROM pg_proc WHERE proname = 'tpl_fetch';
+
+-- static SQL: '#{x}' is the variable, not the literal text 'x'
+CREATE FUNCTION tpl_static(uname text) RETURNS int LANGUAGE plxpython3 AS $$
+u = fetch_one(f"SELECT id FROM tpl_t WHERE name = '{uname}'")
+return u.id
+$$;
+SELECT tpl_static('bob');
+
+-- ident() quotes an identifier (and makes the call dynamic); PHP spells it
+-- {ident($t)}
+CREATE FUNCTION tpl_ident(t text, minid int) RETURNS bigint LANGUAGE plxphp AS $$
+  $r = fetch_one("SELECT count(*) AS c FROM {ident($t)} WHERE id >= {$minid}");
+  return $r->c;
+$$;
+SELECT tpl_ident('tpl Odd', 7), tpl_ident('tpl_t', 2);
+
+-- raw() splices deliberately
+CREATE FUNCTION tpl_raw(ord text) RETURNS text LANGUAGE plxruby AS $$
+  s = ""
+  query("SELECT name FROM tpl_t ORDER BY #{raw(ord)}").each do |r|
+    s << r.name
+  end
+  return s
+$$;
+SELECT tpl_raw('name DESC');
+
+-- rejected: an interpolation inside a quoted identifier, ident() inside a string
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad1(t text) RETURNS void LANGUAGE plxjs AS $b$ execute(`SELECT * FROM "${t}"`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad2(t text) RETURNS void LANGUAGE plxjs AS $b$ execute(`SELECT '${ident(t)}'`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DO $d$ BEGIN
+  EXECUTE $q$CREATE FUNCTION tpl_bad3(c text) RETURNS void LANGUAGE plxjs AS $b$ execute(`COMMENT ON TABLE tpl_t IS 'x ${c}'`); $b$$q$;
+EXCEPTION WHEN OTHERS THEN RAISE WARNING 'caught: %', SQLERRM; END $d$;
+DROP TABLE tpl_t, "tpl Odd", tpl_log;
+
+-- a first assignment from an interpolated string is not folded into DECLARE:
+-- the initializer would run when the function starts and read the old value
+CREATE FUNCTION f_fold_js() RETURNS text LANGUAGE plxjs AS $$
+let v = "v0";
+v = "v2";
+let s = `got ${v}`;
+return s;
+$$;
+CREATE FUNCTION f_fold_py() RETURNS text LANGUAGE plxpython3 AS $$
+v = "v0"
+v = "v2"
+s = f"got {v}"
+return s
+$$;
+CREATE FUNCTION f_fold_rb() RETURNS text LANGUAGE plxruby AS $$
+v = "v0"
+v = "v2"
+s = "got #{v}"
+return s
+$$;
+CREATE FUNCTION f_fold_php() RETURNS text LANGUAGE plxphp AS $$
+$v = "v0";
+$v = "v2";
+$s = "got $v";
+return $s;
+$$;
+SELECT f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php();
+-- a plain literal is still folded; a constant may use parameters and earlier
+-- constants
+CREATE FUNCTION f_fold_const(n int) RETURNS text LANGUAGE plxruby AS $$
+k = 10 #:: int const
+c = "n=#{n} k=#{k}" #:: text const
+s = "plain"
+return "#{c} #{s}"
+$$;
+SELECT f_fold_const(5);
+SELECT regexp_replace(prosrc, '/\*plx-orig.*', '') FROM pg_proc WHERE proname = 'f_fold_const';
+DROP FUNCTION f_fold_js(), f_fold_py(), f_fold_rb(), f_fold_php(), f_fold_const(int);
+
+-- .to_s / .to_i / .to_f are rewritten as whole words only, so a field whose
+-- name starts with to_s, to_i or to_f is left alone; x.to_s() also works
+CREATE FUNCTION f_to_cast(n int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("select 'shipped' as to_status, 'x' as to_s_name, 2 as to_items")
+return "#{r.to_status}/#{r.to_s_name}/#{r.to_items}/#{n.to_s}/#{n.to_s()}/#{'4.5'.to_f}/#{'12'.to_i + 1}"
+$$;
+SELECT f_to_cast(3);
+DROP FUNCTION f_to_cast(int);

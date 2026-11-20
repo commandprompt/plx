@@ -33,8 +33,8 @@ infers it from the first value when it is an integer, numeric, text, or boolean
 literal. Otherwise annotate the variable with `#:: type`.
 
 ```sql
-n = 42            -- inferred integer
-label = "count"   -- inferred text
+n = 42            # inferred integer
+label = "count"   # inferred text
 amount #:: numeric
 amount = principal * rate
 ```
@@ -42,8 +42,9 @@ amount = principal * rate
 A first assignment of a constant literal at the top level is folded into the
 declaration, so `n = 42` becomes `DECLARE n integer := 42;`.
 
-The annotation text is emitted verbatim as the plpgsql type, so `%TYPE` and
-`%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 e #:: emp%ROWTYPE
@@ -55,6 +56,11 @@ A constant uses the `const` suffix on the annotation:
 ```sql
 pi = 3.14159 #:: numeric const
 ```
+
+A constant becomes a plpgsql `CONSTANT`, whose value is computed when the
+function starts. So it can use literals, parameters and earlier constants, but
+not another local variable: that would read the variable's initial value, not
+the one assigned above it, and is rejected.
 
 ## Control flow
 
@@ -108,6 +114,10 @@ end
 `next` and `break` map to `CONTINUE` and `EXIT`, and accept a condition modifier
 (`next if i == 3`).
 
+As in Ruby, the variable of a `for` loop keeps its last value after the loop
+ends or after a `break`. If the range is empty, the variable keeps the value it
+had before the loop.
+
 ### Loop labels
 
 ```sql
@@ -129,8 +139,10 @@ end
 ```
 
 The row variable is a record. Field access is `row.col`, `row[:col]`, or
-`row['col']`. Interpolated values in the SQL string are spliced as name
-references. For bind parameters or non-literal SQL, pass extra arguments:
+`row['col']`. The bracket form reads a field only on a record. On a jsonb or
+hstore value it is SQL subscripting (`j['a']` needs PostgreSQL 14 or later), and
+`ARRAY['x']` is an array. Interpolated values in the SQL string are bound as
+values (see [Interpolation in SQL](DYNAMIC-SQL.md)). For bind parameters or non-literal SQL, pass extra arguments:
 `query(sql, a, b).each`. `each_with_index do |row, i|` provides a zero-based
 index.
 
@@ -144,6 +156,14 @@ end
 ```
 
 The loop variable must be annotated with its element type.
+
+`each_with_index do |v, i|` works on a query, an array and a range
+(`(1..n).each_with_index`). The index `i` is an integer that starts at 0. As
+in Ruby, the index exists only inside the block. A parameter or a variable
+with the same name is hidden inside the block
+and keeps its value after the loop. The value and
+the index must have different names. Without `each_with_index`, a block takes
+one variable: `each do |v, i|` is an error.
 
 ### Fetching one row
 
@@ -160,7 +180,7 @@ one row.
 ```sql
 perform("UPDATE counters SET n = n + 1 WHERE id = #{cid}")
 execute("INSERT INTO t(msg) VALUES ($1)", note)
-return_query("SELECT id FROM vip ORDER BY id")   -- in a set-returning function
+return_query("SELECT id FROM vip ORDER BY id")   # in a set-returning function
 ```
 
 `perform` runs a literal statement. `execute` runs dynamic SQL with optional bind
@@ -183,8 +203,10 @@ close_cursor(c)
 ### Diagnostics
 
 ```sql
-rc = row_count()   -- GET DIAGNOSTICS rc = ROW_COUNT
-found?             -- the FOUND variable
+rc = row_count()   # GET DIAGNOSTICS rc = ROW_COUNT
+if found?          # the FOUND variable
+  return rc
+end
 ```
 
 ### Set-returning functions
@@ -205,13 +227,15 @@ $$;
 ### Raising
 
 ```sql
-raise "bad value"                                -- EXCEPTION
-raise notice: "processed #{n} rows"              -- NOTICE
+raise "bad value"                                # EXCEPTION
+raise notice: "processed #{n} rows"              # NOTICE
 raise exception: "negative: #{v}", errcode: "22023"
 ```
 
 Levels are `notice`, `warning`, `info`, `log`, `debug`, `exception`. Options are
-`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. The call form
+`errcode`, `detail`, `hint`, `column`, `constraint`, `message`. `message:` takes
+the place of the message, as in `raise message: "bad #{v}", errcode: "22023"`;
+`CREATE FUNCTION` rejects a `raise` that has both. The call form
 `raise("notice", "message")` is also accepted.
 
 ### Handling
@@ -233,6 +257,15 @@ Accessors: `e.message` to `SQLERRM`, `e.sqlstate` to `SQLSTATE`, and `e.detail`,
 `e.hint`, `e.constraint`, `e.column`, `e.table`, `e.schema`, `e.datatype` to the
 matching `GET STACKED DIAGNOSTICS` fields.
 
+The `ensure` body runs once, whether the `begin` block completes, returns,
+breaks, continues or raises an error. After an error it runs and then raises
+the error again, with its SQLSTATE, message, detail, hint and the names of
+the objects it is about (schema, table, column, constraint, type); the
+`CONTEXT` of the raised error points at the re-raise, not the original
+statement. It does not run when the statement is cancelled (a query cancel
+or `statement_timeout`) or an `assert` fails, because `WHEN OTHERS` does not
+catch those two errors; for the same reason `rescue` does not catch them.
+
 ### Assertions
 
 ```sql
@@ -242,12 +275,23 @@ assert(n > 0, "must be positive")
 ## Expressions
 
 - Interpolation: `"total is #{amount}"` becomes `'total is ' || (amount)::text`.
-  Single-quoted strings do not interpolate.
+  Single-quoted strings do not interpolate. Adjacent literals, `"a" 'b'`, are
+  concatenated.
 - Comparison: `==` and `!=` map to `=` and `<>`. `x == nil` becomes `x IS NULL`.
-- Boolean: `&&`, `||`, `!`, and `and`, `or`, `not` map to `AND`, `OR`, `NOT`.
+- Boolean: `&&`, `!`, `and`, `or`, and `not` map to `AND`, `NOT`, `AND`, `OR`,
+  and `NOT`. `||` maps to `OR` only in a condition (`if`, `unless`, `while`,
+  `until`, or a ternary test); elsewhere it passes through as SQL `||`
+  (string concatenation), so write `or` there.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512 and `-2 ** 2` is -4. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that Ruby groups
+  differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
-- Casts: `x.to_i`, `x.to_s`, `x.to_f` become `::integer`, `::text`,
-  `::double precision`. `nil` becomes `NULL`.
+- Casts: `x.to_s` and `x.to_f` become `::text` and `::double precision`.
+  `x.to_i` becomes `trunc((x)::numeric)::integer`, so it truncates toward zero
+  as Ruby does: `2.7.to_i` is 2 and `-2.7.to_i` is -2. A string such as
+  `"4.7"` gives 4. `nil` becomes `NULL`.
 
 ## Building strings in a loop
 
@@ -264,10 +308,23 @@ end
 return s
 ```
 
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
+
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
 feature). Alternatively, assemble text in SQL with `string_agg` when the pieces
 come from a query.
+
+The builder is used only for a local declared `text` or `varchar` without a
+length. A local declared with a length, such as `s = "" #:: varchar(20)`, keeps
+its type, and `<<` becomes `s := s || x`, which raises `value too long` when the
+text outgrows it. On an array local, `<<` appends an element:
+
+```sql
+tags = a #:: text[]
+tags << "new"          # tags := array_append(tags, ('new'))
+```
 
 ## Trigger functions
 
@@ -297,7 +354,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - Interpolating a NULL propagates it, so `"x=#{v}"` is NULL when `v` is NULL,
   rather than the `'x='` that Ruby's `nil.to_s` would give. In a message being
   built for `raise` the value falls back to an empty string instead, so one
-  NULL cannot swallow the message.
+  NULL cannot swallow the message. The same fallback applies to the `detail:`,
+  `hint:`, `column:` and `constraint:` options of `raise`. A NULL `errcode:`
+  still makes the `raise` fail with `RAISE statement option cannot be null`. A
+  NULL in an `assert` message replaces it with `assertion failed`. Wrap such
+  values in `coalesce(x, '')`.
 - Comparisons use SQL type resolution, not Ruby's. `1 == "1"` compares an integer
   to a string literal, which SQL coerces and treats as equal; in Ruby it is
   false. Compare like-typed values.
@@ -305,8 +366,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   and `-7 % 2` is `-1`, where Ruby gives `-4` and `1`.
 - Locals are function-scoped, matching Ruby method scope.
 - Ruby truthiness is not emulated. A condition must be a boolean expression;
-  write `x != 0` or `!x.nil?` rather than a bare `x`. A non-boolean condition is
-  an error reported by plpgsql when the function runs, not at CREATE time.
+  write `x != 0` or `x != nil` rather than a bare `x`. A non-boolean condition
+  is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
 
 ## Not supported
 
@@ -315,7 +379,7 @@ Rejected at `CREATE FUNCTION` time with a line number:
 - Method or class definitions (`def`, classes, modules), gems.
 - Blocks and lambdas beyond the recognized `.each` forms.
 - Hash and array literals as general values.
-- `||=`, `&&=`, and `and`/`or` in value position.
+- `||=` and `&&=`.
 - `redo`, `retry`.
 - Predicate/bang methods (`x.zero?`, `arr.empty?`, `s.strip!`): the trailing
   `?`/`!` is not a SQL operator. Use the SQL form (`x = 0`,

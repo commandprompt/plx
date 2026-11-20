@@ -53,18 +53,18 @@ end
 return t
 $$;
 SELECT _src('o_rb_for');
-            _src            
-----------------------------
- /*plx:v1:plxruby*/        +
- DECLARE                   +
-   t integer := 0;         +
- BEGIN                     +
-   FOR i IN 1..(n - 1) LOOP+
-     CONTINUE WHEN i  =  2;+
-     t := t + i;           +
-   END LOOP;               +
-   RETURN t;               +
- END;                      +
+             _src             
+------------------------------
+ /*plx:v1:plxruby*/          +
+ DECLARE                     +
+   t integer := 0;           +
+ BEGIN                       +
+   FOR i IN 1..((n) - 1) LOOP+
+     CONTINUE WHEN i  =  2;  +
+     t := t + i;             +
+   END LOOP;                 +
+   RETURN t;                 +
+ END;                        +
  
 (1 row)
 
@@ -137,7 +137,7 @@ SELECT _src('o_rb_data');
    t bigint := 0;                                                                  +
    row RECORD;                                                                     +
  BEGIN                                                                             +
-   FOR row IN SELECT amt FROM x WHERE g = g LOOP                                   +
+   FOR row IN SELECT amt FROM x WHERE g = (g) LOOP                                 +
      t := t + row.amt;                                                             +
    END LOOP;                                                                       +
    RAISE EXCEPTION '%', 'done ' || COALESCE((t)::text, '') USING ERRCODE = '22023';+
@@ -175,17 +175,17 @@ for ($i = 1; $i < $n; $i++) { $t = $t + $i; }
 return $t;
 $$;
 SELECT _src('o_php_for');
-            _src            
-----------------------------
- /*plx:v1:plxphp*/         +
- DECLARE                   +
-   t integer := 0;         +
- BEGIN                     +
-   FOR i IN 1..(n - 1) LOOP+
-     t := t + i;           +
-   END LOOP;               +
-   RETURN t;               +
- END;                      +
+             _src             
+------------------------------
+ /*plx:v1:plxphp*/           +
+ DECLARE                     +
+   t integer := 0;           +
+ BEGIN                       +
+   FOR i IN 1..((n) - 1) LOOP+
+     t := t + i;             +
+   END LOOP;                 +
+   RETURN t;                 +
+ END;                        +
  
 (1 row)
 
@@ -199,21 +199,21 @@ for (const r of query(`SELECT v FROM x WHERE g = ${n}`)) {
 return t;
 $$;
 SELECT _src('o_js');
-                    _src                     
----------------------------------------------
- /*plx:v1:plxjs*/                           +
- DECLARE                                    +
-   t integer := 0;                          +
-   r RECORD;                                +
- BEGIN                                      +
-   FOR r IN SELECT v FROM x WHERE g = n LOOP+
-     IF r.v  =  0 THEN                      +
-       CONTINUE;                            +
-     END IF;                                +
-     t := t + r.v;                          +
-   END LOOP;                                +
-   RETURN t;                                +
- END;                                       +
+                     _src                      
+-----------------------------------------------
+ /*plx:v1:plxjs*/                             +
+ DECLARE                                      +
+   t integer := 0;                            +
+   r RECORD;                                  +
+ BEGIN                                        +
+   FOR r IN SELECT v FROM x WHERE g = (n) LOOP+
+     IF r.v  =  0 THEN                        +
+       CONTINUE;                              +
+     END IF;                                  +
+     t := t + r.v;                            +
+   END LOOP;                                  +
+   RETURN t;                                  +
+ END;                                         +
  
 (1 row)
 
@@ -233,7 +233,7 @@ SELECT _src('o_py');
  DECLARE                      +
    t integer := 0;            +
  BEGIN                        +
-   FOR i IN 0..(n - 1) LOOP   +
+   FOR i IN 0..((n) - 1) LOOP +
      t := t + i;              +
    END LOOP;                  +
    IF t  =  0 THEN            +

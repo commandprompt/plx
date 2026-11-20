@@ -73,6 +73,14 @@ extern Datum plx_generic_inline_handler(FunctionCallInfo fcinfo, const PlxDialec
 /* True if prosrc already carries the plx sentinel (already transpiled). */
 extern bool plx_has_sentinel(const char *prosrc);
 
+/*
+ * Schema the plx extension is installed in, set by the validator and inline
+ * handler before they transpile. Generated code names the extension's own
+ * objects (plx_strbuild, plx_sb_append) qualified with it, so they resolve
+ * the same under any search_path. InvalidOid means "emit unqualified".
+ */
+extern Oid	plx_ext_namespace;
+
 /* (plx_transpile + PlxSurface live in plx_int.h, shared with the transpiler.) */
 
 #endif							/* PLX_H */

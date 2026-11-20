@@ -32,7 +32,8 @@ expressions are passed through to plpgsql and SQL unchanged.
 Declare locals with `let`, `const`, or `var`; the keyword is removed in the
 generated plpgsql. plx infers the type from the first value when it is an
 integer, numeric, text, or boolean literal. Otherwise annotate the variable with
-a `/*:: type */` comment before the `;`.
+a `/*:: type */` comment before the `;`. An annotation before an initializer
+(`let n /*:: bigint */ = 3;`) is rejected; write `let n = 3 /*:: bigint */;`.
 
 ```sql
 let n = 42;             // inferred integer
@@ -41,7 +42,9 @@ let amount /*:: numeric */;
 amount = principal * rate;
 ```
 
-The annotation text is emitted verbatim, so `%TYPE` and `%ROWTYPE` work:
+The annotation becomes the plpgsql type. It must be a type name and nothing
+else (plx checks this at `CREATE FUNCTION` time), and `%TYPE` and `%ROWTYPE`
+work:
 
 ```sql
 let e /*:: emp%ROWTYPE */;
@@ -53,6 +56,11 @@ A constant uses the `const` suffix in the annotation:
 ```sql
 let pi = 3.14159 /*:: numeric const */;
 ```
+
+A constant becomes a plpgsql `CONSTANT`, whose value is computed when the
+function starts. So it can use literals, parameters and earlier constants, but
+not another local variable: that would read the variable's initial value, not
+the one assigned above it, and is rejected.
 
 ## Control flow
 
@@ -67,8 +75,12 @@ else { grade = "F"; }
 ### switch
 
 `switch` lowers to plpgsql `CASE`. Stacked labels become a value list. Each arm
-must end with `break` or a terminating statement (`return`/`throw`); genuine
-fall-through is rejected.
+must end with `break` or another statement that leaves the arm (`return`,
+`throw`, `continue`, or `break` with a loop label); genuine fall-through is
+rejected.
+A `break` inside an `if` or `try` within an arm leaves the `switch`, as it
+does in the source language. A `break` inside a loop within an arm leaves only
+that loop.
 
 ```sql
 switch (n) {
@@ -90,6 +102,24 @@ for (let i = 1; i <= n; i++) {
 while (n > 0) { n = n - 1; }
 ```
 
+A counting `for` becomes a plpgsql integer `FOR`. That loop works out its
+bounds once and keeps its own copy of the loop variable. So plx accepts a `for`
+only when the result is the same:
+
+- The condition compares the loop variable with a single value (`i < n` or
+  `i <= n`).
+- The step changes the loop variable (`i++` or `i += K`).
+- The body does not assign the loop variable, or any variable in the bound or
+  the step.
+- In a loop without `let` or `const`, the code after the loop does not read
+  the loop variable before it assigns it again. `var` does not count as
+  `let`: a `var` variable keeps its value after the loop.
+- In a loop without `let` or `const` that is inside another loop, the outer
+  loop does not read the loop variable on its next pass before the `for` runs
+  again: not in its condition, and not in its body before the `for`.
+
+`CREATE FUNCTION` rejects any other `for`. Write it as a `while` loop instead.
+
 `continue` and `break` map to `CONTINUE` and `EXIT`.
 
 ### Loop labels
@@ -97,7 +127,7 @@ while (n > 0) { n = n - 1; }
 ```sql
 outer: for (let i = 1; i <= n; i++) {
   for (let j = 1; j <= n; j++) {
-    if (i + j >= limit) { break outer; }
+    if (i + j >= lim) { break outer; }
   }
 }
 ```
@@ -113,7 +143,8 @@ for (const row of query(`SELECT id, amount FROM orders WHERE grp = ${g}`)) {
 ```
 
 The row variable is a record. Field access is `row.col`. For bind parameters or
-non-literal SQL, pass extra arguments: `query(sql, a) of ...`.
+non-literal SQL, pass extra arguments: `for (const row of query(sql, a))`, which
+becomes `FOR row IN EXECUTE sql USING a`.
 
 ### Iterating an array
 
@@ -164,7 +195,7 @@ close_cursor(c);
 
 ```sql
 let rc = row_count();   // GET DIAGNOSTICS rc = ROW_COUNT
-found()                 // the FOUND variable
+if (found()) { return rc; }   // the FOUND variable
 ```
 
 ### Set-returning functions
@@ -184,26 +215,42 @@ $$;
 throw new Error(`negative: ${v}`);
 ```
 
+`throw` takes a constructor call, such as `new Error(message)`, and raises its first
+argument as the error message. `CREATE FUNCTION` rejects any other thrown
+expression, such as `throw msg;` or `throw a + b(c);`. To throw a computed
+message, build it inside the call.
+
 The call form `raise("notice", "message")` emits a `RAISE` at the named level
 (`notice`, `warning`, `info`, `log`, `debug`, `exception`).
 
 ### Handling
 
 ```sql
+let r = 0;
 try {
-  return 100 / d;
+  r = 100 / d;
 } catch (e) {
   raise("notice", `caught: ${e.message}`);
-  return -1;
+  r = -1;
 } finally {
   perform("INSERT INTO log(msg) VALUES ('done')");
 }
+return r;
 ```
 
 `catch (e)` maps to `WHEN OTHERS`. Accessors: `e.message` to `SQLERRM`,
 `e.sqlstate` to `SQLSTATE`, and `e.detail`, `e.hint`, `e.constraint`, `e.column`,
 `e.table`, `e.schema`, `e.datatype` to the matching `GET STACKED DIAGNOSTICS`
 fields.
+
+The `finally` body runs once, whether the `try` block completes, returns,
+breaks, continues or raises an error. After an error it runs and then raises
+the error again, with its SQLSTATE, message, detail, hint and the names of
+the objects it is about (schema, table, column, constraint, type); the
+`CONTEXT` of the raised error points at the re-raise, not the original
+statement. It does not run when the statement is cancelled (a query cancel
+or `statement_timeout`) or an `assert` fails, because `WHEN OTHERS` does not
+catch those two errors; for the same reason `catch (e)` does not catch them.
 
 ### Assertions
 
@@ -217,7 +264,15 @@ assert(n > 0, "must be positive");
   `'...'` strings do not interpolate. Use template literals for concatenation.
 - Comparison: `==`, `===`, `!=`, `!==` map to `=` and `<>`. `x === null` becomes
   `x IS NULL`.
-- Boolean: `&&`, `||`, `!` map to `AND`, `OR`, `NOT`.
+- Boolean: `&&` and `!` map to `AND` and `NOT`. `||` maps to `OR` only in an
+  `if`/`while` condition or a ternary test. Elsewhere (assignments, `return`)
+  it passes through as SQL `||` (string concatenation), so write `OR` there:
+  `let ok = a OR b /*:: boolean */;`.
+- Power and XOR: `a ** b` becomes `((a) ^ (b))`, so it keeps the dialect's
+  meaning: `2 ** 3 ** 2` is 512. `a ^ b` is bitwise XOR and
+  becomes SQL `a # b`; it works on integers. SQL reads `&`, `|`, `#`, `<<` and
+  `>>` from left to right, so `CREATE FUNCTION` rejects a mix that JavaScript
+  groups differently, such as `a ^ b & c`. Write `a ^ (b & c)`.
 - Ternary: `c ? a : b` becomes `CASE WHEN c THEN a ELSE b END`.
 - `null` and `undefined` become `NULL`.
 
@@ -235,6 +290,9 @@ for (const row of query(`SELECT name FROM t ORDER BY id`)) {
 }
 return s;
 ```
+
+If an appended value is NULL, the whole string becomes NULL, as with `||`.
+To skip NULL values, append `coalesce(x, '')`.
 
 On PostgreSQL 18 this is amortized O(1) per append. On PostgreSQL 13 to 17 it is
 correct but not accelerated (the in-place optimization needs a PostgreSQL 18
@@ -272,23 +330,36 @@ These are intentional. plx pins semantics to SQL and plpgsql.
 - `+` is numeric addition; use template literals for string building.
 - Interpolating a NULL in a template literal propagates it, so the whole string
   is NULL. It is neither the JavaScript string `"null"` nor an empty string. In
-  a message being built for `throw` the value falls back to an empty string
-  instead, so one NULL cannot swallow the message.
+  a `throw` or `raise` message, including the `raise("level", ...)` call form,
+  the value falls back to an empty string instead, so one NULL cannot swallow
+  the message. An `assert` message gets no fallback: a NULL there replaces your
+  message with plpgsql's generic `assertion failed`.
 - Integer division and modulo follow SQL (truncate toward zero).
 - JavaScript truthiness is not emulated. A condition must be a boolean
-  expression. A non-boolean condition is an error reported by plpgsql when the
-  function runs.
-- Locals are function-scoped, matching JavaScript `var` scope.
+  expression. A non-boolean condition is not rejected at CREATE time. When the function runs, plpgsql coerces it
+  through its text form: a value whose text is a boolean literal (`0`, `1`,
+  `t`, `yes`, `off`, ...) is silently accepted, and anything else raises
+  `invalid input syntax for type boolean`.
+- Locals are function-scoped, matching JavaScript `var` scope. `let` and
+  `const` inside a block are not block-scoped: a redeclaration in an inner block
+  assigns the outer variable. `const` is not enforced.
 
 ## Not supported
 
 Rejected at `CREATE FUNCTION` time with a line number:
 
-- Function definitions, arrow functions, classes, `import`.
-- Object and array literals as general values.
-- `for...in`, and `for...of` over anything other than `query(...)` or an array.
+- Function definitions, classes, `import`.
+- `for...in`.
+- A `for` that is not a counting loop (see [Loops](#loops)).
 - `switch` fall-through (end each case with `break` or `return`).
-- Per-block local `DECLARE` (locals are function-scoped by design).
+
+Not translated:
+
+- Arrow functions and object and array literals as general values. Unannotated,
+  they fail at `CREATE FUNCTION` time with `cannot infer a PostgreSQL type`;
+  annotated, they pass through and fail when the function runs.
+- `for...of` treats anything other than `query(...)` as an array
+  (`FOREACH ... IN ARRAY`); a non-array fails when the function runs.
 
 See [PARITY.md](PARITY.md) for the full plpgsql construct matrix and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how plx maps to the plpgsql engine.

@@ -46,12 +46,30 @@ unwrapped (the declarations inside still hoist).
 
 The **body** is T-SQL, but the function **signature** (the parameter and return
 types in `CREATE FUNCTION`) is parsed by PostgreSQL before plx sees the body, so
-it must use PostgreSQL type names: write `RETURNS int`, not `RETURNS INT` inside
-a T-SQL `CREATE PROCEDURE`. Parameters are referenced in the body with the `@`
+it must use PostgreSQL type names: write `RETURNS timestamp`, not
+`RETURNS DATETIME`. Parameters are referenced in the body with the `@`
 sigil (`@score` above binds to the parameter `score`). Inside the body, T-SQL
 type names in `DECLARE` are translated (see below).
 
 ## Transact-SQL to PostgreSQL translations
+
+### Identifiers
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `[Order Details]`, `[user]` | `"order details"`, `"user"` |
+| `"Name"` | `"Name"` |
+| `[a]]b]`, `"a""b"` | `"a]b"`, `"a""b"` |
+
+A delimited identifier keeps its delimiters, so it can hold a space or a
+reserved word.
+
+- A `[bracketed]` name is folded to lower case, then quoted. So `[Orders]`
+  matches a table created as `orders` or `Orders` without quotes, as in SQL
+  Server under its default case-insensitive collation.
+- A `"quoted"` name keeps its case, as in PostgreSQL. Use it to reach an object
+  created with a mixed-case quoted name: `"Name"` matches a column created as
+  `"Name"`, not one created as `name`.
 
 ### Variables and assignment
 
@@ -62,9 +80,23 @@ type names in `DECLARE` are translated (see below).
 | `DECLARE @a int, @b int` | both hoisted |
 | `SET @x = e` | `x := e;` |
 | `SET @x += e` | `x := x + (e);` (also `-=`, `*=`, `/=`, `%=`) |
+| `SET @s += e`, `@s` a string variable and `e` a known string | `s := s \|\| (e);` |
 | `SELECT @x = e` (no `FROM`) | `x := e;` |
 | `SELECT @x = a, @y = b` | `x := a; y := b;` |
-| `SELECT @x = col FROM t ...` | `SELECT col INTO x FROM t ...;` |
+| `SELECT @x = col FROM t ...` | `FOR r IN SELECT col AS c1 FROM t ... LOOP x := r.c1; END LOOP;` |
+
+`SELECT @x = col FROM t ...` assigns once per row, as in SQL Server. After the
+statement, `@x` holds the value from the last row. When no row matches, `@x`
+keeps the value it had before. An expression in the list that reads one of the
+variables the same `SELECT` assigns, such as `SELECT @t = @t + v FROM t`, is
+rejected when you create the function. Use an aggregate instead, for example
+`SELECT @t = SUM(v) FROM t` or `SELECT @s = string_agg(name, ',') FROM t`.
+
+An assignment to an integer variable truncates a fraction toward zero, as in
+SQL Server: `DECLARE @i int = 2.7` gives 2, `SET @i = -2.7` gives -2, and
+`SET @i += 1.5` adds 1.5 and then truncates. This applies to `DECLARE`, `SET`
+and `SELECT @x = ...`. See
+[Conversion to an integer type](#conversion-to-an-integer-type).
 
 ### Control flow
 
@@ -87,14 +119,65 @@ keyword or `BEGIN`); there is no `THEN` keyword in T-SQL.
 | T-SQL | plpgsql |
 | --- | --- |
 | `PRINT e` | `RAISE NOTICE '%', e;` |
-| `RAISERROR('msg', sev, state)` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 10 or lower | `RAISE NOTICE '%', 'msg';` |
+| `RAISERROR('msg', sev, state)` with `sev` 11 or higher, `-1`, or `ERROR_SEVERITY()` | `RAISE EXCEPTION '%', 'msg';` |
+| `RAISERROR('msg', @sev, state)` | `IF sev <= 10 AND sev <> -1 THEN RAISE NOTICE ... ELSE RAISE EXCEPTION ... END IF;` |
+| `RAISERROR(...) WITH LOG` | adds `RAISE LOG '%', 'msg';` before the message |
 | `THROW n, 'msg', s` | `RAISE EXCEPTION '%', 'msg';` |
 | `THROW;` (bare, in CATCH) | `RAISE;` (re-raise) |
-| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
+| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` (undoes the writes made in TRY; see [below](#a-catch-block-undoes-the-writes-made-in-try)) |
 | `ERROR_MESSAGE()` | `SQLERRM` |
+
+RAISERROR follows SQL Server's severity rule. A severity of 10 or lower is an
+informational message: the function prints it as a notice and continues, and a
+CATCH block does not catch it. A severity of 11 or higher raises an error. Two
+values always raise an error: -1, which in SQL Server means the severity stored
+for the message (plx cannot look that up), and ERROR_SEVERITY(), because only an
+error reaches a CATCH block. Any other negative severity counts as 0. When the
+severity is a variable, plx checks it at run time, and a NULL severity raises an
+error. After the closing parenthesis you can write WITH followed by NOWAIT,
+SETERROR or LOG, separated by commas. NOWAIT needs no translation because
+PostgreSQL sends every notice to the client at once. SETERROR has no effect
+because plxtsql does not support @@ERROR. LOG also writes the message to the
+server log. Any other option is an error when you create the function.
 
 `RAISERROR`'s format arguments (its `%d`/`%s` printf-style substitutions) are not
 applied; the message argument is emitted as-is.
+
+### A CATCH block undoes the writes made in TRY
+
+**Caution:** when an error reaches `CATCH`, plx undoes every database change
+that the `TRY` block made before the error. SQL Server keeps those changes when
+`XACT_ABORT` is `OFF`, its default. plx cannot keep them: `TRY` becomes a
+plpgsql block with an `EXCEPTION` clause, and PostgreSQL rolls such a block back
+to a savepoint when it catches an error. Variables keep the values they had
+when the error happened, as in SQL Server.
+
+```sql
+CREATE TABLE logt(msg text);
+CREATE FUNCTION r1() RETURNS text LANGUAGE plxtsql AS $$
+  BEGIN TRY
+    INSERT INTO logt VALUES ('attempt');
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO logt VALUES ('caught');
+  END CATCH
+  RETURN 'done';
+$$;
+SELECT r1();
+SELECT string_agg(msg, ',') FROM logt;
+```
+
+SQL Server leaves `attempt,caught` in `logt`. plx leaves only `caught`.
+
+To keep a write when the `TRY` block fails, make it outside the `TRY` block:
+
+1. Move a write that must survive, such as an audit or error-log row, before
+   `BEGIN TRY`.
+2. Or make it in the `CATCH` block, which runs after the rollback. To use a
+   value computed in `TRY`, assign it to a variable there; the variable keeps
+   its value.
 
 ### Types (in `DECLARE`)
 
@@ -103,7 +186,9 @@ applied; the message argument is emitted as-is.
 | `INT`, `INTEGER` | `integer` |
 | `BIGINT`, `SMALLINT`, `TINYINT` | `bigint`, `smallint`, `smallint` |
 | `BIT` | `boolean` |
-| `DECIMAL(p,s)`, `NUMERIC`, `MONEY` | `numeric(p,s)`, `numeric`, `numeric(19,4)` |
+| `DECIMAL(p,s)`, `NUMERIC(p,s)`, `DEC(p,s)` | `numeric(p,s)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)`, as in SQL Server |
+| `MONEY` | `numeric(19,4)` |
 | `FLOAT`, `REAL` | `double precision`, `real` |
 | `VARCHAR(n)`, `NVARCHAR(n)` | `varchar(n)` |
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)` | `text` |
@@ -115,6 +200,13 @@ applied; the message argument is emitted as-is.
 | `UNIQUEIDENTIFIER` | `uuid` |
 | `VARBINARY(n)`, `VARBINARY(MAX)` | `bytea` |
 
+SQL Server's names of several words mean the same as the one-word names, here
+and in `CAST` and `CONVERT`: `CHARACTER VARYING` and `CHAR VARYING` mean
+`VARCHAR`, `NATIONAL CHARACTER VARYING` and `NATIONAL CHAR VARYING` mean
+`NVARCHAR`, `CHARACTER` means `CHAR`, `NATIONAL CHARACTER` and `NATIONAL CHAR`
+mean `NCHAR`, `BINARY VARYING` means `VARBINARY`, and `DOUBLE PRECISION` means
+`FLOAT`.
+
 An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 ### Functions
@@ -124,7 +216,7 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `ISNULL(a, b)` | `coalesce(a, b)` |
 | `IIF(c, a, b)` | `CASE WHEN c THEN a ELSE b END` |
 | `CONVERT(type, e)` | `CAST(e AS type)` (the style argument is ignored) |
-| `LEN(x)` | `length(x)` |
+| `LEN(x)` | `length(rtrim(x))` (trailing spaces are not counted, as in SQL Server) |
 | `DATALENGTH(x)` | `octet_length(x)` |
 | `CHARINDEX(sub, str)` | `strpos(str, sub)` (arguments swapped) |
 | `GETDATE()`, `SYSDATETIME()` | `now()` |
@@ -132,8 +224,188 @@ An unrecognized type name is passed through, so PostgreSQL type names also work.
 | `CEILING(x)` | `ceil(x)` |
 | `@@IDENTITY` | `lastval()` |
 
-`CAST(e AS type)` and most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`,
-`LOWER`, `ABS`, `ROUND`, ...) are already valid in PostgreSQL and pass through.
+Most standard functions (`COALESCE`, `SUBSTRING`, `UPPER`, `LOWER`, `ABS`,
+`ROUND`, ...) are already valid in PostgreSQL and pass through.
+
+### Types in `CAST`
+
+`CAST(e AS type)` keeps its form. plx maps the T-SQL type names below with the
+table that `DECLARE` and `CONVERT` use. Any other type name passes through, so
+PostgreSQL type names work.
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `NVARCHAR(n)` | `varchar(n)` |
+| `NVARCHAR` (no length) | `varchar(30)` |
+| `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
+| `BIT` | `boolean` |
+| `MONEY` | `numeric(19,4)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)` |
+| `INT`, `INTEGER`, `BIGINT`, `SMALLINT` | the same type, with the value truncated first (see below) |
+| `DATETIME`, `DATETIME2` | `timestamp` |
+| `DATETIME2(n)` | `timestamp(n)`; `DATETIME2(7)` gives `timestamp` (6 digits) |
+| `UNIQUEIDENTIFIER` | `uuid` |
+| `VARBINARY(MAX)`, `IMAGE` | `bytea` |
+
+plx does not map `TINYINT`, `SMALLMONEY`, `SMALLDATETIME`, `SYSNAME`,
+`BINARY` or `VARBINARY(n)` in `CAST`, because the PostgreSQL type would not
+keep SQL Server's value. `CAST(300 AS tinyint)` is an error in SQL Server but
+300 in `smallint`, and `CAST('abc' AS varbinary(1))` keeps 1 byte in SQL Server
+but 3 in `bytea`. The call fails with `type "tinyint" does not exist`. Cast to
+the PostgreSQL type you want instead, such as `smallint` or `bytea`.
+
+A mapped type takes the PostgreSQL rules for its values, as in `DECLARE` and
+`CONVERT`. These values differ from SQL Server:
+
+- A `BIT` value is a PostgreSQL `boolean`. A cast to text gives `true` or
+  `false`, and `CONCAT` gives `t` or `f`. SQL Server gives `1` or `0` in both.
+- `CAST('yes' AS bit)` gives true, because PostgreSQL accepts `yes`, `on`
+  and `t`. SQL Server raises a conversion error.
+- A `DATETIME` value keeps every digit you give it, up to 6: SQL Server rounds
+  it to 1/300 of a second. A string with more than 3 fractional digits, such
+  as `'2024-01-01 10:00:00.1234567'`, works in plx and fails in SQL Server.
+- A `DATETIME` before 1753, such as `'1700-01-01'`, works in plx. SQL Server
+  raises an out-of-range error.
+- `CAST(12 AS nvarchar(1))` gives `1`. SQL Server raises error 8115, an
+  arithmetic overflow.
+- A `UNIQUEIDENTIFIER` turns into lowercase text. SQL Server gives uppercase.
+- `CAST` of a string to `VARBINARY(MAX)` takes `\x41` as hex, so
+  `DATALENGTH(CAST('\x41' AS varbinary(max)))` gives 1. SQL Server gives 4.
+- `CAST(N'ab' AS varbinary(max))` holds the UTF-8 bytes, so `DATALENGTH`
+  gives 2. SQL Server stores UTF-16 and gives 4.
+
+### Conversion to an integer type
+
+SQL Server truncates a decimal or float value toward zero when it converts it
+to an integer type. A PostgreSQL cast rounds. plx truncates in these places:
+
+- `CAST(e AS int)`, and the same with `INTEGER`, `BIGINT` and `SMALLINT`.
+- `CONVERT(int, e)`, and the same with `INTEGER`, `BIGINT`, `SMALLINT` and
+  `TINYINT`.
+- An assignment to a variable of one of these types (`DECLARE @i int = e`,
+  `SET @i = e`, `SET @i += e`, `SELECT @i = e`).
+
+So `CAST(2.7 AS int)` gives 2 and `CONVERT(int, -2.5)` gives -2, where
+PostgreSQL gives 3 and -3. A string still converts as before:
+`CAST('1.5' AS int)` fails, as in SQL Server.
+
+When plx can see that the value is an integer, it emits a plain cast. When the
+value is a decimal or float literal or variable, it emits `trunc()`. Otherwise,
+such as for a column or a function call, it emits a call to `plx_tsql_int4`
+(`plx_tsql_int2` for `SMALLINT` and `TINYINT`, `plx_tsql_int8` for
+`BIGINT`). The extension installs these functions. Each one evaluates the
+value once and checks its type when the function runs: it truncates a
+`numeric`, `real` or `double precision` value, or a value of a domain over
+one of these, and casts any other value. A T-SQL alias type created as a
+PostgreSQL domain, such as `CREATE DOMAIN price AS numeric(10,2)`, so
+truncates too. The
+call works wherever the cast does, such as around an aggregate or a window
+function, or in a `DEFAULT` or `CHECK` of a table the function creates.
+
+A conversion to a decimal type with fewer fractional digits rounds, in plx and
+in SQL Server: `CONVERT(decimal, 2.5)` gives 3.
+
+These places still round, because the conversion happens in PostgreSQL, not in
+the function body:
+
+- `RETURN e` from a function that returns an integer type: `RETURN 2.7` gives
+  3. Write `RETURN CAST(e AS int)`.
+- `INSERT` and `UPDATE` of a decimal value into an integer column. Write
+  `CAST(e AS int)` in the statement.
+
+### Operators
+
+| T-SQL | PostgreSQL |
+| --- | --- |
+| `a ^ b` (bitwise exclusive OR) | `a # b` |
+| `~a` (bitwise NOT) | `(~a)` |
+| `a != b` | `a <> b` |
+| `@s + 'x'` (every operand a known string) | `s \|\| 'x'` |
+
+In PostgreSQL, `^` raises a number to a power, so plx always rewrites the T-SQL
+`^` to `#`. Use `POWER(a, b)` for exponentiation.
+
+The bitwise operators `^`, `&` and `|` bind differently. T-SQL gives them the
+same precedence as `+` and `-` and evaluates left to right. PostgreSQL binds
+`#`, `&` and `|` more loosely than `+` and `-`. plx does not add parentheses.
+So `1 ^ 2 + 3` gives 6 in SQL Server, but 4 in plx, which computes
+`1 # (2 + 3)`. Put parentheses around a bitwise operation that is followed by
+`+` or `-`: write `(1 ^ 2) + 3`.
+
+T-SQL binds the unary `~` more tightly than any other operator, and PostgreSQL
+binds it more loosely than `+` and `*`. plx puts parentheses around `~` and its
+operand, so `~1 + 2` gives 0, as in SQL Server.
+
+### String concatenation with `+`
+
+T-SQL uses `+` both to add numbers and to join strings. PostgreSQL has no `+`
+for strings: it joins them with `||`. plx has no type information for most
+expressions, so it decides from what it can see in the body.
+
+plx writes `+` as `||` only when every operand of the chain is a known string.
+A chain is a run of operands joined by `+`, such as `@a + ' ' + @b`. A known
+string is one of:
+
+- a variable or parameter declared with a variable-length string type:
+  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`
+  (`CHARACTER VARYING` and the other names for them count too);
+- a string literal, `'...'` or `N'...'`;
+- `CAST` or `CONVERT` to one of those types;
+- `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
+  `REPLACE`, `REPLICATE`, `CONCAT` or `STUFF`;
+- `ISNULL` whose first argument is a string variable or a string literal;
+- `COALESCE` whose every argument is a known string. `COALESCE('1', 2)` is not
+  one: SQL Server and PostgreSQL both give it the type of the number, so
+  `COALESCE('1', 2) + '3'` adds and gives 4.
+
+`SET @s += e` becomes `s := s || (e)` only when `@s` is a string variable and
+`e` is a known string or a chain of them.
+
+In every other case plx keeps `+`. This includes a chain with a number, a
+column, a parenthesized expression, a `CASE` expression, a `BIT` variable, a
+`CHAR` or `NCHAR` value, or a function not in the list above, such as `LEN`. It also includes a chain followed
+by `-`, `&`, `|` or `^`, because PostgreSQL would group that operator with the
+last operand. What happens then depends on the operands:
+
+- A string variable next to anything that is not a known string fails when the
+  function runs: `@s + LEN(@s)`, `@s + @n` with `@n` an `INT`, and `SET @s += 1`
+  raise `operator does not exist: character varying + integer`. SQL Server
+  converts the string to a number and adds. Write the conversion yourself, for
+  example `CAST(@s AS int) + LEN(@s)`.
+- A string literal next to a number adds, as in SQL Server: `'1' + 2` is 3.
+
+plx never guesses `||` from one string operand, because a wrong guess returns a
+wrong value without an error. A failing call shows you where to add a `CAST`.
+
+```sql
+CREATE FUNCTION label(id int) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s varchar(40) = 'item';
+  SET @s += ' ';
+  RETURN @s + CONVERT(varchar(10), @id) + '/' + UPPER(@s);
+$$;
+```
+
+Both `+` and `||` return NULL when either side is NULL, as in SQL Server with
+the default `CONCAT_NULL_YIELDS_NULL ON`.
+
+Write `||` or `CONCAT(...)` yourself to join strings that are not all known
+strings, for example two columns, or a column and a literal.
+
+`CHAR(n)` and `NCHAR(n)` values are not known strings, and neither are
+`CHARACTER(n)` and `NATIONAL CHARACTER(n)`. This covers a variable,
+a parameter, and `CAST` or `CONVERT` to `CHAR` or `NCHAR`, with or without a
+length. SQL Server keeps their trailing spaces when it joins them, but
+PostgreSQL's `||` drops them, so `||` would return a different value without an
+error. plx keeps `+`, and the call fails:
+`CAST('a' AS char(3)) + 'b'` raises
+`operator does not exist: character + unknown`. Say what you want instead:
+
+- `RTRIM(@c) + 'b'` joins without the padding and gives the same value in both
+  systems.
+- `rpad(@c, 3) || 'b'` keeps the padding, as SQL Server does.
+
+Assigning a value longer than `n` to a `CHAR(n)` variable is an error
+(`value too long for type character(3)`). SQL Server cuts the value to `n`.
 
 ## Dynamic SQL
 
@@ -196,14 +468,19 @@ session option.
 - Table variables (`DECLARE @t TABLE (...)`) and T-SQL cursors
   (`DECLARE c CURSOR`).
 - `GOTO`, `WAITFOR`, and label targets.
-- Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`): a plpgsql function
-  runs inside the caller's transaction and cannot manage transactions.
+- Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`), in a function or a
+  procedure; plxtsql rejects them everywhere. plxruby, plxphp, plxjs, plxts,
+  plxpython3, plxcobol and plxplsql support `COMMIT` and `ROLLBACK` in a
+  procedure; plxgo does not.
 - Calling a stored procedure by name (`EXEC procname`); only `EXEC('<sql>')`
   dynamic SQL is supported.
-- String concatenation with `+`. T-SQL overloads `+` for both numeric addition
-  and string concatenation; plx cannot tell which is meant without type
-  information, so it leaves `+` as `+`. Use `||` or `CONCAT(...)` for string
-  concatenation.
+- A `SELECT @v = ... FROM ...` assignment list that reads a variable it assigns,
+  such as the accumulate idiom `SELECT @t = @t + v FROM t`. plx cannot run the
+  expression once per row with the updated value, so it rejects the function
+  rather than return a different result. Use an aggregate such as `SUM(v)` or
+  `string_agg(name, ',')`.
+- String concatenation with `+` when an operand is not a known string. See
+  [String concatenation with `+`](#string-concatenation-with).
 
 See [PARITY.md](PARITY.md) for the full per-dialect feature matrix and
 [USERGUIDE.md](USERGUIDE.md) for cross-dialect examples.

@@ -294,3 +294,115 @@ END $outer$;
 CREATE FUNCTION e_js_hex_overflow() RETURNS numeric LANGUAGE plxjs AS $$
 return 0xFFFFFFFFFFFFFFFFFF;
 $$;
+
+-- a type annotation is spliced into DECLARE, so it must be a type name only;
+-- anything after the type would become an initializer or a new statement
+CREATE FUNCTION e_rb_ann_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: int := (SELECT 42)
+return x
+$$;
+CREATE FUNCTION e_js_ann_default() RETURNS int LANGUAGE plxjs AS $$
+let x /*:: int DEFAULT 42 */;
+return x;
+$$;
+CREATE FUNCTION e_py_ann_stmt() RETURNS int LANGUAGE plxpython3 AS $$
+x #:: int; BEGIN RAISE NOTICE 'pwn'; END; DECLARE y int
+return 1
+$$;
+CREATE FUNCTION e_rb_ann_comment() RETURNS text LANGUAGE plxruby AS $$
+x #:: text --
+return x
+$$;
+CREATE FUNCTION e_rb_ann_notnull() RETURNS int LANGUAGE plxruby AS $$
+x #:: int NOT NULL
+return 1
+$$;
+CREATE FUNCTION e_rb_ann_rowtype_init() RETURNS int LANGUAGE plxruby AS $$
+x #:: pg_class%ROWTYPE := NULL
+return 1
+$$;
+
+-- a block annotation before the initializer used to drop the initializer
+CREATE FUNCTION e_js_ann_before_init() RETURNS int LANGUAGE plxjs AS $$
+let n /*:: bigint */ = 3;
+return n;
+$$;
+CREATE FUNCTION e_php_ann_before_init() RETURNS int LANGUAGE plxphp AS $$
+$n /*:: bigint */ = 3;
+return $n;
+$$;
+
+-- every type-name form plpgsql accepts still works
+CREATE FUNCTION ok_rb_ann_types() RETURNS text LANGUAGE plxruby AS $$
+a #:: double precision
+b #:: timestamp(3) with time zone
+c #:: numeric(10, 2)
+d #:: character varying(20)[]
+e #:: pg_class%ROWTYPE
+f #:: pg_catalog.pg_class.relname%TYPE
+g #:: "pg_catalog"."int8"
+h #:: int[][]
+i #:: interval day to second
+c = 1.005
+f = "rel"
+g = 7
+return "#{c} #{f} #{g}"
+$$;
+SELECT ok_rb_ann_types();
+DROP FUNCTION ok_rb_ann_types();
+
+-- a constant's initializer runs when the function starts, so it cannot read a
+-- local variable (it would see the initial value, not the one assigned above)
+CREATE FUNCTION e_rb_const_local() RETURNS int LANGUAGE plxruby AS $$
+v = 1
+v = 2
+c = v + 1 #:: int const
+return c
+$$;
+CREATE FUNCTION e_js_const_interp() RETURNS text LANGUAGE plxjs AS $$
+let v = "a";
+v = "b";
+let c = `got ${v}` /*:: text const */;
+return c;
+$$;
+
+-- A54: an overflowing hex literal reports the source line of the statement
+-- that holds it, and a Python class statement is reported as class, not def
+CREATE FUNCTION e_a54_js_hex_line() RETURNS numeric LANGUAGE plxjs AS $$
+let a = 1;
+let b = 2;
+return 0xFFFFFFFFFFFFFFFFFF;
+$$;
+CREATE FUNCTION e_a54_py_class() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+class C:
+    pass
+return 1
+$$;
+
+-- A54 review: an expression nested too deeply reports the line of its
+-- statement, not line 0
+DO $outer$
+DECLARE body text; d text;
+BEGIN
+	body := 'let x = 1;' || E'\n' || 'return ' || repeat('a ? 1 : ', 600) || '2;';
+	EXECUTE format('CREATE FUNCTION e_a54_js_deepexpr(a bool) RETURNS int LANGUAGE plxjs AS %L', body);
+	RAISE WARNING 'unexpected: creation succeeded';
+EXCEPTION WHEN OTHERS THEN
+	GET STACKED DIAGNOSTICS d = PG_EXCEPTION_DETAIL;
+	RAISE WARNING '% (%)', SQLERRM, d;
+END $outer$;
+
+-- A54 review: when a statement spans lines, the overflow error reports the
+-- line where the statement starts (3), not the line of the literal (4); a
+-- Python lambda is reported as lambda, not def
+CREATE FUNCTION e_a54_js_hex_multiline(a numeric) RETURNS numeric LANGUAGE plxjs AS $$
+let x = 1;
+return a +
+  0xFFFFFFFFFFFFFFFFFF;
+$$;
+CREATE FUNCTION e_a54_py_lambda() RETURNS int LANGUAGE plxpython3 AS $$
+x = 1
+lambda y: y
+return 1
+$$;
