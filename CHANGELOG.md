@@ -381,7 +381,10 @@ Each entry names the dialects it affects.
   `CONVERT` now becomes `numeric(18,0)`. Before, it was PostgreSQL `numeric`,
   which keeps every digit: `DECLARE @d DECIMAL = 2.7` gave 2.7 instead of 3.
   `RETURN` and `INSERT` into an integer column still round; see
-  doc/LIMITATIONS.md.
+  doc/LIMITATIONS.md. For a value whose type plx cannot see, such as a column
+  or a function call, the generated code calls the new functions
+  `plx_tsql_int2`, `plx_tsql_int4` and `plx_tsql_int8`, which
+  `ALTER EXTENSION plx UPDATE TO '3.0.0'` installs.
 
 #### plxplsql
 

@@ -291,8 +291,13 @@ PostgreSQL gives 3 and -3. A string still converts as before:
 
 When plx can see that the value is an integer, it emits a plain cast. When the
 value is a decimal or float literal or variable, it emits `trunc()`. Otherwise,
-such as for a column or a function call, it checks the type when the function
-runs, which costs a little more.
+such as for a column or a function call, it emits a call to `plx_tsql_int4`
+(`plx_tsql_int2` for `SMALLINT` and `TINYINT`, `plx_tsql_int8` for
+`BIGINT`). The extension installs these functions. Each one evaluates the
+value once and checks its type when the function runs: it truncates a
+`numeric`, `real` or `double precision` value and casts any other value. The
+call works wherever the cast does, such as around an aggregate or a window
+function, or in a `DEFAULT` or `CHECK` of a table the function creates.
 
 A conversion to a decimal type with fewer fractional digits rounds, in plx and
 in SQL Server: `CONVERT(decimal, 2.5)` gives 3.

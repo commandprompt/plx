@@ -14,6 +14,9 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "parser/parse_coerce.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
 #include "plx.h"
@@ -22,6 +25,7 @@
 
 PG_FUNCTION_INFO_V1(plx_tsql_validator);
 PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
+PG_FUNCTION_INFO_V1(plx_tsql_toint);
 
 /* ======================================================================== */
 /* T-SQL front end (plxtsql, Transact-SQL: SQL Server / Sybase).            */
@@ -1335,68 +1339,25 @@ tq_num_kind(Tq *tq, int a, int b)
 }
 
 /*
- * may the run-time form repeat the expression [a,b)? Yes when it calls no
- * function, so evaluating it three times gives the same value at the cost of
- * a column or variable read. A window function must repeat too, because
- * PostgreSQL rejects it in the VALUES list of the other form; it may not hold
- * another CAST or CONVERT, so the text grows linearly, not exponentially.
- */
-static bool
-tq_repeat_ok(Tq *tq, int a, int b)
-{
-	bool		call = false,
-				over = false,
-				conv = false;
-	int			i;
-
-	for (i = a; i < b; i++)
-	{
-		TqTok	   *t = &tq->t[i];
-
-		if (t->kind != TQ_WORD)
-			continue;
-		if (tq_ci(t, "OVER"))
-			over = true;
-		else if (tq_ci(t, "CAST") || tq_ci(t, "CONVERT"))
-			conv = true;
-		if (i + 1 < b && tq->t[i + 1].kind == TQ_LP)
-			call = true;
-	}
-	return !call || (over && !conv);
-}
-
-/*
  * emit the conversion of the SQL text e to the integer type typ, truncating
- * toward zero. kind is from tq_num_kind. With kind 0 the type of e is chosen
- * at run time: a decimal or float value truncates (through text, which every
- * type casts to, so the branch also compiles for a boolean or a string), and
- * anything else casts as before. e is evaluated once in a subquery unless
- * repeat allows the shorter form. OFFSET 0 keeps the planner from pulling the
- * VALUES row up into the CASE, which would copy e into each of the three
- * references and grow as 3^n for n nested conversions.
+ * toward zero. kind is from tq_num_kind. With kind 0 the type of e is known
+ * only at run time, so e goes to plx_tsql_int2, plx_tsql_int4 or
+ * plx_tsql_int8 (see plx_tsql_toint). A function call evaluates e once, keeps
+ * an aggregate or window function in e at the query level it was written at,
+ * is allowed in a DEFAULT or CHECK, and plans in time linear in its size.
  */
 static void
-tq_int_conv_str(const char *e, char kind, bool repeat, const char *typ,
-				StringInfo out)
+tq_int_conv_str(const char *e, char kind, const char *typ, StringInfo out)
 {
-	static const char *const frac =
-		"'numeric'::regtype, 'real'::regtype, 'double precision'::regtype";
-
 	if (kind == 'i' || kind == 's')
 		appendStringInfo(out, "CAST(%s AS %s)", e, typ);
 	else if (kind == 'f')
 		appendStringInfo(out, "CAST(trunc(%s) AS %s)", e, typ);
-	else if (repeat)
-		appendStringInfo(out, "CASE WHEN pg_typeof(%s) IN (%s) THEN "
-						 "CAST(trunc(CAST(CAST(%s AS text) AS numeric)) AS %s) "
-						 "ELSE CAST(%s AS %s) END", e, frac, e, typ, e, typ);
 	else
-		appendStringInfo(out, "(SELECT CASE WHEN pg_typeof(__plx_v) IN (%s) THEN "
-						 "CAST(trunc(CAST(CAST(__plx_v AS text) AS numeric)) AS %s) "
-						 "ELSE CAST(__plx_v AS %s) END "
-						 "FROM (SELECT * FROM (VALUES ((%s))) AS __plx_m "
-						 "OFFSET 0) AS __plx_n(__plx_v))",
-						 frac, typ, typ, e);
+		appendStringInfo(out, "%s((%s))",
+						 plx_ext_object(strcmp(typ, "bigint") == 0 ? "plx_tsql_int8" :
+										strcmp(typ, "smallint") == 0 ? "plx_tsql_int2" :
+										"plx_tsql_int4"), e);
 }
 
 /* emit the expression [a,b) converted to the integer type typ */
@@ -1408,7 +1369,7 @@ tq_int_conv(Tq *tq, int a, int b, const char *typ, StringInfo out)
 	initStringInfo(&e);
 	tq_emit_range(tq, a, b, &e);
 	tq_sp(out);
-	tq_int_conv_str(e.data, tq_num_kind(tq, a, b), tq_repeat_ok(tq, a, b), typ, out);
+	tq_int_conv_str(e.data, tq_num_kind(tq, a, b), typ, out);
 	pfree(e.data);
 }
 
@@ -1996,8 +1957,8 @@ tq_set(Tq *tq, int ind)
 		tq_emit_range(tq, e0, e1, &e);
 		sum = psprintf("%s %c (%s)", name, arith, e.data);
 		appendStringInfo(&tq->cx->out, "%s := ", name);
-		tq_int_conv_str(sum, tq_num_kind(tq, e0, e1), tq_repeat_ok(tq, e0, e1),
-						tq_var_type(tq, v), &tq->cx->out);
+		tq_int_conv_str(sum, tq_num_kind(tq, e0, e1), tq_var_type(tq, v),
+						&tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ";\n");
 		pfree(sum);
 		pfree(e.data);
@@ -2174,7 +2135,7 @@ tq_select(Tq *tq, int ind)
 					char	   *col = psprintf("%s.c%d", rec, k + 1);
 
 					appendStringInfo(&tq->cx->out, "%s := ", names[k]);
-					tq_int_conv_str(col, kind, true, ttyp[k], &tq->cx->out);
+					tq_int_conv_str(col, kind, ttyp[k], &tq->cx->out);
 					appendStringInfoString(&tq->cx->out, ";\n");
 					pfree(col);
 				}
@@ -2797,4 +2758,113 @@ Datum
 plx_tsql_inline_handler(PG_FUNCTION_ARGS)
 {
 	return plx_generic_inline_handler(fcinfo, &plx_tsql_dialect);
+}
+
+/*
+ * plx_tsql_toint: SQL Server's conversion of a value to an integer type, for a
+ * value whose type plxtsql cannot see when it transpiles. The SQL functions
+ * plx_tsql_int2, plx_tsql_int4 and plx_tsql_int8 all call this one; the
+ * declared result type picks the integer type. A numeric, real or double
+ * precision value is truncated toward zero first, as SQL Server does; a
+ * PostgreSQL cast would round it. Any other type takes PostgreSQL's explicit
+ * cast to the integer type, so a string that is not an integer fails as
+ * before, and a type with no such cast fails with "cannot cast type". The
+ * argument is declared "any", so a literal of unknown type, such as NULL or
+ * a quoted string in parentheses, reaches it unresolved and is read as text.
+ */
+typedef struct TqIntCast
+{
+	Oid			argtype;		/* the argument type the rest is for */
+	Oid			src;			/* the type the cast starts from */
+	char		trunc;			/* 'n' numeric, 'f' real, 'd' double, 0 none */
+	CoercionPathType path;
+	int			nargs;			/* of the cast function */
+	FmgrInfo	fn;				/* cast function, or src's output function */
+	FmgrInfo	in;				/* the result type's input function */
+	Oid			ioparam;
+} TqIntCast;
+
+Datum
+plx_tsql_toint(PG_FUNCTION_ARGS)
+{
+	TqIntCast  *c = (TqIntCast *) fcinfo->flinfo->fn_extra;
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Datum		v = PG_GETARG_DATUM(0);
+
+	if (c == NULL || c->argtype != argtype)
+	{
+		MemoryContext mcxt = fcinfo->flinfo->fn_mcxt;
+		Oid			rettype = get_func_rettype(fcinfo->flinfo->fn_oid);
+		Oid			funcid = InvalidOid;
+
+		if (!OidIsValid(argtype))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("could not determine the type of the value to convert")));
+		c = MemoryContextAllocZero(mcxt, sizeof(TqIntCast));
+		c->argtype = argtype;
+		c->src = argtype;
+		if (argtype == NUMERICOID)
+			c->trunc = 'n';
+		else if (argtype == FLOAT4OID)
+		{
+			c->trunc = 'f';
+			c->src = FLOAT8OID;
+		}
+		else if (argtype == FLOAT8OID)
+			c->trunc = 'd';
+		if (argtype == UNKNOWNOID)
+			c->path = COERCION_PATH_COERCEVIAIO;	/* a literal: read its text */
+		else
+			c->path = find_coercion_pathway(rettype, c->src, COERCION_EXPLICIT,
+											&funcid);
+		switch (c->path)
+		{
+			case COERCION_PATH_FUNC:
+				fmgr_info_cxt(funcid, &c->fn, mcxt);
+				c->nargs = get_func_nargs(funcid);
+				break;
+			case COERCION_PATH_RELABELTYPE:
+				break;
+			case COERCION_PATH_COERCEVIAIO:
+				{
+					Oid			outfn,
+								infn;
+					bool		varlena;
+
+					getTypeOutputInfo(c->src, &outfn, &varlena);
+					fmgr_info_cxt(outfn, &c->fn, mcxt);
+					getTypeInputInfo(rettype, &infn, &c->ioparam);
+					fmgr_info_cxt(infn, &c->in, mcxt);
+				}
+				break;
+			default:
+				ereport(ERROR,
+						(errcode(ERRCODE_CANNOT_COERCE),
+						 errmsg("cannot cast type %s to %s",
+								format_type_be(argtype), format_type_be(rettype))));
+		}
+		fcinfo->flinfo->fn_extra = c;
+	}
+
+	if (c->trunc == 'f')
+		v = DirectFunctionCall1(ftod, v);
+	if (c->trunc == 'n')
+		v = DirectFunctionCall2(numeric_trunc, v, Int32GetDatum(0));
+	else if (c->trunc)
+		v = DirectFunctionCall1(dtrunc, v);
+
+	switch (c->path)
+	{
+		case COERCION_PATH_FUNC:
+			if (c->nargs == 1)
+				return FunctionCall1Coll(&c->fn, PG_GET_COLLATION(), v);
+			return FunctionCall3Coll(&c->fn, PG_GET_COLLATION(), v,
+									 Int32GetDatum(-1), BoolGetDatum(true));
+		case COERCION_PATH_COERCEVIAIO:
+			return InputFunctionCall(&c->in, OutputFunctionCall(&c->fn, v),
+									 c->ioparam, -1);
+		default:
+			return v;			/* binary-compatible */
+	}
 }

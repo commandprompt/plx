@@ -187,6 +187,18 @@ CREATE TRUSTED LANGUAGE plxts
 
 COMMENT ON LANGUAGE plxts IS 'plx TypeScript dialect (transpiles to plpgsql)';
 
+/*
+ * plxtsql converts a value whose type it cannot see to an integer type with
+ * one of these: a numeric, real or double precision value is truncated toward
+ * zero, as SQL Server does, and any other value takes the explicit cast.
+ */
+CREATE FUNCTION plx_tsql_int2("any") RETURNS smallint
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION plx_tsql_int4("any") RETURNS integer
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION plx_tsql_int8("any") RETURNS bigint
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 /* T-SQL dialect (Transact-SQL) validator + inline handler live in plx.so */
 CREATE FUNCTION plx_tsql_validator(oid)
 	RETURNS void
