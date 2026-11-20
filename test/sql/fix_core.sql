@@ -220,8 +220,81 @@ WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
   AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'plx');
 CREATE TEMP TABLE plx_fresh AS SELECT * FROM plx_objects;
 SELECT count(*) > 30 AS has_objects FROM plx_fresh;
+-- A4: nested domains, arrays of domains, range types and composite fields
+-- over them get the same collations from the update as from a fresh
+-- install. a4s_make builds the same objects under either version.
+CREATE PROCEDURE a4s_make() LANGUAGE plpgsql AS $p$
+BEGIN
+  CREATE DOMAIN a4s_d1 AS plx_strbuild;
+  CREATE DOMAIN a4s_d2 AS a4s_d1;
+  CREATE DOMAIN a4s_d3 AS a4s_d2;
+  CREATE DOMAIN a4s_da AS plx_strbuild[];
+  CREATE DOMAIN a4s_dd1a AS a4s_d1[];
+  CREATE TYPE a4s_r2 AS RANGE (subtype = a4s_d2);
+  CREATE TYPE a4s_comp AS (f_d2 a4s_d2, f_d1arr a4s_d1[], f_d3arr a4s_d3[],
+                           f_da a4s_da, f_sbarr plx_strbuild[]);
+  CREATE TABLE a4s_t (c_d2 a4s_d2, c_d3 a4s_d3, c_d1arr a4s_d1[],
+                      c_d2arr a4s_d2[], c_dd1a a4s_dd1a, c_comp a4s_comp,
+                      c_r2 a4s_r2);
+  INSERT INTO a4s_t (c_d2, c_d3, c_d1arr, c_dd1a)
+  VALUES ('b', 'b', '{b}', '{b}'), ('a', 'a', '{a}', '{a}');
+  -- Indexes and partition keys. Their tables stay empty here, because
+  -- 2.0.0 cannot hash or compare these values without a collation.
+  CREATE TABLE a4s_h (h plx_strbuild, hd a4s_d2, x int);
+  CREATE INDEX a4s_h_h ON a4s_h USING hash (h);
+  CREATE INDEX a4s_h_hd ON a4s_h USING hash (hd);
+  CREATE INDEX a4s_h_e ON a4s_h USING hash ((hd::plx_strbuild));
+  CREATE INDEX a4s_h_p ON a4s_h (x, h text_pattern_ops) INCLUDE (hd);
+  CREATE TABLE a4s_ph (k a4s_d2) PARTITION BY HASH (k);
+  CREATE TABLE a4s_ph0 PARTITION OF a4s_ph
+    FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+  CREATE TABLE a4s_ph1 PARTITION OF a4s_ph
+    FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+  CREATE TABLE a4s_pl (n int, k plx_strbuild) PARTITION BY LIST (k);
+  CREATE TABLE a4s_pr (n int, k a4s_d3) PARTITION BY RANGE (n, k);
+  CREATE TABLE a4s_pe (n int, k a4s_d2)
+    PARTITION BY RANGE ((n + 1), (k::plx_strbuild));
+  CREATE TABLE a4s_pf (n int) PARTITION BY HASH ((n::text::plx_strbuild));
+  CREATE TABLE a4s_pf0 PARTITION OF a4s_pf
+    FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+  CREATE TABLE a4s_pf1 PARTITION OF a4s_pf
+    FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+END
+$p$;
+CREATE TEMP VIEW a4_scolls AS
+SELECT 'type ' || t.typname AS object, t.typcollation AS coll
+FROM pg_type t
+WHERE t.typname LIKE 'a4s\_%' OR t.typname LIKE '\_a4s\_%'
+UNION ALL
+SELECT 'column ' || c.relname || '.' || a.attname, a.attcollation
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+WHERE c.relname LIKE 'a4s\_%' AND a.attnum > 0 AND NOT a.attisdropped
+UNION ALL
+SELECT 'range ' || t.typname, r.rngcollation
+FROM pg_range r JOIN pg_type t ON t.oid = r.rngtypid
+WHERE t.typname LIKE 'a4s\_%'
+UNION ALL
+SELECT 'index ' || c.relname || ' key ' || k, i.indcollation[k - 1]
+FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid,
+     generate_series(1, i.indnkeyatts) k
+WHERE c.relname LIKE 'a4s\_%'
+UNION ALL
+SELECT 'partkey ' || c.relname || ' key ' || k, p.partcollation[k - 1]
+FROM pg_partitioned_table p JOIN pg_class c ON c.oid = p.partrelid,
+     generate_series(1, p.partnatts) k
+WHERE c.relname LIKE 'a4s\_%';
+CALL a4s_make();
+CREATE TEMP TABLE a4_sfresh AS SELECT * FROM a4_scolls;
+-- the objects that have a collation on a fresh install
+SELECT object, coll FROM a4_sfresh WHERE coll <> 0
+ORDER BY object COLLATE "C";
+-- DROP EXTENSION ... CASCADE would keep the table and the composite type
+-- and drop only their columns, so drop them first.
+DROP TABLE a4s_t, a4s_h, a4s_ph, a4s_pl, a4s_pr, a4s_pe, a4s_pf;
+DROP TYPE a4s_comp;
 DROP EXTENSION plx CASCADE;
 CREATE EXTENSION plx VERSION '2.0.0';
+CALL a4s_make();
 CREATE TABLE a4_old(v plx_strbuild);
 INSERT INTO a4_old VALUES ('b'), ('a'), ('b');
 -- A4: so do a domain column and a composite-type field made under 2.0.0
@@ -246,6 +319,30 @@ SELECT rngtypid::regtype, rngcollation FROM pg_range
 WHERE rngtypid IN ('a4_rng'::regtype, 'a4_drng'::regtype) ORDER BY rngtypid::regtype::text;
 SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
        a4_drng('a', 'c') @> 'b'::a4_rdom AS drng_has;
+-- collations only a fresh install has, then collations only the update has
+SELECT * FROM a4_sfresh EXCEPT SELECT * FROM a4_scolls;
+SELECT * FROM a4_scolls EXCEPT SELECT * FROM a4_sfresh;
+SELECT c_d2 FROM a4s_t ORDER BY c_d2;
+SELECT c_d3 FROM a4s_t ORDER BY c_d3;
+SELECT c_d1arr FROM a4s_t ORDER BY c_d1arr;
+SELECT c_dd1a FROM a4s_t ORDER BY c_dd1a;
+-- A4: hash indexes and partition keys made under 2.0.0 work after the
+-- update: values can be hashed for the index and the hash partitions, and
+-- list and range partitions can compare their bounds.
+INSERT INTO a4s_h VALUES ('a', 'a', 1);
+INSERT INTO a4s_ph VALUES ('a'), ('b');
+CREATE TABLE a4s_pl1 PARTITION OF a4s_pl FOR VALUES IN ('a', 'b');
+CREATE TABLE a4s_pr1 PARTITION OF a4s_pr FOR VALUES FROM (1, 'a') TO (1, 'm');
+INSERT INTO a4s_pl VALUES (1, 'a');
+INSERT INTO a4s_pr VALUES (1, 'b');
+CREATE TABLE a4s_pe1 PARTITION OF a4s_pe FOR VALUES FROM (2, 'a') TO (2, 'm');
+INSERT INTO a4s_pe VALUES (1, 'b');
+INSERT INTO a4s_pf VALUES (1), (2);
+SELECT (SELECT count(*) FROM a4s_h) AS h, (SELECT count(*) FROM a4s_ph) AS ph,
+       (SELECT count(*) FROM a4s_pl1) AS pl1,
+       (SELECT count(*) FROM a4s_pr1) AS pr1,
+       (SELECT count(*) FROM a4s_pe1) AS pe1,
+       (SELECT count(*) FROM a4s_pf) AS pf;
 -- The A4 test re-created the extension with search_path = fc, so it now
 -- lives in schema fc. Put it back in public, where the test files that run
 -- after this one expect it.

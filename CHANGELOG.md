@@ -500,9 +500,11 @@ the plx extension.
    ```
 
    The update records the extension as non-relocatable. It adds binary send
-   and receive functions to `plx_strbuild` and makes it collatable, which
-   includes existing columns, domains and range types over it. It also adds
-   the function that string appends call in 3.0.0. A view created before the
+   and receive functions to `plx_strbuild` and makes it collatable. It gives
+   the collation to every type built on `plx_strbuild` (its array type,
+   domains, domains over those domains, and their array types) and to
+   existing columns, range types, index keys and partition keys of all of
+   these, as a fresh install does. It also adds the function that string appends call in 3.0.0. A view created before the
    update keeps no collation in its stored query until you re-create it.
 
    To check the result, run
@@ -679,9 +681,13 @@ not here.
   Binary `COPY`, binary protocol results, `ORDER BY`, `DISTINCT`, `GROUP BY`
   and `COLLATE` now work on it. These used to fail, for example when a string
   built with an append operator was used in a query that sorts or removes
-  duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on existing
-  `plx_strbuild` columns and on range types over `plx_strbuild` (or a domain
-  over it), so their constructors and operators work.
+  duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on the same
+  objects a fresh install does: `plx_strbuild`, every domain and array type
+  built on it at any depth (such as a domain over a domain, or an array of a
+  domain), and existing columns, composite-type fields, range types, index
+  keys and partition keys of these types. So sorting, the range constructors
+  and operators, hash indexes, and hash, list and range partitions work on
+  them after the update.
 
 #### Several dialects
 
@@ -854,6 +860,13 @@ not here.
   swapped values, mispaired rows and reversed results passed. A value of `-`
   or `+`, spaces inside a value or message, and the position of an empty row
   now count too. This affects the plxruby and plxcobol corpus cases.
+- A `test/run_corpus.py` case that records an expected error now passes only
+  when psql prints each recorded `ERROR:` line word for word. Before, it
+  passed when about half the words of the expected error showed up anywhere
+  in the output, and the `CONTEXT:` line alone was enough, so a different
+  error raised at the same statement passed. The runner's self-test now
+  covers this check. Two reject cases recorded messages plx never printed;
+  they now record the real ones.
 - CI now runs the Ruby corpus on every PostgreSQL version it tests, with the
   new `make corpuscheck`. Before, nothing ran the corpus automatically, so a
   change that broke a corpus case could merge unnoticed. `test/run_corpus.py`

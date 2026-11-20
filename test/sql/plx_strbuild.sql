@@ -148,10 +148,13 @@ CREATE FUNCTION sb_hardened(n int) RETURNS text LANGUAGE plxruby
 $$;
 SELECT sb_hardened(3);
 
--- ... and an object of the same name earlier on the path cannot stand in
+-- ... and an object of the same name earlier on the path cannot stand in.
+-- The decoy has the name and argument types of the function the generated
+-- code calls for <<, so it would win if that call lost its schema.
 CREATE SCHEMA sb_evil;
-CREATE FUNCTION sb_evil.plx_sb_append(plx_strbuild, text) RETURNS plx_strbuild
-  LANGUAGE sql AS $$ SELECT 'hijacked'::text::plx_strbuild $$;
+CREATE FUNCTION sb_evil.plx_sb_append_strict(public.plx_strbuild, text)
+  RETURNS public.plx_strbuild
+  LANGUAGE sql AS $$ SELECT 'hijacked'::text::public.plx_strbuild $$;
 CREATE FUNCTION sb_path(n int) RETURNS text LANGUAGE plxruby
   SET search_path = sb_evil, public AS $$
   s = ""
