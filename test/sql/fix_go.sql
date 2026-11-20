@@ -532,3 +532,29 @@ $$;
 CREATE FUNCTION fgh18_mix2() RETURNS text LANGUAGE plxgo AS $$
 	return "x" + 1
 $$;
+
+-- GH18: s += x on a string appends with ||
+CREATE FUNCTION fgh18_acc(n int) RETURNS text LANGUAGE plxgo AS $$
+	s := ""
+	for i := 0; i < n; i++ {
+		s += strconv.Itoa(i)
+	}
+	var t string
+	t += "a"
+	t += `b` + "c"
+	return s + t
+$$;
+SELECT fgh18_acc(3) AS go_012abc;
+-- a text parameter; a NULL operand makes the result NULL
+CREATE FUNCTION fgh18_accp(p text, q text) RETURNS text LANGUAGE plxgo AS $$
+	p += q
+	return p
+$$;
+SELECT fgh18_accp('a', 'x') AS go_ax, fgh18_accp(NULL, 'x') IS NULL AS go_null,
+       fgh18_accp('a', NULL) IS NULL AS go_null2;
+-- appending a number to a string is a Go compile error
+CREATE FUNCTION fgh18_accn() RETURNS text LANGUAGE plxgo AS $$
+	s := "a"
+	s += 1
+	return s
+$$;

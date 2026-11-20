@@ -1904,6 +1904,9 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
  * the way plx's interpolation does. Where it cannot see a string, + stays +.
  */
 
+#define GO_STRNUM_MSG "invalid operation: + between a string and a number; " \
+	"Go does not convert between them, so use strconv.Itoa or fmt.Sprintf"
+
 /* 's' for a string type, 'n' for a numeric or boolean type, 0 otherwise */
 static char
 go_type_kind(const char *typ)
@@ -2096,8 +2099,7 @@ go_plus_run_kind(Go *g, int a, int b, const int *ops, int lo, int hi)
 			unknown = true;
 	}
 	if (str && num)
-		plx_err(g->cx, g->t[ops[lo]].line,
-				"invalid operation: + between a string and a number; Go does not convert between them, so use strconv.Itoa or fmt.Sprintf");
+		plx_err(g->cx, g->t[ops[lo]].line, "%s", GO_STRNUM_MSG);
 	if (str)
 		return 's';
 	return (num && !unknown) ? 'n' : 0;
@@ -2847,6 +2849,25 @@ go_simple(Go *g, int ind, int stop)
 			g->pos = e1;
 			return;
 		}
+	}
+
+	/*
+	 * s += x on a string appends. plxgo string locals are text, so a plain ||
+	 * is enough (no string builder), and it propagates NULL as + chains do.
+	 */
+	if (opc && strcmp(opc, "+") == 0 && go_expr_kind(g, e0, opidx) == 's')
+	{
+		if (go_expr_kind(g, opidx + 1, e1) == 'n')
+			plx_err(g->cx, g->t[opidx].line, "%s", GO_STRNUM_MSG);
+		plx_indent(&g->cx->out, ind);
+		go_emit_range(g, e0, opidx, &g->cx->out);
+		appendStringInfoString(&g->cx->out, " :=");
+		go_emit_range(g, e0, opidx, &g->cx->out);
+		appendStringInfoString(&g->cx->out, " || (");
+		go_emit_range(g, opidx + 1, e1, &g->cx->out);
+		appendStringInfoString(&g->cx->out, ");\n");
+		g->pos = e1;
+		return;
 	}
 
 	/* plain assignment: LHS <op> RHS */

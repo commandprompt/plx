@@ -626,6 +626,9 @@ not here.
   `strconv.Itoa(n) + "x"` failed when the function ran, with
   `operator does not exist: text + unknown`. A NULL operand makes the result
   NULL. `msg := "a" + s` now declares `msg` as `text`.
+- `s += x` on a string appends. It used to become `s := s + (x)`, which
+  failed when it ran. plx now writes `s := s || (x)`, so a NULL `x` makes `s`
+  NULL. `s += 1` on a string is rejected at `CREATE FUNCTION`, as in Go.
 
 #### plxcobol
 

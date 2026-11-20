@@ -55,6 +55,7 @@ declarations are translated (see below).
 | `const pi = 3.14` | `pi CONSTANT double precision := 3.14;` |
 | `x = e` | `x := e;` |
 | `x += e` (also `-= *= /= %= <<= >>= &= \|= ^= &^=`) | `x := x + (e);` (`^=` uses `#`, `&^=` uses `& ~`) |
+| `s += e` on a string `s` | `s := s \|\| (e);` (see [String concatenation with `+`](#string-concatenation-with)) |
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
 | `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
@@ -70,7 +71,7 @@ PostgreSQL type name, starts as `NULL`, and so does an array whose length is a
 constant name rather than a number.
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
-literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
+literal, `len(...)`, a type conversion `T(x)`, or a string concatenation. If the type cannot be inferred
 (for example `x := someCall()`), declare it explicitly with `var x T`.
 
 ### Control flow
@@ -219,6 +220,10 @@ addition: `"x" + strconv.Itoa(n + 1)` adds first and then joins. A short
 declaration from a concatenation, such as `msg := "n=" + strconv.Itoa(n)`,
 declares `msg` as `text`. A NULL operand makes the whole result NULL, as it
 does in `fmt.Sprintf`.
+
+`s += x` on a `string` local or a `text` or `varchar` parameter appends:
+plx writes it as `s := s || (x);`. A NULL `x` makes `s` NULL, as `+` does.
+`s += 1` is rejected, as in Go.
 
 Go rejects `+` between a string and a number, and so does plx, when you run
 `CREATE FUNCTION`. `n + "1"` with an integer `n` fails with
