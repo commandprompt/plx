@@ -4260,6 +4260,48 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 	return n;
 }
 
+/*
+ * Does an interpolation in string token tk name the variable [name, len)? A
+ * check that must see every read of a variable uses this, because "${i}",
+ * "#{i}", "$i" and f"{i}" read i too. Any whole-word match in the
+ * interpolated text counts, a field name included, which can only make such
+ * a check stricter.
+ */
+bool
+plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
+{
+	PlxTplSeg  *segs;
+	int			n,
+				k,
+				j;
+	bool		found = false;
+
+	if (tk->kind != T_STRING)
+		return false;
+	/* most strings do not hold the name at all: skip the split for them */
+	for (j = 0; j + len <= tk->len; j++)
+		if (strncmp(tk->s + j, name, len) == 0)
+			break;
+	if (j + len > tk->len)
+		return false;
+	n = tpl_split(cx, tk, false, &segs);
+	for (k = 0; k < n; k++)
+	{
+		const char *s = segs[k].s;
+		int			sl = segs[k].len;
+
+		for (j = 0; segs[k].interp && !found && j + len <= sl; j++)
+			if (strncmp(s + j, name, len) == 0 &&
+				(j == 0 || !plx_is_ident(s[j - 1])) &&
+				(j + len == sl || !plx_is_ident(s[j + len])))
+				found = true;
+		pfree(segs[k].s);
+	}
+	if (segs)
+		pfree(segs);
+	return found;
+}
+
 /* ident(e) / raw(e) wrapping the whole interpolation? Sets [*is, *is + *il). */
 static PlxTplKind
 tpl_kind(const char *s, int len, const char **is, int *il)

@@ -204,7 +204,9 @@ Each entry names the dialects it affects.
   final value. Also rejected now: a counting `for` whose variable an enclosing
   loop reads again before the `for` (in its condition, or earlier in its body),
   and in plxjs and plxts a `for (var i ...)` whose variable is read after the
-  loop. Plain counting loops compile as before.
+  loop. A read inside a string interpolation counts, as in `${i}` or
+  `"stopped at $i"`, including the SQL text of `query` and `fetch_one`. Plain
+  counting loops compile as before.
 - **`throw` of an expression that is not a constructor call is rejected**
   (plxjs, plxts, plxphp), for example `throw a(x) + b(y)`. Before, it silently
   raised only the first call's first argument.
