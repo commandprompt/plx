@@ -1267,6 +1267,71 @@ plx_local_key(const char *name, int len, char *key)
 	pfree(k);
 }
 
+/*
+ * plxphp: is the name at [i, j) of expression text s a variable read, not a
+ * function name, a property after -> or ::, or the start of a subscript or
+ * property access? The lexer drops the $ sigil from a span's first token, so
+ * the sigil cannot be relied on.
+ */
+static bool
+php_value_ref(const char *s, int len, int i, int j)
+{
+	int			k = i - 1;
+
+	if (k >= 0 && s[k] == '$')
+		k--;
+	while (k >= 0 && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+		k--;
+	if (k >= 0 && (s[k] == ':' || (s[k] == '>' && k > 0 && s[k - 1] == '-')))
+		return false;
+	return !(j < len && (s[j] == '(' || s[j] == '[' || s[j] == ':' ||
+						 (s[j] == '-' && j + 1 < len && s[j + 1] == '>')));
+}
+
+/*
+ * plxphp: is name the target of a .= anywhere in the body? Such a local is
+ * declared as the string builder (see the append lowering in the statement
+ * emitter), and PostgreSQL cannot choose a || for a builder beside an
+ * untyped literal, so the rewriter reads it as text. The source order does
+ * not matter: a read before the first .= sees the same declared type. The set
+ * is built by one scan of the tokens, on first use.
+ */
+static bool
+php_appended(Ctx *cx, const char *name, int len)
+{
+	char		key[NAMEDATALEN];
+
+	if (!cx->appended)
+	{
+		HASHCTL		ctl;
+		int			k;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = NAMEDATALEN;
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->appended = hash_create("plx appended", 16, &ctl,
+								   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->appended = hash_create("plx appended", 16, &ctl,
+								   HASH_ELEM | HASH_CONTEXT);	/* string keys */
+#endif
+		for (k = 0; cx->t[k].kind != T_EOF; k++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			if (cx->t[k].kind == T_IDENT && cx->t[k + 1].kind == T_DOT &&
+				plx_tok_is(&cx->t[k + 2], "="))
+			{
+				plx_local_key(cx->t[k].s, cx->t[k].len, key);
+				(void) hash_search(cx->appended, key, HASH_ENTER, NULL);
+			}
+		}
+	}
+	plx_local_key(name, len, key);
+	return hash_search(cx->appended, key, HASH_FIND, NULL) != NULL;
+}
+
 void
 plx_locals_reset(Ctx *cx)
 {
@@ -2891,6 +2956,13 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "OR");
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
+			else if (surf->concat_op && php_value_ref(s, len, i, j) &&
+					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl))
+			{
+				/* a .= target is a string builder: read it as text */
+				note_name_ref(cx, s, len, i, j);
+				appendStringInfo(&out, "(%.*s)::text", wl, s + i);
+			}
 			else
 			{
 				note_name_ref(cx, s, len, i, j);

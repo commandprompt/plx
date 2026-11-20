@@ -64,3 +64,31 @@ outer: for (let j = 0; j < 3; j++) { if (j == 2) { break outer; } s += 10; }
 return s;
 $$;
 SELECT e3_r6_seq();
+
+-- R7: plxphp '.' works on a string built with '.=' (the builder local was
+-- passed to || as it is, which PostgreSQL could not resolve)
+CREATE TABLE e3_names(id int, name text);
+INSERT INTO e3_names VALUES (1, 'ann'), (2, 'bob');
+CREATE FUNCTION e3_r7_sb2() RETURNS text LANGUAGE plxphp AS $body$
+$s = "" /*:: text */;
+foreach (query("SELECT name FROM e3_names ORDER BY id") as $row) {
+  $s .= $row->name;
+  $s .= ",";
+}
+return "names: " . $s;
+$body$;
+SELECT e3_r7_sb2();
+CREATE FUNCTION e3_r7_g10(n int) RETURNS text LANGUAGE plxphp AS $body$
+$s = ""; $t = "";
+for ($i = 0; $i < $n; $i++) { $s .= "x"; }
+$t = $s . "!";
+return $t;
+$body$;
+SELECT e3_r7_g10(3);
+-- a read that comes before the first .= in the source
+CREATE FUNCTION e3_r7_early() RETURNS text LANGUAGE plxphp AS $body$
+$s = ""; $out = "";
+for ($k = 0; $k < 3; $k++) { $out = $out . "[" . $s . "]"; $s .= "x"; }
+return $out . $s;
+$body$;
+SELECT e3_r7_early();

@@ -150,6 +150,8 @@ typedef struct PlxCtx
 	bool		retset;
 	char	  **pspell;			/* per parameter: the first spelling the body
 								 * used for it (see plx_is_param) */
+	struct HTAB *appended;		/* plxphp: names that are the target of a .=
+								 * somewhere in the body (see php_appended) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 

@@ -615,6 +615,13 @@ not here.
   a `class` or `lambda` statement is now reported as `class is not supported`
   or `lambda is not supported` instead of `def is not supported`.
 
+#### plxphp
+
+- The `.` operator now works on a string built with `.=`, as `doc/plxphp.md`
+  shows. `"names: " . $s` failed at run time with
+  `operator is not unique: unknown || plx_strbuild`, because `.=` makes `$s` a
+  `plx_strbuild`. plx now reads such a variable as `text` in expressions.
+
 #### plxts
 
 - `catch (e: unknown)` (a catch variable with a type annotation) now binds
