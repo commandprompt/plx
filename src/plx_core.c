@@ -356,6 +356,11 @@ plx_generic_inline_handler(FunctionCallInfo fcinfo, const PlxDialect *d)
 
 /* ---- module init ------------------------------------------------------ */
 
+/* PostgreSQL 16 and later declare _PG_init in fmgr.h; declare it on 13-15. */
+#if PG_VERSION_NUM < 160000
+void		_PG_init(void);
+#endif
+
 void
 _PG_init(void)
 {
