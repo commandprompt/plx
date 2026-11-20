@@ -63,10 +63,30 @@ Each entry names the dialects it affects.
   through `quote_nullable()`. `'#{x}'` is the value of `x` in static and
   dynamic SQL alike (it used to be the literal text `'x'` in static SQL), and
   an interpolation inside a longer literal concatenates the value. An
-  interpolation inside a quoted identifier is rejected. A body that
-  interpolated an identifier (`FROM #{t}`) or a SQL fragment on purpose fails
-  when re-created (`syntax error at or near "$1"`) until it uses `ident()` or
-  `raw()` (see Added). See doc/DYNAMIC-SQL.md.
+  interpolation inside a quoted identifier, a SQL comment, a dollar-quoted
+  string or a prefixed literal (`U&'...'`, `N'...'`, `text'...'`) is
+  rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`), and one
+  right after an unpaired backslash in an `E'...'` string (`E'a\#{x}'`), where
+  PostgreSQL would read the quote plx writes next as an escaped quote. The
+  lowering reads the SQL string as PostgreSQL does, so a quote inside a
+  comment or a dollar-quoted string does not open a string. A literal that
+  contains a backslash is written as `E'...'` in dynamic SQL too, so the SQL
+  reads the same whatever `standard_conforming_strings` the caller uses. A
+  value interpolated where SQL needs a name (`FROM #{t}`) is now an error
+  until the body uses `ident()` or `raw()` (see Added). In static SQL the
+  value is written in parentheses, `FROM (t)`, so `CREATE FUNCTION` fails with
+  a syntax error; before, it read the table named `t` whatever the variable
+  held. In dynamic SQL the statement fails when it runs, with
+  `syntax error at or near "$n"`. A value interpolated to build SQL text on
+  purpose is now bound as data. See doc/DYNAMIC-SQL.md.
+- **An expression interpolated in static SQL is one value** (plxruby,
+  plxphp, plxjs, plxts, plxpython3). In a static call, an expression interpolated outside quotes is now written in
+  parentheses, so the SQL around it cannot split it, as in dynamic SQL, which
+  binds the whole value. 2.0.1 wrote it bare: `SELECT ${a + b} * 10` (plxjs,
+  and `#{a + b} * 10` in plxruby) ran as `SELECT a + b * 10` and gave 21 for
+  `a = 1, b = 2`. It now runs as `SELECT (a + b) * 10` and gives 30. In the
+  same way, plxpython3 `f"SELECT {a or b} AND false"` gave true for
+  `a = true, b = false` and now gives false.
 - **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
   plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
   `return` inside `try` left the function without running `finally`. The
@@ -496,6 +516,10 @@ PUBLIC has USAGE by default).
   containing a backslash is an `E'...'` literal with the backslash doubled,
   which reads the same under either setting and, with it on, has the value the
   original had. This covers every dialect, and SQL passed through verbatim.
+  A typed literal (`text'C:\'`) becomes `text E'C:\\'`, and an `N'...'`
+  literal becomes `NCHAR E'...'`, the form PostgreSQL reads `N'...'` as. A
+  `--` comment ends at a carriage return as well as at a newline, as in
+  PostgreSQL, so a literal after one is rewritten too.
 - **Quadratic, uninterruptible transpile time.** Local-variable lookup was a
   linear scan, so a body with 40,000 distinct variables took 47 seconds; the
   plxpython3 lexer rescanned every run of blank lines from each newline, so

@@ -21,10 +21,26 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 
 | Where the interpolation sits | Static SQL | Dynamic SQL |
 |---|---|---|
-| outside quotes: `id = #{n}` | `id = n` (plpgsql binds the variable) | `id = $k`, passed with `USING` |
+| outside quotes: `id = #{n}` | `id = (n)` (plpgsql binds the variable) | `id = $k`, passed with `USING` |
+| where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error | `FROM $k`: the statement fails when it runs |
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
+| inside a SQL comment: `-- #{x}`, `/* #{x} */` | rejected | rejected |
+| inside a dollar-quoted string: `$q$#{s}$q$` | rejected | rejected |
+| inside a prefixed literal: `U&'#{s}'`, `N'#{s}'`, `text'#{s}'` | rejected | rejected |
+| joined to a name, number or `$`: `v#{x}`, `#{x}abc` | rejected | rejected |
+| right after an unpaired backslash in an `E'...'` string: `E'a\#{x}'` | rejected | rejected |
+
+plx reads the SQL string as PostgreSQL does. A quote inside a `--` or
+`/* */` comment (block comments nest) or inside a dollar-quoted string does
+not open a string, and `E'...'` strings, `U&'...'` strings, doubled quotes
+(`'it''s'`) and quoted identifiers are each read as one token. Each rejected
+form fails when the function is created. In dynamic SQL, plx writes a literal
+that contains a backslash as `E'...'`, as it does for the function body, so
+the SQL reads the same whatever `standard_conforming_strings` the caller uses.
+To end the text of an `E'...'` string with a backslash right before an
+interpolation, write the backslash twice in the SQL text: `E'a\\#{x}'`.
 
 A call is static when its SQL argument is a single string literal and it has
 no bind arguments; otherwise it runs as dynamic SQL (`EXECUTE`). `execute` is
@@ -95,10 +111,16 @@ Write the interpolation in the call, or use bind arguments
 Functions already in the catalog keep the plpgsql they were generated with.
 When a function is created or replaced under 3.0:
 
-- a value interpolated where SQL needs an identifier (`FROM #{t}`) becomes a
-  parameter and the statement fails with `syntax error at or near "$1"`; write
-  `#{ident(t)}`;
+- a value interpolated where SQL needs an identifier (`FROM #{t}`) is an
+  error; write `#{ident(t)}`. In a static call `CREATE FUNCTION` fails with
+  a syntax error at the parenthesis plx writes around the value. In a dynamic
+  call the statement fails when it runs, with `syntax error at or near "$k"`,
+  where `$k` is the value's parameter number;
 - a value interpolated to build SQL text on purpose (`ORDER BY #{col} DESC`
   where `col` holds `name`) is now bound as data; write `#{raw(col)}` (or
   `#{ident(col)}` when it is a column name);
-- `'#{x}'` now compares against the value of `x`, not the string `'x'`.
+- `'#{x}'` now compares against the value of `x`, not the string `'x'`;
+- an expression interpolated outside quotes in a static call is one value:
+  `SELECT #{a + b} * 10` runs as `SELECT (a + b) * 10`. 2.x wrote
+  `SELECT a + b * 10`, so a function that relied on the SQL splitting the
+  expression computes a different result once re-created.

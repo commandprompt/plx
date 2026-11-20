@@ -80,7 +80,7 @@ SELECT ck_csv_upto(5);
 
 ## Looping over a query
 
-`for (const r of query(...))` iterates the rows of a query. Values interpolated into the template literal are spliced as name references, and fields are read with `r.col`.
+`for (const r of query(...))` iterates the rows of a query. Values interpolated into the template literal are bound as values (see [Interpolation in SQL](../DYNAMIC-SQL.md)), and fields are read with `r.col`.
 
 ```typescript
 CREATE FUNCTION ck_order_total(g int) RETURNS bigint LANGUAGE plxts AS $$

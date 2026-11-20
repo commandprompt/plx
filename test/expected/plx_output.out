@@ -137,7 +137,7 @@ SELECT _src('o_rb_data');
    t bigint := 0;                                                                  +
    row RECORD;                                                                     +
  BEGIN                                                                             +
-   FOR row IN SELECT amt FROM x WHERE g = g LOOP                                   +
+   FOR row IN SELECT amt FROM x WHERE g = (g) LOOP                                 +
      t := t + row.amt;                                                             +
    END LOOP;                                                                       +
    RAISE EXCEPTION '%', 'done ' || COALESCE((t)::text, '') USING ERRCODE = '22023';+
@@ -199,21 +199,21 @@ for (const r of query(`SELECT v FROM x WHERE g = ${n}`)) {
 return t;
 $$;
 SELECT _src('o_js');
-                    _src                     
----------------------------------------------
- /*plx:v1:plxjs*/                           +
- DECLARE                                    +
-   t integer := 0;                          +
-   r RECORD;                                +
- BEGIN                                      +
-   FOR r IN SELECT v FROM x WHERE g = n LOOP+
-     IF r.v  =  0 THEN                      +
-       CONTINUE;                            +
-     END IF;                                +
-     t := t + r.v;                          +
-   END LOOP;                                +
-   RETURN t;                                +
- END;                                       +
+                     _src                      
+-----------------------------------------------
+ /*plx:v1:plxjs*/                             +
+ DECLARE                                      +
+   t integer := 0;                            +
+   r RECORD;                                  +
+ BEGIN                                        +
+   FOR r IN SELECT v FROM x WHERE g = (n) LOOP+
+     IF r.v  =  0 THEN                        +
+       CONTINUE;                              +
+     END IF;                                  +
+     t := t + r.v;                            +
+   END LOOP;                                  +
+   RETURN t;                                  +
+ END;                                         +
  
 (1 row)
 

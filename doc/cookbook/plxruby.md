@@ -82,7 +82,7 @@ SELECT repeat_stars(5);
 
 ## Looping over a query result
 
-`query(...).each do |r| ... end` iterates the rows. Interpolated values in the SQL string are spliced as name references, and fields are read with `r.col`.
+`query(...).each do |r| ... end` iterates the rows. Interpolated values in the SQL string are bound as values (see [Interpolation in SQL](../DYNAMIC-SQL.md)), and fields are read with `r.col`.
 
 ```ruby
 CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxruby AS $$
