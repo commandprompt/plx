@@ -115,12 +115,18 @@ BEGIN
 		       i.indcollation::pg_catalog.oid[] AS colls,
 		       pg_catalog.pg_get_expr(i.indexprs, i.indrelid) AS exprs
 		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+		-- another session's temporary table cannot be read, and goes away
+		-- with that session
+		WHERE NOT pg_catalog.pg_is_other_temp_schema(c.relnamespace)
 		UNION ALL
 		SELECT 'p', p.partrelid, p.partrelid,
 		       p.partnatts, p.partattrs::pg_catalog.int2[],
 		       p.partcollation::pg_catalog.oid[],
 		       pg_catalog.pg_get_expr(p.partexprs, p.partrelid)
 		FROM pg_catalog.pg_partitioned_table p
+		JOIN pg_catalog.pg_class c ON c.oid = p.partrelid
+		WHERE NOT pg_catalog.pg_is_other_temp_schema(c.relnamespace)
 	LOOP
 		colls := r.colls;
 		changed := false;

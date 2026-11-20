@@ -66,6 +66,10 @@ jobs:
       - name: Run the corpus check
         run: make corpuscheck PG_CONFIG="$PG_CONFIG"
 
+      # Creates and drops its own database, plx_upgrade_check.
+      - name: Run the upgrade check
+        run: make upgradecheck PG_CONFIG="$PG_CONFIG"
+
       - name: Show diffs on failure
         if: failure()
         run: |
