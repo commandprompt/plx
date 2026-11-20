@@ -10,7 +10,9 @@ version in `plx.control` (currently `3.0.0`).
 code audit of every dialect. Many fixes make a function compute what its
 source language computes, so a function can give a different result once you
 re-create it under 3.0.0. Other fixes reject code that 2.0.0 accepted. Read
-Breaking changes and Upgrading before you install this release.
+Breaking changes and Upgrading before you install this release. The fixes
+first planned for a 2.1.0 release are part of this release; there is no
+2.1.0, and 2.0.0 updates straight to 3.0.0.
 
 ### Breaking changes
 
