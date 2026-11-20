@@ -193,7 +193,7 @@ PostgreSQL type names work.
 | T-SQL | PostgreSQL |
 | --- | --- |
 | `NVARCHAR(n)` | `varchar(n)` |
-| `NVARCHAR` (no length) | `varchar(30)`, the length SQL Server gives `CAST` |
+| `NVARCHAR` (no length) | `varchar(30)` |
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
 | `BIT` | `boolean` |
 | `MONEY` | `numeric(19,4)` |
