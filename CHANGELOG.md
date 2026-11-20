@@ -362,7 +362,8 @@ Each entry names the dialects it affects.
   `'7' - '0'` failed with `operator is not unique`. `c := 'a'` now declares an
   `integer`. A rune literal must hold exactly one character. `string(x)` of an
   integer is now the character with that code point, as in Go, instead of the
-  number's digits: `string(65)` is `"A"`, not `"65"`. Use `strconv.Itoa` for
+  number's digits: `string(65)` is `"A"`, not `"65"`. This includes the
+  variable of a `for i := 1; ...; i++` loop. Use `strconv.Itoa` for
   the digits. `%c` in `fmt.Sprintf` prints the character. `string(x)` of a
   float, `numeric` or bool value gave its text and is now rejected at
   `CREATE FUNCTION`, as Go rejects it. Format such a value with `fmt.Sprintf`.

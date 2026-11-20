@@ -3801,6 +3801,9 @@ go_for(Go *g, int ind)
 		const char *save_brk = g->brk_label;
 		char	   *label = NULL;
 		char	   *lvar = NULL;
+		PlxLocal2  *lv = NULL;		/* the loop variable while the body is emitted */
+		char	   *lv_saved = NULL;
+		bool		lv_added = false;
 		int			bodyend = go_match(g, hb, g->nt);
 		int			bind = ind;
 		int			j;
@@ -3836,6 +3839,24 @@ go_for(Go *g, int ind)
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "BEGIN\n");
 			bind = ind + 1;
+
+			/*
+			 * Type the name as the loop variable for the body, so string(j) and
+			 * the operand typing see an integer, and restore it after the loop.
+			 * A parameter of the same name is left alone.
+			 */
+			if (!plx_is_param(g->cx, g->t[h0].s, g->t[h0].len))
+			{
+				lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
+				if (lv)
+					lv_saved = lv->typ;
+				else
+				{
+					lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
+					lv_added = true;
+				}
+				lv->typ = ltyp;
+			}
 		}
 		else if (semi1 > h0)				/* any other init statement */
 			go_simple(g, bind, semi1);
@@ -3893,6 +3914,10 @@ go_for(Go *g, int ind)
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END;\n");
 		}
+		if (lv_added)
+			plx_local_drop(g->cx, lv);
+		else if (lv)
+			lv->typ = lv_saved;
 		go_eat_semi(g);
 		return;
 	}

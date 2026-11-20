@@ -199,6 +199,7 @@ void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 				  char *arms, char *ensure_body, PlxFin *f);	/* frees its strings */
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
+void plx_local_drop(Ctx *cx, PlxLocal2 *l);
 void plx_check_loop_var(Ctx *cx, const char *name, int len);
 void plx_locals_reset(Ctx *cx);
 char *plx_ext_object(const char *name);

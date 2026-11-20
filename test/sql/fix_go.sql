@@ -875,3 +875,22 @@ SELECT fg_timed('SELECT fgsq_width(''a'')', '2s') AS go_width;
 SELECT fg_timed('SELECT fgsq_int(2)', '2s') AS go_int;
 RESET statement_timeout;
 SELECT fgsq_star(2) AS go_star, fgsq_width('a') AS go_width, fgsq_int(2) AS go_11;
+-- R2-D11 (PR 24 review r2 d1[1]): the variable of a three-clause for loop is
+-- an integer while plx emits the loop body, so string(j) is a character, as
+-- in Go (review [12] covered locals and parameters only). The name is
+-- typed for the body only: after the loop a new j can hold a string.
+CREATE FUNCTION fg_r2d11(p text) RETURNS text LANGUAGE plxgo AS $$
+	i := 65
+	var s string = string(i)
+	for j := 66; j < 67; j++ {
+		s = s + string(j)
+	}
+	for k := 67; k < 68; k++ {
+		var kk int = k
+		s = s + string(kk) + string(k + 0) + string(int(k))
+	}
+	j := "-"
+	s = s + j + p
+	return s
+$$;
+SELECT fg_r2d11('!') AS r;  -- Go: ABCCC-!

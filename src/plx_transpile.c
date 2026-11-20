@@ -1470,6 +1470,48 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	return l;
 }
 
+/*
+ * Remove a local that plx_local_add returned, for a name that is in scope for
+ * one block only (a loop variable that plx declares in its own DECLARE).
+ */
+void
+plx_local_drop(Ctx *cx, PlxLocal2 *l)
+{
+	PlxLocal2  *p = NULL,
+			   *q;
+	char		key[NAMEDATALEN];
+	PlxLocalEnt *e;
+
+	for (q = cx->locals; q && q != l; q = q->next)
+		p = q;
+	if (!q)
+		return;
+	if (p)
+		p->next = l->next;
+	else
+		cx->locals = l->next;
+	if (cx->ltail == l)
+		cx->ltail = p;
+	plx_local_key(l->name, (int) strlen(l->name), key);
+	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+	if (e && e->l == l)
+	{
+		/* another declaration of the name, if any, takes over */
+		for (q = cx->locals; q; q = q->next)
+		{
+			char		k2[NAMEDATALEN];
+
+			plx_local_key(q->name, (int) strlen(q->name), k2);
+			if (strcmp(k2, key) == 0)
+				break;
+		}
+		if (q)
+			e->l = q;
+		else
+			(void) hash_search(cx->lhash, key, HASH_REMOVE, NULL);
+	}
+}
+
 /* ---------------------------------------------------------------- string decode */
 
 /* length of a string token's opening delimiter ([f] plus one or three quotes)
