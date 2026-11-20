@@ -35,5 +35,42 @@ else
   echo "FAIL extension version is $v, expected $d"; fail=1
 fi
 
+# 2. PR 24 review r3 s1: the update finds the type of each index and
+#    partition key expression. It must not run the expression: a planned
+#    query folds an IMMUTABLE call with constant arguments, so a table owner's
+#    function would run as the superuser who runs the update.
 "$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+"$PSQL" -X -q -d postgres -c "DROP ROLE IF EXISTS plx_upg_mallory" >/dev/null 2>&1
+q -d postgres -c "CREATE DATABASE $DB" || exit 1
+q -d $DB >/dev/null <<'SQL' || exit 1
+CREATE EXTENSION plx VERSION '2.0.0';
+CREATE ROLE plx_upg_mallory;
+CREATE SCHEMA mal AUTHORIZATION plx_upg_mallory;
+SET ROLE plx_upg_mallory;
+CREATE FUNCTION mal.grab() RETURNS int LANGUAGE plpgsql VOLATILE AS $f$
+BEGIN
+  IF (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN
+    EXECUTE 'ALTER ROLE plx_upg_mallory SUPERUSER';
+  END IF;
+  RETURN 0;
+END $f$;
+CREATE FUNCTION mal.k(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $f$
+BEGIN PERFORM mal.grab(); RETURN $1; END $f$;
+CREATE TABLE mal.t (a int, s text);
+CREATE INDEX ON mal.t ((a + mal.k(1)));
+CREATE TABLE mal.p (a int) PARTITION BY RANGE ((a + mal.k(2)));
+RESET ROLE;
+SQL
+if ! out=$(q -d $DB -c "ALTER EXTENSION plx UPDATE" 2>&1); then
+  echo "FAIL update with user functions in key expressions:"; echo "$out"; fail=1
+fi
+s=$(q -At -d $DB -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'plx_upg_mallory'")
+if [ "$s" = "f" ]; then
+  echo "ok   update runs no key expression"
+else
+  echo "FAIL update ran a key expression: plx_upg_mallory rolsuper=$s"; fail=1
+fi
+
+"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+"$PSQL" -X -q -d postgres -c "DROP ROLE IF EXISTS plx_upg_mallory" >/dev/null 2>&1
 exit $fail
