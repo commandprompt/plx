@@ -89,6 +89,12 @@ WHERE rngcollation = 0 AND rngsubtype IN (SELECT oid FROM plx_sb_types);
  * install. Rewriting the pg_class row of a partitioned table makes every
  * session read its new partition key.
  */
+-- Used only by the DO block below and dropped after it (see
+-- plx_key_expr_types in plx_strbuild.c).
+CREATE FUNCTION plx_key_expr_types(pg_catalog.pg_node_tree) RETURNS pg_catalog.oid[]
+	AS '$libdir/plx', 'plx_key_expr_types' LANGUAGE C STRICT;
+REVOKE ALL ON FUNCTION plx_key_expr_types(pg_catalog.pg_node_tree) FROM PUBLIC;
+
 DO $plx_keys$
 DECLARE
 	sb pg_catalog.oid[];
@@ -98,7 +104,7 @@ DECLARE
 	e int;
 	typ pg_catalog.oid;
 	changed boolean;
-	probe pg_catalog.oid;
+	etypes pg_catalog.oid[];
 BEGIN
 	WITH RECURSIVE plx_sb_types(oid) AS (
 		SELECT 'plx_strbuild'::pg_catalog.regtype::pg_catalog.oid
@@ -114,7 +120,7 @@ BEGIN
 		SELECT 'i' AS kind, i.indexrelid AS rel, i.indrelid AS tbl,
 		       i.indnkeyatts AS n, i.indkey::pg_catalog.int2[] AS keys,
 		       i.indcollation::pg_catalog.oid[] AS colls,
-		       pg_catalog.pg_get_expr(i.indexprs, i.indrelid) AS exprs
+		       i.indexprs AS exprs
 		FROM pg_catalog.pg_index i
 		JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
 		-- another session's temporary table cannot be read, and goes away
@@ -124,14 +130,14 @@ BEGIN
 		SELECT 'p', p.partrelid, p.partrelid,
 		       p.partnatts, p.partattrs::pg_catalog.int2[],
 		       p.partcollation::pg_catalog.oid[],
-		       pg_catalog.pg_get_expr(p.partexprs, p.partrelid)
+		       p.partexprs
 		FROM pg_catalog.pg_partitioned_table p
 		JOIN pg_catalog.pg_class c ON c.oid = p.partrelid
 		WHERE NOT pg_catalog.pg_is_other_temp_schema(c.relnamespace)
 	LOOP
 		colls := r.colls;
 		changed := false;
-		probe := NULL;
+		etypes := NULL;
 		e := 0;
 		FOR k IN 0 .. r.n - 1 LOOP
 			IF r.keys[k] = 0 THEN
@@ -142,34 +148,20 @@ BEGIN
 				SELECT a.atttypid INTO typ FROM pg_catalog.pg_attribute a
 				WHERE a.attrelid = r.tbl AND a.attnum = r.keys[k];
 			ELSE
-				-- The type of an expression key comes from a temporary view
-				-- over the key expressions. CREATE VIEW parses them but
-				-- neither plans nor runs them. A query would be planned, and
-				-- the planner runs an IMMUTABLE function with constant
-				-- arguments, so a table owner's function would run as the
-				-- superuser who runs this update.
-				IF probe IS NULL THEN
-					EXECUTE pg_catalog.format(
-						'CREATE TEMPORARY VIEW plx_key_probe (%s) AS SELECT %s FROM %s',
-						(SELECT pg_catalog.string_agg('e' || j, ', ')
-						 FROM pg_catalog.generate_series(1,
-						      (SELECT pg_catalog.count(*)::int
-						       FROM pg_catalog.unnest(r.keys) u
-						       WHERE u = 0)) j),
-						r.exprs, r.tbl::pg_catalog.regclass);
-					probe := 'pg_temp.plx_key_probe'::pg_catalog.regclass;
+				-- The type of an expression key comes from the stored
+				-- expression tree. Planning or even parsing the expression
+				-- could run a table owner's function as the superuser who
+				-- runs this update (see plx_key_expr_types).
+				IF etypes IS NULL THEN
+					etypes := @extschema@.plx_key_expr_types(r.exprs);
 				END IF;
-				SELECT a.atttypid INTO typ FROM pg_catalog.pg_attribute a
-				WHERE a.attrelid = probe AND a.attnum = e;
+				typ := etypes[e];
 			END IF;
 			IF typ = ANY (sb) THEN
 				colls[k] := 100;
 				changed := true;
 			END IF;
 		END LOOP;
-		IF probe IS NOT NULL THEN
-			DROP VIEW pg_temp.plx_key_probe;
-		END IF;
 		CONTINUE WHEN NOT changed;
 		IF r.kind = 'i' THEN
 			UPDATE pg_catalog.pg_index
@@ -186,6 +178,7 @@ BEGIN
 	END LOOP;
 END
 $plx_keys$;
+DROP FUNCTION plx_key_expr_types(pg_catalog.pg_node_tree);
 
 /*
  * The append operators of every dialect except plxcobol now call a STRICT

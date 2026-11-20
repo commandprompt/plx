@@ -71,6 +71,63 @@ else
   echo "FAIL update ran a key expression: plx_upg_mallory rolsuper=$s"; fail=1
 fi
 
+# 3. PR 24 review r4: nor may it parse the expression again. Parsing a
+#    literal of a domain array type calls the domain's CHECK, which can be a
+#    table owner's function.
+"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+"$PSQL" -X -q -d postgres -c "DROP ROLE IF EXISTS plx_upg_mallory" >/dev/null 2>&1
+q -d postgres -c "CREATE DATABASE $DB" || exit 1
+q -d $DB >/dev/null <<'SQL' || exit 1
+CREATE EXTENSION plx VERSION '2.0.0';
+CREATE ROLE plx_upg_mallory;
+CREATE SCHEMA mal AUTHORIZATION plx_upg_mallory;
+SET ROLE plx_upg_mallory;
+CREATE FUNCTION mal.grab(int) RETURNS boolean LANGUAGE plpgsql AS $f$
+BEGIN
+  IF (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN
+    EXECUTE 'ALTER ROLE plx_upg_mallory SUPERUSER';
+  END IF;
+  RETURN true;
+END $f$;
+CREATE DOMAIN mal.d AS int CHECK (mal.grab(VALUE));
+CREATE TABLE mal.t (a int);
+CREATE INDEX ON mal.t ((a + ('{1}'::mal.d[])[1]));
+CREATE TABLE mal.p (a int) PARTITION BY RANGE ((a + ('{2}'::mal.d[])[1]));
+RESET ROLE;
+SQL
+if ! out=$(q -d $DB -c "ALTER EXTENSION plx UPDATE" 2>&1); then
+  echo "FAIL update with domain arrays in key expressions:"; echo "$out"; fail=1
+fi
+s=$(q -At -d $DB -c "SELECT rolsuper FROM pg_roles WHERE rolname = 'plx_upg_mallory'")
+if [ "$s" = "f" ]; then
+  echo "ok   update parses no key expression"
+else
+  echo "FAIL update parsed a key expression: plx_upg_mallory rolsuper=$s"; fail=1
+fi
+
+# 4. PR 24 review r4: a whole-row index key, ((t)), has the table's row
+#    type, which has no collation. The update gave it the collation of the
+#    table's first column (a plx_strbuild), so a dump of the database did not
+#    restore. Also: a temporary relation of the upgrading session must not
+#    stop the update.
+"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+q -d postgres -c "CREATE DATABASE $DB" || exit 1
+q -d $DB >/dev/null <<'SQL' || exit 1
+CREATE EXTENSION plx VERSION '2.0.0';
+CREATE TABLE wr (h plx_strbuild, n int);
+CREATE INDEX wr_b ON wr ((wr));
+CREATE INDEX wr_e ON wr USING hash ((h::plx_strbuild));
+SQL
+if ! out=$(printf "CREATE TEMP TABLE plx_key_probe(x int);\nALTER EXTENSION plx UPDATE;\n" | q -d $DB 2>&1); then
+  echo "FAIL update with a temporary relation in the session:"; echo "$out"; fail=1
+fi
+c=$(q -At -d $DB -c "SELECT string_agg(c.relname || '=' || i.indcollation::text, ' ' ORDER BY c.relname) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'wr'::regclass")
+if [ "$c" = "wr_b=0 wr_e=100" ]; then
+  echo "ok   key collations after update"
+else
+  echo "FAIL key collations after update: $c (expected wr_b=0 wr_e=100)"; fail=1
+fi
+
 "$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
 "$PSQL" -X -q -d postgres -c "DROP ROLE IF EXISTS plx_upg_mallory" >/dev/null 2>&1
 exit $fail
