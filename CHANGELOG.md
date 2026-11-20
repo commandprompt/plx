@@ -4,7 +4,7 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `3.0.0`).
 
-## [3.0.0] - unreleased
+## [3.0.0] - 2026-11-20
 
 3.0.0 is a major release. It holds the fixes from a security audit and from a
 code audit of every dialect. Many fixes make a function compute what its
