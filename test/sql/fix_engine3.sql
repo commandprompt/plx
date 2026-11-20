@@ -475,3 +475,21 @@ for (let i = 0; i < (n & 6); i++) { c = c + 1; }
 return c;
 $$;
 SELECT r3f30_ok(7) AS r;  -- 6
+
+-- R4-C40 (PR 24 review r4): the R3-C30 check looked only at the character
+-- right before the name, so r . s (spaces around the dot, valid in Ruby,
+-- Python and JS) still became r . (s)::text. 2.0.1 returned the field.
+CREATE FUNCTION r4c40_rb() RETURNS text LANGUAGE plxruby AS $$
+s = "a"
+s << "b"
+r = fetch_one("SELECT 'F'::text AS s")
+return r . s
+$$;
+SELECT r4c40_rb() AS r;  -- F
+CREATE FUNCTION r4c40_py() RETURNS text LANGUAGE plxpython3 AS $$
+s = "a"
+s += "b"
+r = fetch_one("SELECT 'F'::text AS s")
+return r .  s
+$$;
+SELECT r4c40_py() AS r;  -- F

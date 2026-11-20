@@ -3879,7 +3879,9 @@ go_for(Go *g, int ind)
 		char	   *lvar = NULL;
 		PlxLocal2  *lv = NULL;		/* the loop variable while the body is emitted */
 		char	   *lv_saved = NULL;
-		bool		lv_added = false;
+		bool		lv_added = false,
+					lv_const = false,
+					lv_untyped = false;
 		int			bodyend = go_match(g, hb, g->nt);
 		int			bind = ind;
 		int			j;
@@ -3924,7 +3926,13 @@ go_for(Go *g, int ind)
 			 */
 			lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
 			if (lv)
+			{
+				/* a shadowed constant: the loop variable is not constant */
 				lv_saved = lv->typ;
+				lv_const = lv->is_const;
+				lv_untyped = lv->untyped;
+				lv->is_const = lv->untyped = false;
+			}
 			else
 			{
 				lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
@@ -3991,7 +3999,11 @@ go_for(Go *g, int ind)
 		if (lv_added)
 			plx_local_drop(g->cx, lv);
 		else if (lv)
+		{
 			lv->typ = lv_saved;
+			lv->is_const = lv_const;
+			lv->untyped = lv_untyped;
+		}
 		go_eat_semi(g);
 		return;
 	}

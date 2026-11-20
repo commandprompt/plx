@@ -1297,6 +1297,16 @@ php_value_ref(const char *s, int len, int i, int j)
 						 (s[j] == '-' && j + 1 < len && s[j + 1] == '>')));
 }
 
+/* is the last non-space character before offset i of s a '.'? */
+static bool
+prev_is_dot(const char *s, int i)
+{
+	while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' ||
+					 s[i - 1] == '\n' || s[i - 1] == '\r'))
+		i--;
+	return i > 0 && s[i - 1] == '.';
+}
+
 /*
  * Is name the target of an append anywhere in the body: .= in plxphp, += or
  * << in the other dialects? An append to a string local declares it as the
@@ -3037,8 +3047,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "NOT ");
 			else if (php_value_ref(s, len, i, j) &&
 					 (surf->concat_op || !(j < len && s[j] == '.')) &&
-					 /* outside plxphp, r.s names a field, not the local s */
-					 (surf->concat_op || !(i > 0 && s[i - 1] == '.')) &&
+					 /* outside plxphp, r.s or r . s names a field, not the local s */
+					 (surf->concat_op || !prev_is_dot(s, i)) &&
 					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
 					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{

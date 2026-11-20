@@ -560,10 +560,12 @@ the plx extension.
    stored before the update keeps no collation until you re-create the
    object that holds it: a view's query, a generated column, a column
    `DEFAULT`, a `CHECK` constraint, a row security policy, and the body of a
-   SQL-standard function (`BEGIN ATOMIC`). Until then, `ORDER BY`,
-   `GREATEST` or `LEAST` on a `plx_strbuild` value in it fails with
-   `could not determine which collation to use for string comparison`.
-   Comparison operators such as `<` and `=` still work.
+   SQL-standard function (`BEGIN ATOMIC`). Until then, an operation that
+   sorts `plx_strbuild` values from it can fail with
+   `could not determine which collation to use for string comparison`:
+   `ORDER BY`, `DISTINCT ON`, `PARTITION BY`, `GREATEST` and `LEAST`, and
+   `GROUP BY` or `DISTINCT` when the planner sorts. Comparison operators such
+   as `<` and `=`, `min()` and `max()` still work.
 
    To check the result, run
    `SELECT extversion, extrelocatable FROM pg_extension WHERE extname = 'plx';`.
@@ -759,7 +761,10 @@ not here.
   wrong number of iterations with no error. plx turns an exclusive bound HI
   into `HI - 1` (or `HI + 1` for a `range()` with a negative step), and SQL
   binds `-` and `+` tighter than these operators, so `n >> 1 - 1` was
-  `n >> 0`. plx now writes `(HI) - 1`.
+  `n >> 0`. plx now writes `(HI) - 1`. In plxjs, plxts and plxphp, `<` binds
+  tighter than `&`, `^` and `|`, so `i < n & 6` means `(i < n) & 6`, not a
+  bound: such a loop is now rejected with `for-loop bound must be a single
+  value`. Write the bound in brackets, `i < (n & 6)`, or use a `while` loop.
 - plxjs, plxts, plxpython3, plxruby: when plx's schema name was 50 bytes or
   longer (fewer if it needs quotes), the second string append to a local
   compiled to numeric addition and failed at run time with

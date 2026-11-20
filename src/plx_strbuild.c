@@ -18,9 +18,13 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
 #include "nodes/primnodes.h"
 #include "nodes/supportnodes.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/expandeddatum.h"
 #include "utils/memutils.h"
@@ -240,4 +244,41 @@ plx_sb_append_support(PG_FUNCTION_ARGS)
 	}
 #endif
 	PG_RETURN_POINTER(ret);
+}
+
+/*
+ * plx_key_expr_types(pg_node_tree) -> oid[]: the type of each expression in a
+ * stored expression list (pg_index.indexprs, pg_partitioned_table.partexprs).
+ *
+ * Only the 2.0.0 -> 3.0.0 update script uses it, to find the index and
+ * partition keys that hold a plx_strbuild value; it creates the function and
+ * drops it again in the same transaction. Reading the type from the stored
+ * tree runs nothing. Any SQL form of the same question does run code: a
+ * planned query folds IMMUTABLE calls, and even parsing the text that
+ * pg_get_expr() prints calls type input functions, which check a domain's
+ * constraints. Either way a table owner's function would run as the
+ * superuser who runs the update.
+ */
+PG_FUNCTION_INFO_V1(plx_key_expr_types);
+
+Datum
+plx_key_expr_types(PG_FUNCTION_ARGS)
+{
+	char	   *s = TextDatumGetCString(PG_GETARG_DATUM(0));
+	List	   *exprs = (List *) stringToNode(s);
+	Datum	   *d;
+	int			n,
+				i = 0;
+	ListCell   *lc;
+
+	if (exprs == NIL || !IsA(exprs, List))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("plx_key_expr_types: not an expression list")));
+	n = list_length(exprs);
+	d = palloc(sizeof(Datum) * n);
+	foreach(lc, exprs)
+		d[i++] = ObjectIdGetDatum(exprType((Node *) lfirst(lc)));
+	PG_RETURN_ARRAYTYPE_P(construct_array(d, n, OIDOID, sizeof(Oid), true,
+										  TYPALIGN_INT));
 }
