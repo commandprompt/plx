@@ -558,6 +558,14 @@ PUBLIC has USAGE by default).
   nesting limit before it does the deeper work, types unary signs without
   recursion, and checks for interrupts while it lexes, types and emits, so
   `statement_timeout` can cancel the transpile.
+- **Exponential memory when plxgo subqueries are nested.** plxgo evaluates
+  some values once in a subquery: the operand of `int64(x)` or `int(x)` when
+  plx cannot see its type, the value of a `fmt.Sprintf` width when it is a
+  call, and the value and width of a `*` width. The planner pulled each
+  subquery up and copied the value into every place it is used, so the plan
+  grew exponentially with nesting: 8 nested `int64()` conversions ran out of
+  memory when the function ran. The subqueries now have `OFFSET 0`, which
+  keeps the planner from pulling them up.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.

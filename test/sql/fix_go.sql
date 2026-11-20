@@ -855,3 +855,23 @@ SELECT fg_err(fgsh_mk(64, 1)) AS go_no_error;
 SELECT fgsh_many_64_1(0) AS go_1;
 SELECT fg_err(fgsh_mk(65, 1)) AS go_too_many;
 SELECT fg_err(fgsh_mk(100, 8)) AS go_too_many;
+-- Review of the PR 24 fixes: plx evaluates some values once in a subquery (a
+-- * width, a width of a call, an integer conversion of an expression). The
+-- planner pulled each subquery up and copied the value into every place it
+-- is used, so nesting them grew exponentially: 18 nested * widths took about
+-- 14 s, and 8 nested int64() conversions ran out of memory.
+DO $d$
+BEGIN
+  EXECUTE format('CREATE FUNCTION fgsq_star(n int) RETURNS text LANGUAGE plxgo AS %L',
+    'return ' || repeat('fmt.Sprintf("%*s", n, ', 18) || '"a"' || repeat(')', 18));
+  EXECUTE format('CREATE FUNCTION fgsq_width(x text) RETURNS text LANGUAGE plxgo AS %L',
+    'return ' || repeat('fmt.Sprintf("%3s", strings.ToUpper(', 18) || 'x' || repeat('))', 18));
+  EXECUTE format('CREATE FUNCTION fgsq_int(n bigint) RETURNS bigint LANGUAGE plxgo AS %L',
+    'return ' || repeat('int64(', 8) || 'n + 1' || repeat(' + 1)', 8));
+END $d$;
+SET statement_timeout = '5s';
+SELECT fg_timed('SELECT fgsq_star(2)', '2s') AS go_star;
+SELECT fg_timed('SELECT fgsq_width(''a'')', '2s') AS go_width;
+SELECT fg_timed('SELECT fgsq_int(2)', '2s') AS go_int;
+RESET statement_timeout;
+SELECT fgsq_star(2) AS go_star, fgsq_width('a') AS go_width, fgsq_int(2) AS go_11;

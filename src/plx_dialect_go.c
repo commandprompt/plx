@@ -1098,17 +1098,19 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			/*
 			 * A width from an argument: as in Go, a negative width pads on
 			 * the right, like the '-' flag. Value and width are evaluated
-			 * once, in a subquery.
+			 * once, in a subquery. Its OFFSET 0 keeps the planner from
+			 * pulling it up, which would copy the value into each place it
+			 * is used, so that nested ones grow exponentially.
 			 */
 			appendStringInfoString(out, "(SELECT CASE WHEN __plx_n < 0 THEN "
 								   "rpad(__plx_v, greatest(-__plx_n, length(__plx_v))) ELSE ");
 			appendStringInfoString(out, dash ? "rpad" : "lpad");
 			appendStringInfoString(out, "(__plx_v, greatest(__plx_n, length(__plx_v))) END "
-								   "FROM (VALUES ((");
+								   "FROM (SELECT (");
 			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
-			appendStringInfoString(out, ")::text, (");
+			appendStringInfoString(out, ")::text AS __plx_v, (");
 			go_emit_range(g, as[wa], ae[wa], out);
-			appendStringInfoString(out, ")::integer)) AS __plx_w(__plx_v, __plx_n))");
+			appendStringInfoString(out, ")::integer AS __plx_n OFFSET 0) AS __plx_w)");
 		}
 		else if (wlen == 0)
 		{
@@ -1133,13 +1135,16 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 		}
 		else
 		{
-			/* any other operand is evaluated once, in a subquery */
+			/*
+			 * any other operand is evaluated once, in a subquery that OFFSET
+			 * 0 keeps the planner from pulling up and copying
+			 */
 			appendStringInfoString(out, dash ? "(SELECT rpad(__plx_v, greatest("
 								   : "(SELECT lpad(__plx_v, greatest(");
 			appendBinaryStringInfo(out, raw.data + wstart, wlen);
-			appendStringInfoString(out, ", length(__plx_v))) FROM (VALUES ((");
+			appendStringInfoString(out, ", length(__plx_v))) FROM (SELECT (");
 			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
-			appendStringInfoString(out, ")::text)) AS __plx_w(__plx_v))");
+			appendStringInfoString(out, ")::text AS __plx_v OFFSET 0) AS __plx_w)");
 		}
 		if (diag)
 			appendStringInfoString(out, ", '')");
@@ -1680,16 +1685,18 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 			 * The operand's type is known only at run time. Evaluate it once
 			 * and choose by its type: an integer casts exactly, a float
 			 * truncates as a float, and anything else (numeric, text)
-			 * truncates as numeric, which is exact at any size.
+			 * truncates as numeric, which is exact at any size. OFFSET 0
+			 * keeps the planner from pulling the subquery up and copying the
+			 * operand into each of its uses.
 			 */
 			appendStringInfoString(out, "(SELECT CASE WHEN pg_typeof(__plx_v) IN "
 								   "('smallint'::regtype, 'integer'::regtype, 'bigint'::regtype) ");
 			appendStringInfo(out, "THEN __plx_v::%s WHEN pg_typeof(__plx_v) IN "
 							 "('real'::regtype, 'double precision'::regtype) ", conv);
 			appendStringInfo(out, "THEN trunc(__plx_v::double precision)::%s "
-							 "ELSE trunc(__plx_v::numeric)::%s END FROM (VALUES ((", conv, conv);
+							 "ELSE trunc(__plx_v::numeric)::%s END FROM (SELECT (", conv, conv);
 			go_emit_range(g, lp + 1, close, out);
-			appendStringInfoString(out, "))) AS __plx_n(__plx_v))");
+			appendStringInfoString(out, ") AS __plx_v OFFSET 0) AS __plx_n)");
 			*ni = close + 1;
 			return true;
 		}
