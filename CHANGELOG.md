@@ -620,9 +620,11 @@ not here.
 #### plxgo
 
 - `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
-- `+` with a string operand now joins strings (#18, #23). plx writes it as
-  `||` when one operand is a string literal, a `string` local, a `text` or
-  `varchar` parameter, or a call that returns a string. Before,
+- `+` between strings now joins them (#18, #23). plx writes it as `||` when
+  every operand is a string literal, a `string` local, a `text` or `varchar`
+  parameter, or a call that returns a string. If any operand has a type plx
+  cannot see, such as a row field, an array, `jsonb` or a SQL function call,
+  `+` stays SQL `+` and fails when the function runs. Before,
   `strconv.Itoa(n) + "x"` failed when the function ran, with
   `operator does not exist: text + unknown`. A NULL operand makes the result
   NULL. `msg := "a" + s` now declares `msg` as `text`.

@@ -150,7 +150,7 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
-| `a + b` with a string operand | `(a) \|\| (b)` (see below) |
+| `a + b` on strings | `(a) \|\| (b)` (see below) |
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
@@ -198,7 +198,7 @@ plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 
 In Go, `+` with a string operand joins strings. Go has no implicit
 conversions, so both operands are then strings. plx writes such a `+` as SQL
-`||` when it can see that one operand is a string. plx sees a string in:
+`||` when it can see that every operand is a string. plx sees a string in:
 
 - a string literal, `"..."` or `` `...` ``
 - a call that returns a string: `strconv.Itoa`, `fmt.Sprintf`,
@@ -230,10 +230,15 @@ Go rejects `+` between a string and a number, and so does plx, when you run
 `invalid operation: + between a string and a number`. Convert the number with
 `strconv.Itoa` or `fmt.Sprintf`.
 
-When plx cannot see a string on either side, `+` stays SQL `+`. This happens
-with two row fields: `r.first + r.last` fails when the function runs, with
-`operator does not exist: text + text`. Write `string(r.first) + r.last`, or
-`fmt.Sprintf("%s%s", r.first, r.last)`.
+When plx cannot see the type of an operand, `+` stays SQL `+`, even beside a
+string literal. This happens with a row field, an array or `jsonb` value, a
+`char(n)` parameter, and a SQL function call such as `length(s)`. Such a `+`
+fails when the function runs: `"x" + r.name` fails with
+`operator does not exist: unknown + text`. plx does not write `||` here,
+because in SQL `||` also appends to an array and merges `jsonb`, and it casts
+a number to text where Go would reject the program. Convert each such operand
+with `string(...)`, as in `"x" + string(r.name)`, or use
+`fmt.Sprintf("x%s", r.name)`.
 
 ### Slices and indexing
 

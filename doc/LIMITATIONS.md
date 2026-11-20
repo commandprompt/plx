@@ -100,8 +100,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   In plxcobol `||` is rejected. plxtsql writes `+` as `||` only when every
   operand is a known string, such as a `VARCHAR` variable or a string literal;
   see [plxtsql.md](plxtsql.md#string-concatenation-with). plxgo writes `+` as
-  `||` when one operand is a known string, such as a string literal or a
-  `string` local; see [plxgo.md](plxgo.md#string-concatenation-with). In plxgo
+  `||` only when every operand is a known string, such as a string literal or
+  a `string` local; see [plxgo.md](plxgo.md#string-concatenation-with). In plxgo
   `||` is logical OR.
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
@@ -218,10 +218,11 @@ fail when the function runs.
 - `switch` `fallthrough`.
 - `make`, which plx rejects; write a slice literal or
   `array_fill(0, []int{n})`.
-- `+` joins strings only when plx can see a string operand: a string literal,
-  a `string` local, a `text` or `varchar` parameter, or a call that returns a
-  string. Between two row fields `+` stays SQL `+`; write `string(r.a) + r.b`
-  or `fmt.Sprintf("%s%s", r.a, r.b)`.
+- `+` joins strings only when plx can see that every operand is a string: a
+  string literal, a `string` local, a `text` or `varchar` parameter, or a call
+  that returns a string. With a row field, an array, `jsonb`, `char(n)` or a
+  SQL function call among the operands, `+` stays SQL `+`; write
+  `"x" + string(r.a)` or `fmt.Sprintf("x%s", r.a)`.
 - `for i := range s` over a slice; use `for _, v := range s` or a counting loop.
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.

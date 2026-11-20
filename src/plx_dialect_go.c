@@ -1899,9 +1899,10 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
  * String concatenation with +.
  *
  * Go has no implicit conversions, so + with a string operand is always string
- * concatenation, and both operands are strings. Where plx can see that one
- * operand of a + is a string, it writes the + as SQL ||, which propagates NULL
- * the way plx's interpolation does. Where it cannot see a string, + stays +.
+ * concatenation, and both operands are strings. Where plx can see that every
+ * operand of a run of + is a string, it writes the + as SQL ||, which
+ * propagates NULL the way plx's interpolation does. Where it cannot see that,
+ * + stays +.
  */
 
 #define GO_STRNUM_MSG "invalid operation: + between a string and a number; " \
@@ -2073,9 +2074,14 @@ go_split_binops(Go *g, int a, int b, int *ops)
 }
 
 /*
- * The kind of the operands a..b joined by + at ops[lo..hi): 's' when one is a
- * string, 'n' when all are numbers, 0 otherwise. A string and a number
+ * The kind of the operands a..b joined by + at ops[lo..hi): 's' when all are
+ * strings, 'n' when all are numbers, 0 otherwise. A string and a number
  * together is a Go compile error, and plx rejects it too.
+ *
+ * One string beside an operand plx cannot type (an array, jsonb, char(n), a
+ * row field, a raw SQL call) is 0, not 's'. Written as ||, such a run would
+ * mean array append, jsonb merge or a silent cast to text, where Go rejects
+ * the program. Left as +, it fails loudly instead.
  */
 static char
 go_plus_run_kind(Go *g, int a, int b, const int *ops, int lo, int hi)
@@ -2100,9 +2106,9 @@ go_plus_run_kind(Go *g, int a, int b, const int *ops, int lo, int hi)
 	}
 	if (str && num)
 		plx_err(g->cx, g->t[ops[lo]].line, "%s", GO_STRNUM_MSG);
-	if (str)
-		return 's';
-	return (num && !unknown) ? 'n' : 0;
+	if (unknown)
+		return 0;
+	return str ? 's' : num ? 'n' : 0;
 }
 
 /*
@@ -2136,14 +2142,14 @@ go_expr_kind(Go *g, int a, int b)
 }
 
 /*
- * Emit [a,b) with each run of + that has a string operand written as ||.
+ * Emit [a,b) with each run of + whose operands are all strings written as ||.
  * The range is cut at the operators that bind looser than + in Go (the
  * comparisons, && and ||), which SQL also ranks below ||. A run that joins
- * its operands only with + and has a string operand becomes
+ * its operands only with + and whose operands are all strings becomes
  * ((x) || (y)) || (z), left to right as Go evaluates it; every other piece is
  * emitted in brackets as before. A top-level comma list is handled element by
- * element. Returns false, emitting nothing, when no run has a string operand,
- * so the caller emits the range as it always did.
+ * element. Returns false, emitting nothing, when no run is all strings, so
+ * the caller emits the range as it always did.
  */
 static bool
 go_emit_strcat(Go *g, int a, int b, StringInfo out)

@@ -532,6 +532,47 @@ $$;
 CREATE FUNCTION fgh18_mix2() RETURNS text LANGUAGE plxgo AS $$
 	return "x" + 1
 $$;
+-- a string beside an operand plx cannot type keeps SQL +, so it still fails
+-- loudly; || would mean array append, jsonb merge, or a silent cast here
+\set VERBOSITY terse
+CREATE FUNCTION fgh18_unk_arr(a int[]) RETURNS int[] LANGUAGE plxgo AS $$
+	return a + "{9}"
+$$;
+SELECT fgh18_unk_arr('{1,2}') AS go_error;
+CREATE FUNCTION fgh18_unk_json(j jsonb) RETURNS jsonb LANGUAGE plxgo AS $$
+	return j + `{"b":2}`
+$$;
+SELECT fgh18_unk_json('{"a":1}') AS go_error;
+CREATE FUNCTION fgh18_unk_char(c char(4)) RETURNS text LANGUAGE plxgo AS $$
+	return c + "x"
+$$;
+SELECT fgh18_unk_char('ab') AS go_error;
+CREATE FUNCTION fgh18_unk_call(s text) RETURNS text LANGUAGE plxgo AS $$
+	return length(s) + "x"
+$$;
+SELECT fgh18_unk_call('abc') AS go_error;
+CREATE FUNCTION fgh18_unk_row() RETURNS text LANGUAGE plxgo AS $$
+	for _, r := range query("SELECT 2 AS a, 3 AS b") {
+		return "x" + r.a
+	}
+	return "none"
+$$;
+SELECT fgh18_unk_row() AS go_error;
+\set VERBOSITY default
+-- such a sum is not a string, so it gives := no type
+CREATE FUNCTION fgh18_unk_decl() RETURNS text LANGUAGE plxgo AS $$
+	x := []int{1, 2}
+	y := x + "{3}"
+	return y
+$$;
+-- string(x) makes the operand a known string
+CREATE FUNCTION fgh18_unk_conv() RETURNS text LANGUAGE plxgo AS $$
+	for _, r := range query("SELECT 2 AS a, 3 AS b") {
+		return string(r.a) + "-" + string(r.b)
+	}
+	return "none"
+$$;
+SELECT fgh18_unk_conv() AS go_2_3;
 
 -- GH18: s += x on a string appends with ||
 CREATE FUNCTION fgh18_acc(n int) RETURNS text LANGUAGE plxgo AS $$
