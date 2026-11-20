@@ -503,12 +503,19 @@ try { return 10 / (v - 2); }
 catch (DivideByZeroException e) { throw new InvalidOperationException("wrapped", e); }
 $$;
 SELECT cs_throw(5);
-\set VERBOSITY verbose
-SELECT cs_throw(-1);
-SELECT cs_throw(0);
-SELECT cs_throw(1);
-SELECT cs_throw(2);
-\set VERBOSITY default
+-- the SQLSTATE, message, detail and hint of each error (VERBOSITY verbose
+-- would also print the C source location, which differs between builds)
+CREATE FUNCTION cs_err(v int) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  PERFORM cs_throw(v);
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT,
+                          d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN s || ' ' || m || ' | ' || d || ' | ' || h;
+END $f$;
+SELECT v, cs_err(v) FROM unnest(ARRAY[-1, 0, 1, 2]) AS v;
 
 -- throw; rethrows the caught error unchanged
 CREATE FUNCTION cs_rethrow(v int) RETURNS int LANGUAGE plxcsharp AS $$
