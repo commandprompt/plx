@@ -237,6 +237,19 @@ fail when the function runs.
 ### plxgo ([chapter](plxgo.md))
 
 - Goroutines and channels (`go`, `chan`, `select`, `<-`), `defer`, `goto`.
+- Labelled statements (`outer:` before a loop, `break outer`, `continue outer`).
+  `CREATE FUNCTION` fails, with a syntax error that does not name the label.
+  Use a flag variable and an unlabelled `break`.
+- Wrap-around of integer types narrower than 64 bits, and unsigned types.
+  `int8`, `int16`, `uint8` and `byte` are `smallint`, `int32` and `int` are
+  `integer`, and the unsigned types are signed SQL types. A conversion keeps
+  the value and arithmetic does not wrap: `uint8(300)` is 300 (Go: 44),
+  `uint32(-1)` is -1 (Go: 4294967295), and a `byte` holding 255 incremented
+  is 256 (Go: 0). A value that leaves the SQL type's range fails with
+  `smallint out of range` or `integer out of range`.
+- `len(s)` of a string counts characters, as SQL `length()` does, where Go
+  counts UTF-8 bytes: `len("héllo")` is 5 (Go: 6). Use `octet_length(s)` for
+  the byte count.
 - Nested functions and closures (`func`).
 - `map`, `chan`, `struct`, and `interface` types; declare data with SQL types or
   slices.
@@ -272,6 +285,10 @@ fail when the function runs.
   intrinsic function library is not translated (a `FUNCTION name(...)` call
   passes through and fails when the function runs); use SQL functions in
   expressions.
+- Truncation in `MOVE` to an alphanumeric item. A `PIC X(n)` item is
+  `varchar(n)`, so `MOVE` of a longer string fails when it runs with
+  `value too long for type character varying(n)`, where COBOL truncates on
+  the right. Write `MOVE LEFT(s, n) TO item`.
 - The `||` operator and `::` casts inside `COMPUTE` and conditions; use
   `CONCAT(...)` and `CAST(x AS type)`. `||`, like any character COBOL does not
   use (`!`, `$`, `@`, and others), is rejected at `CREATE FUNCTION` time
@@ -304,6 +321,11 @@ fail when the function runs.
 - Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`).
 - Calling a stored procedure by name; only `EXEC('<sql>')` dynamic SQL.
 - `+` for string concatenation (use `||` or `CONCAT(...)`).
+- The range of `TINYINT`. plx stores a `TINYINT` as `smallint`, so a
+  `TINYINT` variable and `CONVERT(TINYINT, x)` hold values outside 0 to 255:
+  `CONVERT(TINYINT, 300)` is 300 and `CONVERT(TINYINT, -1)` is -1, where SQL
+  Server raises an arithmetic overflow error. Check the range yourself where
+  it matters.
 - T-SQL precedence for `^`, `&` and `|` followed by `+` or `-`: PostgreSQL
   binds them more loosely, so `1 ^ 2 + 3` gives 4, not 6. Write
   `(1 ^ 2) + 3`.
