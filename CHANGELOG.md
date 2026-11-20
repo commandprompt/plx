@@ -581,6 +581,12 @@ not here.
 
 #### Several dialects
 
+- plxjs, plxts, plxpython3, plxruby: when plx's schema name was 50 bytes or
+  longer (fewer if it needs quotes), the second string append to a local
+  compiled to numeric addition and failed at run time with
+  `operator does not exist: ... plx_strbuild + unknown`. plxruby rejected the
+  body at `CREATE FUNCTION`. Appends now work with any schema name. Version
+  2.0.1 was not affected, because it did not qualify the type with the schema.
 - plxjs, plxts, plxphp, plxruby, plxpython3: a `finally`/`ensure` body that
   raised an error on the normal path ran a second time from the error path.
   It now runs once.

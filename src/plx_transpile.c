@@ -782,23 +782,32 @@ type_norm(const char *typ, char *buf, int bufsz)
 static bool
 is_builder_type(const char *typ)
 {
-	char		buf[64];
-	const char *b = buf;
+	char	   *buf;
+	const char *b;
+	size_t		l;
+	bool		r;
 
-	if (!typ || !type_norm(typ, buf, sizeof(buf)))
+	if (!typ)
 		return false;
+
+	/*
+	 * The buffer fits any name: after an append the type is plx_strbuild
+	 * qualified with plx's schema, which may be up to NAMEDATALEN - 1 bytes
+	 * long and quoted (see plx_ext_object).
+	 */
+	buf = palloc(strlen(typ) + 2);
+	(void) type_norm(typ, buf, strlen(typ) + 2);
+	b = buf;
 	if (strncmp(b, "pg_catalog.", 11) == 0)
 		b += 11;
-	if (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
-		strcmp(b, "character varying") == 0)
-		return true;
+	l = strlen(b);
+	r = (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
+		 strcmp(b, "character varying") == 0 ||
 	/* plx_strbuild, bare or schema-qualified */
-	{
-		size_t		l = strlen(b);
-
-		return l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
-			(l == 12 || b[l - 13] == '.');
-	}
+		 (l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
+		  (l == 12 || b[l - 13] == '.')));
+	pfree(buf);
+	return r;
 }
 
 /* is a declared type an array (int[], text [ ], varchar(3)[2])? */
