@@ -61,6 +61,11 @@ jobs:
       - name: Run the differential check
         run: make differentialcheck PG_CONFIG="$PG_CONFIG"
 
+      # Also runs after installcheck. It drops and re-creates the plx
+      # extension in contrib_regression.
+      - name: Run the corpus check
+        run: make corpuscheck PG_CONFIG="$PG_CONFIG"
+
       - name: Show diffs on failure
         if: failure()
         run: |

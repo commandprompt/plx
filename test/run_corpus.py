@@ -7,7 +7,8 @@ same order. Only trailing spaces and blank lines at either end are ignored.
 psql prints NULL and the empty string the same way, so they compare equal.
 Reject-* categories PASS when transpile/exec raises an ERROR.
 
-Usage: python3 test/run_corpus.py
+Usage: make corpuscheck                  (runs it against contrib_regression)
+       python3 test/run_corpus.py
        python3 test/run_corpus.py --selftest   (check the comparison only, no server)
 
 A self-test of the comparison runs first, before the runner touches the
@@ -175,6 +176,9 @@ def main():
         sys.exit("run_corpus.py self-test failed:\n  " + "\n  ".join(failures))
     if sys.argv[1:] == ["--selftest"]:
         return 0
+    if not shutil.which(PSQL):
+        sys.exit("run_corpus.py: cannot run psql (%s). Put psql on PATH or "
+                 "set PLX_PSQL to its full path." % PSQL)
     cases = json.load(open(os.path.join(HERE, "corpus.json")))["cases"]
     # fresh extension
     psql("DROP EXTENSION IF EXISTS plx CASCADE; CREATE EXTENSION plx;")

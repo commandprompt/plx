@@ -266,24 +266,27 @@ bench/                      benchmark harness and results
 
 ## Tests
 
-Caution: `test/run_corpus.py` drops and re-creates the plx extension in its
-database, which drops every plx function there. Point it at a test database.
-It and `test/fuzz.py` use the first `psql` on `PATH` (or `PLX_PSQL`) and the
-usual libpq variables (`PGHOST`, `PGPORT`, `PGDATABASE`).
+Caution: `make corpuscheck` (`test/run_corpus.py`) drops and re-creates the
+plx extension in its database, which drops every plx function there. The make
+target uses `contrib_regression`. Run by hand, `test/run_corpus.py` uses the
+database in `PGDATABASE`, so point that at a test database. It and
+`test/fuzz.py` use the first `psql` on `PATH` (or
+`PLX_PSQL`) and the usual libpq variables (`PGHOST`, `PGPORT`, `PGDATABASE`).
 
 ```
 make installcheck            # pg_regress suite
 make differentialcheck       # each dialect against a plpgsql reference
+make corpuscheck             # Ruby corpus against recorded output
 make metacheck               # META.json against the PGXN spec (no server)
-python3 test/run_corpus.py   # additional Ruby corpus runner
 python3 test/fuzz.py         # transpiler fuzzer
 ```
 
-`make installcheck` and `make differentialcheck` run against an installed plx on
-a running server; run `differentialcheck` after `installcheck`, which creates
-the `contrib_regression` database it uses. The expected output is in
-`test/expected/`. CI runs installcheck, differentialcheck, and metacheck on
-PostgreSQL 13 through 18.
+`make installcheck`, `make differentialcheck` and `make corpuscheck` run
+against an installed plx on a running server. Run `differentialcheck` and
+`corpuscheck` after `installcheck`, which creates the `contrib_regression`
+database they use. The make targets take psql from `PG_CONFIG --bindir`. The
+expected output is in `test/expected/`. CI runs installcheck,
+differentialcheck, corpuscheck, and metacheck on PostgreSQL 13 through 18.
 
 The fuzzer needs a database where plx is installed. After installcheck, run it
 with `PGDATABASE=contrib_regression`. It stops with an error when the plx

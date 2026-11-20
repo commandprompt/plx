@@ -180,9 +180,10 @@ is the record of what each dialect accepts and what plpgsql it produces.
 
 `test/run_corpus.py` replays a corpus of Ruby programs and compares their
 output to a recorded expectation, including the programs that are supposed to
-be rejected. You run it by hand. `make differentialcheck` runs only its
-self-test (`python3 test/run_corpus.py --selftest`), which checks the
-comparison and needs no server.
+be rejected. `make corpuscheck` runs it against `contrib_regression`, and CI
+runs that target. `make differentialcheck` also runs its self-test
+(`python3 test/run_corpus.py --selftest`), which checks the comparison and
+needs no server.
 
 `test/fuzz.py` feeds mutated and pathological sources to every front end. It
 asserts nothing about the output; it asserts that the transpiler does not
