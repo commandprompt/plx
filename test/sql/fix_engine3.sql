@@ -316,3 +316,44 @@ for (i = 0; i < n; i++) { }
 let r = fetch_one("SELECT 5 AS i");
 return `${r.i + i}`;
 $body$;
+-- R2-C10 (PR 24 review r2 c1[0]): an exclusive loop bound becomes (HI) - 1 or
+-- (HI) + 1. The bound is parenthesized, because SQL binds + and - tighter than
+-- << >> & | #, so n >> 1 - 1 would be n >> 0.
+CREATE FUNCTION r2c10_js(n int) RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+for (let i = 0; i < n >> 1; i++) { s += `${i} `; }
+for (let i = 0; i < n << 1; i += 3) { s += `${i};`; }
+return s;
+$$;
+CREATE FUNCTION r2c10_ts(n int) RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+for (let i = 0; i < n >> 1; i++) { s += `${i} `; }
+return s;
+$$;
+CREATE FUNCTION r2c10_php(n int) RETURNS text LANGUAGE plxphp AS $$
+$s = "";
+for ($i = 0; $i < $n >> 1; $i++) { $s .= "$i "; }
+return $s;
+$$;
+CREATE FUNCTION r2c10_py(n int) RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+for i in range(n >> 1):
+    s += f"{i} "
+for i in range(n, n >> 1, -1):
+    s += f"{i},"
+for i in range(10, n | 1, -2):
+    s += f"{i};"
+return s
+$$;
+CREATE FUNCTION r2c10_rb(n int) RETURNS text LANGUAGE plxruby AS $$
+s = ''
+for i in 0...n >> 1
+  s << "#{i} "
+end
+(0...n & 6).each do |j|
+  s << "#{j},"
+end
+return s
+$$;
+SELECT r2c10_js(6) AS js, r2c10_ts(6) AS ts, r2c10_php(6) AS php, r2c10_py(6) AS py, r2c10_rb(6) AS rb;
+-- js: 0 1 2 0;3;6;9;  ts: 0 1 2  php: 0 1 2  py: 0 1 2 6,5,4,10;8;  rb: 0 1 2 0,1,2,3,4,5,

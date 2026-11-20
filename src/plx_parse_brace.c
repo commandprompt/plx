@@ -772,7 +772,7 @@ parse_for_brace(Ctx *cx, int ind)
 		start = o->len;
 		plx_indent(o, ind);
 		if (lt)
-			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n", var, lo, hi,
+			appendStringInfo(o, "FOR %s IN %s..((%s) - 1)%s%s LOOP\n", var, lo, hi,
 							 step ? " BY " : "", step ? step : "");
 		else
 			appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", var, lo, hi,

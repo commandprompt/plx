@@ -288,9 +288,9 @@ parse_for(Ctx *cx, int ind)
 	plx_indent(o, ind);
 	if (ctr)
 		appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", ctr, lo,
-						 exclusive ? "(" : "", hi, exclusive ? " - 1)" : "");
+						 exclusive ? "((" : "", hi, exclusive ? ") - 1)" : "");
 	else if (exclusive)
-		appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
+		appendStringInfo(o, "FOR %.*s IN %s..((%s) - 1) LOOP\n",
 						 cx->t[var_a].len, cx->t[var_a].s, lo, hi);
 	else
 		appendStringInfo(o, "FOR %.*s IN %s..%s LOOP\n",
@@ -469,7 +469,7 @@ parse_iter(Ctx *cx, int a, int do_pos, int e, int ind)
 			rb_index_init(cx, var1_a, var2_a, ind);
 		plx_indent(o, ind);
 		if (excl)
-			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1) LOOP\n",
+			appendStringInfo(o, "FOR %.*s IN %s..((%s) - 1) LOOP\n",
 							 cx->t[var1_a].len, cx->t[var1_a].s, lo, hi);
 		else
 			appendStringInfo(o, "FOR %.*s IN %s..%s LOOP\n",

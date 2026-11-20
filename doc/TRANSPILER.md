@@ -226,7 +226,7 @@ FOR v IN [REVERSE] LO'..HI' [BY k'] LOOP … END LOOP;
 ```
 
 Fixes folded in:
-- **Exclusive `...` is a property of the range node**, applied on every path: `LO'..(HI' - 1)`. So `(0...9).step(3)` → `FOR v IN 0..(9 - 1) BY 3 LOOP` (yields 0,3,6; endpoint 9 correctly excluded). Guard the `(HI-1)` rewrite against INT_MIN underflow.
+- **Exclusive `...` is a property of the range node**, applied on every path: `LO'..((HI') - 1)`. So `(0...9).step(3)` → `FOR v IN 0..((9) - 1) BY 3 LOOP` (yields 0,3,6; endpoint 9 correctly excluded). Guard the `(HI-1)` rewrite against INT_MIN underflow.
 - `downto` → `REVERSE HI'..LO'`. `upto` → ascending.
 - **`.step(k)` with a literal negative k** → `FOR v IN REVERSE LO'..HI' BY (-k) LOOP` (Numeric#step limit is inclusive; no `-1`). Never emit `BY <negative>`.
 - **`.step(k)` with a non-literal k** → emit ascending `BY k'` and **document that k must be `>0` at runtime** (plpgsql cannot pick direction dynamically); optionally a CREATE-time NOTICE.

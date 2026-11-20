@@ -707,6 +707,12 @@ not here.
 
 #### Several dialects
 
+- plxjs, plxts, plxphp, plxpython3, plxruby: a loop bound that used `<<`,
+  `>>`, `&`, `|` or `#`, such as `i < n >> 1` or `range(n >> 1)`, gave the
+  wrong number of iterations with no error. plx turns an exclusive bound HI
+  into `HI - 1` (or `HI + 1` for a `range()` with a negative step), and SQL
+  binds `-` and `+` tighter than these operators, so `n >> 1 - 1` was
+  `n >> 0`. plx now writes `(HI) - 1`.
 - plxjs, plxts, plxpython3, plxruby: when plx's schema name was 50 bytes or
   longer (fewer if it needs quotes), the second string append to a local
   compiled to numeric addition and failed at run time with
