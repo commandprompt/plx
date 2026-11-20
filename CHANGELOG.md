@@ -162,6 +162,13 @@ Each entry names the dialects it affects.
   where `$x` held 5. They now put the text `$x`, `${x}` or `#{x}` there, as
   in a string value. A plxpython3 f-string is unchanged: `\{x}` keeps the
   backslash and still interpolates, as in Python.
+- **A quote or brace inside an interpolation does not end it** (plxruby,
+  plxpython3, plxjs, plxts, plxphp). plx ended an interpolated expression at
+  the first `}`, even inside a string in the expression, so plxpython3
+  `f"{'}'}"` gave `'}` instead of `}`. It now gives `}`. Other forms that
+  failed now work: the Ruby idiom `"#{s == "a" ? "A" : "other"}"`, Python
+  `f"{concat('}', x)}"`, and `?`, `:` and `**` inside a string nested in an
+  interpolation, such as Ruby `"[#{"a?b:c"}]"`, which are now text.
 - **An integer literal with a leading zero is octal** (plxruby, plxphp,
   plxjs), as in the source language, so `0755` is 493, not 755. plxpython3 and
   plxts reject such a literal at `CREATE FUNCTION` and suggest `0o755`.
@@ -356,6 +363,11 @@ Each entry names the dialects it affects.
   Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
   because SQL read the literal as a number. Convert the number with
   `strconv.Itoa` or `fmt.Sprintf`.
+- **`strconv.Itoa(x)` gives a string.** It was lowered to `(x)::integer`, so
+  its result compared and sorted as a number:
+  `strconv.Itoa(10) < strconv.Itoa(9)` gave false. It is now `(x)::text`, so
+  that comparison gives true, as in Go. Assigning the result to a `string`
+  variable gives the same text as before.
 
 #### plxcobol
 
@@ -415,6 +427,10 @@ Each entry names the dialects it affects.
   `length(rtrim(x))`, so `LEN('abc   ')` gives 3 instead of 6. T-SQL `^`, `&`
   and `|` bind as tightly as `+` and `-`, but PostgreSQL binds `#`, `&` and `|`
   more loosely, so `1 ^ 2 + 3` gives 4 in plx, not 6. Write `(1 ^ 2) + 3`.
+- **Unary `~` applies to its operand only**, as in SQL Server, where it binds
+  more tightly than any other operator. plx now writes `~a` as `(~a)`. Before,
+  it passed `~` through, and PostgreSQL binds it more loosely than `+` and
+  `*`, so `~1 + 2` computed `~(1 + 2)` and gave -4. It now gives 0.
 - **`RAISERROR` with severity 10 or lower prints a notice and continues.** It
   used to raise an error, so the progress-message idiom
   `RAISERROR('step', 0, 1) WITH NOWAIT` stopped the function on its first run.
@@ -716,11 +732,6 @@ not here.
 - plxjs, plxts: a `?` and `:` inside a template literal are now text. They used
   to be read as a ternary, which turned the literal into broken SQL and made
   the function fail when it ran.
-- plxruby, plxpython3, plxjs, plxts, plxphp: a quote or brace inside an
-  interpolated expression no longer ends the string or the interpolation
-  early. The Ruby idiom `"#{s == "a" ? "A" : "other"}"` now works, Python
-  `f"{concat('}', x)}"` gives the right text, and `?`, `:` and `**` inside a
-  string nested in an interpolation, such as Ruby `"[#{"a?b:c"}]"`, are text.
 - plxjs, plxts, plxphp: a `switch` arm may now end with `continue` or with
   `break label`. Before, valid code was rejected with
   `switch fall-through is not supported` or
@@ -770,7 +781,6 @@ not here.
 
 #### plxgo
 
-- `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
 - `+` between strings now joins them (#18, #23). plx writes it as `||` when
   every operand is a string literal, a `string` local, a `text` or `varchar`
   parameter, or a call that returns a string. If any operand has a type plx
@@ -827,6 +837,17 @@ not here.
   Before, the function was rejected with `syntax error at or near "MAX"`.
   `(MAX)` on any other type, such as `CONVERT(numeric(MAX), x)` or
   `CONVERT(char(MAX), x)`, still fails, as it does in SQL Server.
+- `+` joins strings, and `SET @s += e` appends to a string variable. Before,
+  both failed when the function ran, for example `'1' + '2'` with
+  `operator is not unique: unknown + unknown` and `SET @s += 'b'` with
+  `operator does not exist: character varying + unknown`. plx writes `+` as
+  `||` only when every operand is a known string, such as a `VARCHAR`
+  variable, a string literal or `ISNULL(@s, '0')`, so `'1' + '2'` gives `12`
+  and `ISNULL(@s, '0') + '5'` gives `05`. `SET @s += e` becomes `||` only when
+  `@s` is a string variable and `e` is a known string. Any other `+` stays
+  `+`: `'1' + 2` still adds and gives 3, and a string variable next to a
+  number still fails when the function runs. A NULL operand makes the result
+  NULL. See doc/plxtsql.md for the full list of known strings.
 - `DECLARE`, `CAST` and `CONVERT` accept SQL Server's type names of several
   words, such as `CHARACTER VARYING(n)` and `NATIONAL CHARACTER VARYING(n)`.
   Before, `DECLARE` rejected them. A value of one of the variable-length
