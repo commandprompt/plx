@@ -150,6 +150,8 @@ typedef struct PlxCtx
 	bool		retset;
 	char	  **pspell;			/* per parameter: the first spelling the body
 								 * used for it (see plx_is_param) */
+	struct HTAB *appended;		/* plxphp: names that are the target of a .=
+								 * somewhere in the body (see php_appended) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
 } Ctx;
 
@@ -184,6 +186,7 @@ void plx_skip_seps(Ctx *cx);
 bool plx_is_ident(char c);
 bool plx_is_ident_start(char c);
 bool plx_tok_is(Tok *tk, const char *op);
+bool plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len);
 bool plx_name_eq(Tok *tk, const char *w);
 int plx_stmt_end(Ctx *cx, int from);
 void plx_indent(StringInfo o, int n);

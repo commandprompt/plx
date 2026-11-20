@@ -522,10 +522,13 @@ read_after_loop(Ctx *cx, int from, Tok *v)
 	{
 		Tok		   *t = &cx->t[i];
 
+		CHECK_FOR_INTERRUPTS();
 		if (t->kind == T_LBRACE)
 			depth++;
 		else if (t->kind == T_RBRACE)
 			depth = depth > 0 ? depth - 1 : 0;
+		if (plx_string_reads(cx, t, v->s, v->len))
+			return true;
 		if (!same_ident(t, v))
 			continue;
 		if (depth == 0 && i > 0)
@@ -583,6 +586,8 @@ read_before_for(Ctx *cx, int from, int to, Tok *v)
 			depth++;
 		else if (t->kind == T_RBRACE)
 			depth = depth > 0 ? depth - 1 : 0;
+		if (plx_string_reads(cx, t, v->s, v->len))
+			return true;
 		if (!same_ident(t, v))
 			continue;
 		pv = &cx->t[i - 1];
@@ -637,7 +642,8 @@ read_by_enclosing_loop(Ctx *cx, int for_tok, Tok *v)
 				break;
 		}
 		for (i = lp; i < b->body_tok; i++)
-			if (same_ident(&cx->t[i], v))
+			if (same_ident(&cx->t[i], v) ||
+				plx_string_reads(cx, &cx->t[i], v->s, v->len))
 				return true;
 		if (read_before_for(cx, b->body_tok + 1, for_tok, v))
 			return true;

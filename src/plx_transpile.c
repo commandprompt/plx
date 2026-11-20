@@ -782,23 +782,32 @@ type_norm(const char *typ, char *buf, int bufsz)
 static bool
 is_builder_type(const char *typ)
 {
-	char		buf[64];
-	const char *b = buf;
+	char	   *buf;
+	const char *b;
+	size_t		l;
+	bool		r;
 
-	if (!typ || !type_norm(typ, buf, sizeof(buf)))
+	if (!typ)
 		return false;
+
+	/*
+	 * The buffer fits any name: after an append the type is plx_strbuild
+	 * qualified with plx's schema, which may be up to NAMEDATALEN - 1 bytes
+	 * long and quoted (see plx_ext_object).
+	 */
+	buf = palloc(strlen(typ) + 2);
+	(void) type_norm(typ, buf, strlen(typ) + 2);
+	b = buf;
 	if (strncmp(b, "pg_catalog.", 11) == 0)
 		b += 11;
-	if (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
-		strcmp(b, "character varying") == 0)
-		return true;
+	l = strlen(b);
+	r = (strcmp(b, "text") == 0 || strcmp(b, "varchar") == 0 ||
+		 strcmp(b, "character varying") == 0 ||
 	/* plx_strbuild, bare or schema-qualified */
-	{
-		size_t		l = strlen(b);
-
-		return l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
-			(l == 12 || b[l - 13] == '.');
-	}
+		 (l >= 12 && strcmp(b + l - 12, "plx_strbuild") == 0 &&
+		  (l == 12 || b[l - 13] == '.')));
+	pfree(buf);
+	return r;
 }
 
 /* is a declared type an array (int[], text [ ], varchar(3)[2])? */
@@ -1265,6 +1274,71 @@ plx_local_key(const char *name, int len, char *key)
 	memset(key, 0, NAMEDATALEN);
 	strlcpy(key, k, NAMEDATALEN);
 	pfree(k);
+}
+
+/*
+ * plxphp: is the name at [i, j) of expression text s a variable read, not a
+ * function name, a property after -> or ::, or the start of a subscript or
+ * property access? The lexer drops the $ sigil from a span's first token, so
+ * the sigil cannot be relied on.
+ */
+static bool
+php_value_ref(const char *s, int len, int i, int j)
+{
+	int			k = i - 1;
+
+	if (k >= 0 && s[k] == '$')
+		k--;
+	while (k >= 0 && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+		k--;
+	if (k >= 0 && (s[k] == ':' || (s[k] == '>' && k > 0 && s[k - 1] == '-')))
+		return false;
+	return !(j < len && (s[j] == '(' || s[j] == '[' || s[j] == ':' ||
+						 (s[j] == '-' && j + 1 < len && s[j + 1] == '>')));
+}
+
+/*
+ * plxphp: is name the target of a .= anywhere in the body? Such a local is
+ * declared as the string builder (see the append lowering in the statement
+ * emitter), and PostgreSQL cannot choose a || for a builder beside an
+ * untyped literal, so the rewriter reads it as text. The source order does
+ * not matter: a read before the first .= sees the same declared type. The set
+ * is built by one scan of the tokens, on first use.
+ */
+static bool
+php_appended(Ctx *cx, const char *name, int len)
+{
+	char		key[NAMEDATALEN];
+
+	if (!cx->appended)
+	{
+		HASHCTL		ctl;
+		int			k;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = NAMEDATALEN;
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->appended = hash_create("plx appended", 16, &ctl,
+								   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->appended = hash_create("plx appended", 16, &ctl,
+								   HASH_ELEM | HASH_CONTEXT);	/* string keys */
+#endif
+		for (k = 0; cx->t[k].kind != T_EOF; k++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			if (cx->t[k].kind == T_IDENT && cx->t[k + 1].kind == T_DOT &&
+				plx_tok_is(&cx->t[k + 2], "="))
+			{
+				plx_local_key(cx->t[k].s, cx->t[k].len, key);
+				(void) hash_search(cx->appended, key, HASH_ENTER, NULL);
+			}
+		}
+	}
+	plx_local_key(name, len, key);
+	return hash_search(cx->appended, key, HASH_FIND, NULL) != NULL;
 }
 
 void
@@ -2229,6 +2303,63 @@ group_close(Ctx *cx, const char *s, int len, int i)
 }
 
 /*
+ * Bracket matches and ** positions of a whole expression, found in one pass so
+ * that rewrite_expr_inner need not call group_close and find_pow at every
+ * bracket: that took time quadratic in the nesting depth. close[i] is what
+ * group_close(i) returns for a bracket at i that is not inside a string, and
+ * -2 for any other position. npow[i] counts the ** operators (as find_pow
+ * sees them) that start before i, so a group (o, e) holds one when
+ * npow[e - 1] > npow[o + 1].
+ */
+typedef struct GroupMap
+{
+	int		   *close;
+	int		   *npow;
+} GroupMap;
+
+static void
+group_map(Ctx *cx, const char *s, int len, GroupMap *gm)
+{
+	int		   *stack = palloc(sizeof(int) * (len + 1));
+	int			sp = 0,
+				pows = 0,
+				i;
+
+	gm->close = palloc(sizeof(int) * (len + 1));
+	gm->npow = palloc(sizeof(int) * (len + 1));
+	for (i = 0; i <= len; i++)
+		gm->close[i] = -2;
+	for (i = 0; i < len; i++)
+	{
+		int			e;
+
+		CHECK_FOR_INTERRUPTS();
+		gm->npow[i] = pows;
+		e = skip_string(cx, s, len, i);
+		if (e >= 0)
+		{
+			while (++i < e)
+				gm->npow[i] = pows;
+			i = e - 1;
+			continue;
+		}
+		if (s[i] == '(' || s[i] == '[' || s[i] == '{')
+		{
+			gm->close[i] = -1;
+			stack[sp++] = i;
+		}
+		else if ((s[i] == ')' || s[i] == ']' || s[i] == '}') && sp > 0)
+			gm->close[stack[--sp]] = i;
+		else if (s[i] == '*' && i + 1 < len && s[i + 1] == '*' &&
+				 (i == 0 || s[i - 1] != '*') &&
+				 !(i + 2 < len && (s[i + 2] == '*' || s[i + 2] == '=')))
+			pows++;
+	}
+	gm->npow[len] = pows;
+	pfree(stack);
+}
+
+/*
  * Start of the operand that ends just before the ** at p: a name, number,
  * string or bracketed group, with any calls, subscripts and .field parts.
  * A '.' is not crossed when it is the dialect's string-concatenation operator.
@@ -2501,6 +2632,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	signed char bw_prev[PLX_BW_MAXDEPTH];	/* see bitwise_prec */
 	int			bw_depth = 0;
 	bool		bw_on = !names_fold_case(cx);
+	GroupMap	gm = {NULL, NULL};	/* built at the first bracket */
 
 	memset(bw_prev, 0, sizeof(bw_prev));
 
@@ -2570,6 +2702,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	while (i < len)
 	{
 		char		c = s[i];
+
+		CHECK_FOR_INTERRUPTS();
 
 		/* Python: an f-string interpolation can hold a string the lexer never saw */
 		if (surf->fstrings && plx_is_ident_start(c) && (i == 0 || !plx_is_ident(s[i - 1])))
@@ -2831,6 +2965,13 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "OR");
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
+			else if (surf->concat_op && php_value_ref(s, len, i, j) &&
+					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl))
+			{
+				/* a .= target is a string builder: read it as text */
+				note_name_ref(cx, s, len, i, j);
+				appendStringInfo(&out, "(%.*s)::text", wl, s + i);
+			}
 			else
 			{
 				note_name_ref(cx, s, len, i, j);
@@ -3099,9 +3240,21 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		 */
 		if ((c == '(' || c == '[') && !names_fold_case(cx))
 		{
-			int			e = group_close(cx, s, len, i);
+			int			e;
+			bool		haspow;
 
-			if (e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0)
+			if (gm.close == NULL)
+				group_map(cx, s, len, &gm);
+			e = gm.close[i];
+			if (e >= -1)
+				haspow = e > i && gm.npow[e - 1] > gm.npow[i + 1];
+			else
+			{
+				/* a bracket the one pass saw inside a string: ask directly */
+				e = group_close(cx, s, len, i);
+				haspow = e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0;
+			}
+			if (e > i && haspow)
 			{
 				char	   *inner = plx_rewrite_expr(cx, s + i + 1, e - i - 1,
 													 c == '(' ? boolctx : false);
@@ -3211,6 +3364,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		}
 		appendStringInfoChar(&out, c);
 		i++;
+	}
+	if (gm.close)
+	{
+		pfree(gm.close);
+		pfree(gm.npow);
 	}
 	return out.data;
 }
@@ -3471,13 +3629,30 @@ plx_fin_pop(Ctx *cx, PlxFin *f)
 	cx->fin = f->outer;
 }
 
-/* Record a loop label, so a labeled break/continue knows which frame its
- * target loop is in. */
+/*
+ * Record a loop label, so a labeled break/continue knows which frame its
+ * target loop is in. plpgsql reads labels as it reads names, ignoring case,
+ * and an exit goes to the innermost loop with that label. A label spelled
+ * like an enclosing loop's label but for case would make an exit meant for
+ * the outer loop go to the inner one: reject it, as for variables. A label
+ * spelled exactly the same way keeps meaning the innermost loop.
+ */
 void
 plx_label_note(Ctx *cx, const char *name, int len)
 {
-	PlxLabel   *l = palloc(sizeof(PlxLabel));
+	PlxLabel   *l;
 
+	if (!names_fold_case(cx))
+	{
+		char	   *key = downcase_truncate_identifier(name, len, false);
+
+		for (l = cx->labels; l; l = l->next)
+			if (!same_spelling(l->name, name, len) &&
+				strcmp(downcase_truncate_identifier(l->name, strlen(l->name),
+													false), key) == 0)
+				name_clash(cx, l->name, name, len);
+	}
+	l = palloc(sizeof(PlxLabel));
 	l->name = pnstrdup(name, len);
 	l->fin_id = cx->fin ? cx->fin->id : 0;
 	l->next = cx->labels;
@@ -4047,7 +4222,15 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 
 			if (!full)
 			{
-				if (c == '"' || c == '\\')
+				/*
+				 * \" and \\, and a backslash before an interpolation (\$i,
+				 * \${i}, \#{i}), which makes it plain text as it does in a
+				 * string value. Not in a Python f-string, where f"\{i}" keeps
+				 * the backslash and still interpolates.
+				 */
+				if (c == '"' || c == '\\' ||
+					(can_interp && !tk->fstr &&
+					 interp_at(cx->surf, false, true, s + 1, e, &exs, &exl, &nx)))
 				{
 					appendStringInfoChar(&lit, c);
 					s += 2;
@@ -4083,6 +4266,59 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 	pfree(lit.data);
 	*segs_out = segs;
 	return n;
+}
+
+/*
+ * Does an interpolation in string token tk name the variable [name, len)? A
+ * check that must see every read of a variable uses this, because "${i}",
+ * "#{i}", "$i" and f"{i}" read i too. Any whole-word match in the
+ * interpolated text counts, except a field name after "." or "->" (r.i,
+ * $r->i). A match inside a quoted key such as $r['i'] still counts,
+ * which can only make such a check stricter.
+ */
+bool
+plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
+{
+	PlxTplSeg  *segs;
+	int			n,
+				k,
+				j;
+	bool		found = false;
+
+	if (tk->kind != T_STRING)
+		return false;
+	/* most strings do not hold the name at all: skip the split for them */
+	for (j = 0; j + len <= tk->len; j++)
+		if (strncmp(tk->s + j, name, len) == 0)
+			break;
+	if (j + len > tk->len)
+		return false;
+	n = tpl_split(cx, tk, false, &segs);
+	for (k = 0; k < n; k++)
+	{
+		const char *s = segs[k].s;
+		int			sl = segs[k].len;
+
+		for (j = 0; segs[k].interp && !found && j + len <= sl; j++)
+			if (strncmp(s + j, name, len) == 0 &&
+				(j == 0 || !plx_is_ident(s[j - 1])) &&
+				(j + len == sl || !plx_is_ident(s[j + len])))
+			{
+				int			p = j - 1;
+
+				while (p >= 0 && (s[p] == ' ' || s[p] == '\t'))
+					p--;
+				/* a field follows one "." or "->"; ".." and "..." are ranges */
+				if (p < 0 ||
+					!((s[p] == '.' && (p == 0 || s[p - 1] != '.')) ||
+					  (s[p] == '>' && p > 0 && s[p - 1] == '-')))
+					found = true;
+			}
+		pfree(segs[k].s);
+	}
+	if (segs)
+		pfree(segs);
+	return found;
 }
 
 /* ident(e) / raw(e) wrapping the whole interpolation? Sets [*is, *is + *il). */

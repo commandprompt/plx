@@ -149,6 +149,19 @@ Each entry names the dialects it affects.
   counting-loop variable that spells an earlier local or parameter another
   way, such as `for (let I = ...)` beside `let i`, is rejected too; before, it
   hid the local. Rename one of the names.
+- **Nested loop labels that differ only in case are rejected** (plxjs, plxts,
+  plxphp, plxpython3, plxruby). plpgsql ignores case in labels too, so in
+  `Outer: for ... { outer: for ... { continue Outer; } }` the `continue` went
+  to the inner loop and the function returned a wrong value. `CREATE FUNCTION`
+  now rejects a loop label that spells the label of an enclosing loop another
+  way. Rename one of the labels.
+- **An escaped interpolation in SQL text is plain text** (plxphp, plxjs,
+  plxts, plxruby). In the SQL argument of `query`, `fetch_one` and the other
+  SQL calls, `\$x`, `\${x}` and `\#{x}` put a backslash and the value of `x`
+  into the SQL, so plxphp `fetch_one("SELECT '\$x' AS v")` returned `\5`
+  where `$x` held 5. They now put the text `$x`, `${x}` or `#{x}` there, as
+  in a string value. A plxpython3 f-string is unchanged: `\{x}` keeps the
+  backslash and still interpolates, as in Python.
 - **An integer literal with a leading zero is octal** (plxruby, plxphp,
   plxjs), as in the source language, so `0755` is 493, not 755. plxpython3 and
   plxts reject such a literal at `CREATE FUNCTION` and suggest `0o755`.
@@ -218,7 +231,11 @@ Each entry names the dialects it affects.
   final value. Also rejected now: a counting `for` whose variable an enclosing
   loop reads again before the `for` (in its condition, or earlier in its body),
   and in plxjs and plxts a `for (var i ...)` whose variable is read after the
-  loop. Plain counting loops compile as before.
+  loop. A read inside a string interpolation counts, as in `${i}` or
+  `"stopped at $i"`, including the SQL text of `query` and `fetch_one`. An
+  escaped interpolation such as `\$i` or `\${i}` is text, not a read, and
+  neither is a field of the same name, such as `${r.i}`. Plain counting loops
+  compile as before.
 - **`throw` of an expression that is not a constructor call is rejected**
   (plxjs, plxts, plxphp), for example `throw a(x) + b(y)`. Before, it silently
   raised only the first call's first argument.
@@ -537,6 +554,13 @@ PUBLIC has USAGE by default).
   `CONVERT`, `IIF`, `CHARINDEX` or `RAISE_APPLICATION_ERROR` calls with no
   comma. These now transpile in linear time, and `statement_timeout` can
   cancel the transpile.
+- **Quadratic, uninterruptible transpile time for nested brackets.** In
+  plxjs, plxts, plxphp, plxpython3 and plxruby, the rewriter for `**` scanned
+  each bracketed group to its end at every `(` or `[`, so deeply nested
+  brackets took quadratic time: 60,000 levels of `("x" + ...)` took 44
+  seconds, and `statement_timeout` could not cancel it. The rewriter now finds
+  every group in one pass, which takes 33 milliseconds for the same body, and
+  checks for interrupts as it goes.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.
@@ -592,6 +616,12 @@ not here.
 
 #### Several dialects
 
+- plxjs, plxts, plxpython3, plxruby: when plx's schema name was 50 bytes or
+  longer (fewer if it needs quotes), the second string append to a local
+  compiled to numeric addition and failed at run time with
+  `operator does not exist: ... plx_strbuild + unknown`. plxruby rejected the
+  body at `CREATE FUNCTION`. Appends now work with any schema name. Version
+  2.0.1 was not affected, because it did not qualify the type with the schema.
 - plxjs, plxts, plxphp, plxruby, plxpython3: a `finally`/`ensure` body that
   raised an error on the normal path ran a second time from the error path.
   It now runs once.
@@ -626,6 +656,13 @@ not here.
   a `class` or `lambda` statement is now reported as `class is not supported`
   or `lambda is not supported` instead of `def is not supported`.
 
+#### plxphp
+
+- The `.` operator now works on a string built with `.=`, as `doc/plxphp.md`
+  shows. `"names: " . $s` failed at run time with
+  `operator is not unique: unknown || plx_strbuild`, because `.=` makes `$s` a
+  `plx_strbuild`. plx now reads such a variable as `text` in expressions.
+
 #### plxts
 
 - `catch (e: unknown)` (a catch variable with a type annotation) now binds
@@ -634,6 +671,10 @@ not here.
 
 #### plxpython3
 
+- `range(a, b, step)` with a negative literal step, such as
+  `range(10, 0, -3)`, now counts down as in Python. It failed at run time with
+  `BY value of FOR loop must be greater than zero`. A negative step held in a
+  variable still fails that way.
 - `call(f"...")` emitted an unterminated quoted identifier. An f-string
   procedure name is now rejected.
 

@@ -77,7 +77,10 @@ else:
 ### Loops
 
 `for ... in range(...)` is an integer loop. `range(n)` is 0 to n-1, `range(a, b)`
-is a to b-1, `range(a, b, step)` adds a step. As in Python, the loop variable
+is a to b-1, `range(a, b, step)` adds a step. A negative step counts down, as in
+`range(10, 0, -3)` (10, 7, 4, 1), but it must be written as a literal: a step
+held in a variable must be positive, or the function stops with
+`BY value of FOR loop must be greater than zero`. As in Python, the loop variable
 keeps its last value after the loop ends or after a `break`. If the range is
 empty, the variable keeps the value it had before the loop.
 
