@@ -220,8 +220,50 @@ WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
   AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'plx');
 CREATE TEMP TABLE plx_fresh AS SELECT * FROM plx_objects;
 SELECT count(*) > 30 AS has_objects FROM plx_fresh;
+-- A4: nested domains, arrays of domains, range types and composite fields
+-- over them get the same collations from the update as from a fresh
+-- install. a4s_make builds the same objects under either version.
+CREATE PROCEDURE a4s_make() LANGUAGE plpgsql AS $p$
+BEGIN
+  CREATE DOMAIN a4s_d1 AS plx_strbuild;
+  CREATE DOMAIN a4s_d2 AS a4s_d1;
+  CREATE DOMAIN a4s_d3 AS a4s_d2;
+  CREATE DOMAIN a4s_da AS plx_strbuild[];
+  CREATE DOMAIN a4s_dd1a AS a4s_d1[];
+  CREATE TYPE a4s_r2 AS RANGE (subtype = a4s_d2);
+  CREATE TYPE a4s_comp AS (f_d2 a4s_d2, f_d1arr a4s_d1[], f_d3arr a4s_d3[],
+                           f_da a4s_da, f_sbarr plx_strbuild[]);
+  CREATE TABLE a4s_t (c_d2 a4s_d2, c_d3 a4s_d3, c_d1arr a4s_d1[],
+                      c_d2arr a4s_d2[], c_dd1a a4s_dd1a, c_comp a4s_comp,
+                      c_r2 a4s_r2);
+  INSERT INTO a4s_t (c_d2, c_d3, c_d1arr, c_dd1a)
+  VALUES ('b', 'b', '{b}', '{b}'), ('a', 'a', '{a}', '{a}');
+END
+$p$;
+CREATE TEMP VIEW a4_scolls AS
+SELECT 'type ' || t.typname AS object, t.typcollation AS coll
+FROM pg_type t
+WHERE t.typname LIKE 'a4s\_%' OR t.typname LIKE '\_a4s\_%'
+UNION ALL
+SELECT 'column ' || c.relname || '.' || a.attname, a.attcollation
+FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+WHERE c.relname LIKE 'a4s\_%' AND a.attnum > 0 AND NOT a.attisdropped
+UNION ALL
+SELECT 'range ' || t.typname, r.rngcollation
+FROM pg_range r JOIN pg_type t ON t.oid = r.rngtypid
+WHERE t.typname LIKE 'a4s\_%';
+CALL a4s_make();
+CREATE TEMP TABLE a4_sfresh AS SELECT * FROM a4_scolls;
+-- the objects that have a collation on a fresh install
+SELECT object, coll FROM a4_sfresh WHERE coll <> 0
+ORDER BY object COLLATE "C";
+-- DROP EXTENSION ... CASCADE would keep the table and the composite type
+-- and drop only their columns, so drop them first.
+DROP TABLE a4s_t;
+DROP TYPE a4s_comp;
 DROP EXTENSION plx CASCADE;
 CREATE EXTENSION plx VERSION '2.0.0';
+CALL a4s_make();
 CREATE TABLE a4_old(v plx_strbuild);
 INSERT INTO a4_old VALUES ('b'), ('a'), ('b');
 -- A4: so do a domain column and a composite-type field made under 2.0.0
@@ -246,6 +288,13 @@ SELECT rngtypid::regtype, rngcollation FROM pg_range
 WHERE rngtypid IN ('a4_rng'::regtype, 'a4_drng'::regtype) ORDER BY rngtypid::regtype::text;
 SELECT a4_rng('a', 'c') @> 'b'::plx_strbuild AS rng_has,
        a4_drng('a', 'c') @> 'b'::a4_rdom AS drng_has;
+-- collations only a fresh install has, then collations only the update has
+SELECT * FROM a4_sfresh EXCEPT SELECT * FROM a4_scolls;
+SELECT * FROM a4_scolls EXCEPT SELECT * FROM a4_sfresh;
+SELECT c_d2 FROM a4s_t ORDER BY c_d2;
+SELECT c_d3 FROM a4s_t ORDER BY c_d3;
+SELECT c_d1arr FROM a4s_t ORDER BY c_d1arr;
+SELECT c_dd1a FROM a4s_t ORDER BY c_dd1a;
 -- The A4 test re-created the extension with search_path = fc, so it now
 -- lives in schema fc. Put it back in public, where the test files that run
 -- after this one expect it.

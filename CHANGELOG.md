@@ -415,9 +415,11 @@ the plx extension.
    ```
 
    The update records the extension as non-relocatable. It adds binary send
-   and receive functions to `plx_strbuild` and makes it collatable, which
-   includes existing columns, domains and range types over it. It also adds
-   the function that string appends call in 3.0.0. A view created before the
+   and receive functions to `plx_strbuild` and makes it collatable. It gives
+   the collation to every type built on `plx_strbuild` (its array type,
+   domains, domains over those domains, and their array types) and to
+   existing columns and range types of all of these, as a fresh install
+   does. It also adds the function that string appends call in 3.0.0. A view created before the
    update keeps no collation in its stored query until you re-create it.
 
    To check the result, run
@@ -562,9 +564,12 @@ not here.
   Binary `COPY`, binary protocol results, `ORDER BY`, `DISTINCT`, `GROUP BY`
   and `COLLATE` now work on it. These used to fail, for example when a string
   built with an append operator was used in a query that sorts or removes
-  duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on existing
-  `plx_strbuild` columns and on range types over `plx_strbuild` (or a domain
-  over it), so their constructors and operators work.
+  duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on the same
+  objects a fresh install does: `plx_strbuild`, every domain and array type
+  built on it at any depth (such as a domain over a domain, or an array of a
+  domain), and existing columns, composite-type fields and range types of
+  these types. So sorting and the range constructors and operators work on
+  them after the update.
 
 #### Several dialects
 

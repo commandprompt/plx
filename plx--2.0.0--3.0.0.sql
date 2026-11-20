@@ -32,37 +32,48 @@ ALTER TYPE plx_strbuild SET (RECEIVE = plx_sb_recv, SEND = plx_sb_send);
 
 /*
  * ALTER TYPE cannot make a type collatable, so set the collation in the
- * catalog, the way CREATE TYPE ... COLLATABLE = true records it: the default
- * collation on the type, its array type, and domains over either. Existing
- * table and composite-type columns of these types get it too, and so do
- * range types over them. A view created before the update keeps no
- * collation in its stored query until it is re-created.
+ * catalog, the way CREATE TYPE ... COLLATABLE = true records it. A fresh
+ * install gives the default collation to plx_strbuild and to every type
+ * built on it: its array type, a domain over any of these (also a domain
+ * over a domain), and the array type of any of these. Each statement
+ * below lists that whole set in plx_sb_types, by following typbasetype and
+ * typarray until nothing new turns up. Existing table and composite-type
+ * columns of these types get the collation too, and so do range types over
+ * them. A view created before the update keeps no collation in its stored
+ * query until it is re-created.
  */
+WITH RECURSIVE plx_sb_types(oid) AS (
+	SELECT 'plx_strbuild'::pg_catalog.regtype::pg_catalog.oid
+	UNION
+	SELECT t.oid
+	FROM plx_sb_types s JOIN pg_catalog.pg_type b ON b.oid = s.oid
+	JOIN pg_catalog.pg_type t
+	  ON t.oid = b.typarray OR (t.typtype = 'd' AND t.typbasetype = b.oid)
+)
 UPDATE pg_catalog.pg_type SET typcollation = 100
-WHERE typcollation = 0
-  AND (oid IN ('plx_strbuild'::pg_catalog.regtype,
-               'plx_strbuild[]'::pg_catalog.regtype)
-       OR (typtype = 'd'
-           AND typbasetype IN ('plx_strbuild'::pg_catalog.regtype,
-                               'plx_strbuild[]'::pg_catalog.regtype)));
+WHERE typcollation = 0 AND oid IN (SELECT oid FROM plx_sb_types);
 
-UPDATE pg_catalog.pg_attribute a SET attcollation = 100
-FROM pg_catalog.pg_type t
-WHERE a.atttypid = t.oid AND a.attcollation = 0 AND t.typcollation = 100
-  AND (t.oid IN ('plx_strbuild'::pg_catalog.regtype,
-                 'plx_strbuild[]'::pg_catalog.regtype)
-       OR (t.typtype = 'd'
-           AND t.typbasetype IN ('plx_strbuild'::pg_catalog.regtype,
-                                 'plx_strbuild[]'::pg_catalog.regtype)));
+WITH RECURSIVE plx_sb_types(oid) AS (
+	SELECT 'plx_strbuild'::pg_catalog.regtype::pg_catalog.oid
+	UNION
+	SELECT t.oid
+	FROM plx_sb_types s JOIN pg_catalog.pg_type b ON b.oid = s.oid
+	JOIN pg_catalog.pg_type t
+	  ON t.oid = b.typarray OR (t.typtype = 'd' AND t.typbasetype = b.oid)
+)
+UPDATE pg_catalog.pg_attribute SET attcollation = 100
+WHERE attcollation = 0 AND atttypid IN (SELECT oid FROM plx_sb_types);
 
-UPDATE pg_catalog.pg_range r SET rngcollation = 100
-FROM pg_catalog.pg_type t
-WHERE r.rngsubtype = t.oid AND r.rngcollation = 0 AND t.typcollation = 100
-  AND (t.oid IN ('plx_strbuild'::pg_catalog.regtype,
-                 'plx_strbuild[]'::pg_catalog.regtype)
-       OR (t.typtype = 'd'
-           AND t.typbasetype IN ('plx_strbuild'::pg_catalog.regtype,
-                                 'plx_strbuild[]'::pg_catalog.regtype)));
+WITH RECURSIVE plx_sb_types(oid) AS (
+	SELECT 'plx_strbuild'::pg_catalog.regtype::pg_catalog.oid
+	UNION
+	SELECT t.oid
+	FROM plx_sb_types s JOIN pg_catalog.pg_type b ON b.oid = s.oid
+	JOIN pg_catalog.pg_type t
+	  ON t.oid = b.typarray OR (t.typtype = 'd' AND t.typbasetype = b.oid)
+)
+UPDATE pg_catalog.pg_range SET rngcollation = 100
+WHERE rngcollation = 0 AND rngsubtype IN (SELECT oid FROM plx_sb_types);
 
 /*
  * The append operators of every dialect except plxcobol now call a STRICT
