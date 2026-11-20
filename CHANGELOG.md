@@ -181,7 +181,7 @@ Each entry names the dialects it affects.
   backslash and still interpolates, as in Python.
   plxphp `"\{$x}"` keeps the backslash and the braces and interpolates
   `$x`, as PHP does: with `$x` 5 it gives `\{5}`, in a string value and in
-  SQL. Before, it gave `\5` in a string value and `{5}` in SQL.
+  SQL. Before, it gave `{5}` in both.
 - **A quote or brace inside an interpolation does not end it** (plxruby,
   plxpython3, plxjs, plxts, plxphp). plx ended an interpolated expression at
   the first `}`, even inside a string in the expression, so plxpython3
@@ -559,10 +559,11 @@ the plx extension.
    appends and plxtsql integer conversions call in 3.0.0. An expression
    stored before the update keeps no collation until you re-create the
    object that holds it: a view's query, a generated column, a column
-   `DEFAULT`, and the body of a SQL-standard function (`BEGIN ATOMIC`).
-   Until then, sorting or comparing a `plx_strbuild` value in it fails with
+   `DEFAULT`, a `CHECK` constraint, a row security policy, and the body of a
+   SQL-standard function (`BEGIN ATOMIC`). Until then, `ORDER BY`,
+   `GREATEST` or `LEAST` on a `plx_strbuild` value in it fails with
    `could not determine which collation to use for string comparison`.
-   `CHECK` constraints and row security policies are not affected.
+   Comparison operators such as `<` and `=` still work.
 
    To check the result, run
    `SELECT extversion, extrelocatable FROM pg_extension WHERE extname = 'plx';`.

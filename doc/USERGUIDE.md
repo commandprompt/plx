@@ -727,6 +727,11 @@ Points to keep in mind:
     an integer type of a value whose type plx cannot see, which calls
     `plx_tsql_int4` (or `plx_tsql_int2`, `plx_tsql_int8`) the same way. See
     [LIMITATIONS.md](LIMITATIONS.md#constraints-shared-by-every-dialect).
+  - Grant `CREATE` on plx's schema only to roles you trust. No function
+    created there can take the place of these calls, but one with the same
+    name can make them ambiguous: a `plx_tsql_int4(record, int DEFAULT 0)`
+    makes every such plxtsql conversion fail with
+    `function ...plx_tsql_int4(record) is not unique`.
 - Pin the path on every `SECURITY DEFINER` function, as the PostgreSQL manual
   advises, because the SQL in its body still finds your own tables and
   functions through `search_path`. List only trusted schemas, with `pg_temp`
