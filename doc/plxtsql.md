@@ -209,9 +209,25 @@ keep SQL Server's value. `CAST(300 AS tinyint)` is an error in SQL Server but
 but 3 in `bytea`. The call fails with `type "tinyint" does not exist`. Cast to
 the PostgreSQL type you want instead, such as `smallint` or `bytea`.
 
-A `BIT` value is a PostgreSQL `boolean`. A cast to text gives `true` or
-`false`, and `CONCAT` gives `t` or `f`. SQL Server gives `1` or `0` in both. A `DATETIME` value keeps every digit you give it:
-SQL Server rounds it to 1/300 of a second.
+A mapped type takes the PostgreSQL rules for its values, as in `DECLARE` and
+`CONVERT`. These values differ from SQL Server:
+
+- A `BIT` value is a PostgreSQL `boolean`. A cast to text gives `true` or
+  `false`, and `CONCAT` gives `t` or `f`. SQL Server gives `1` or `0` in both.
+- `CAST('yes' AS bit)` gives true, because PostgreSQL accepts `yes`, `on`
+  and `t`. SQL Server raises a conversion error.
+- A `DATETIME` value keeps every digit you give it, up to 6: SQL Server rounds
+  it to 1/300 of a second. A string with more than 3 fractional digits, such
+  as `'2024-01-01 10:00:00.1234567'`, works in plx and fails in SQL Server.
+- A `DATETIME` before 1753, such as `'1700-01-01'`, works in plx. SQL Server
+  raises an out-of-range error.
+- `CAST(12 AS nvarchar(1))` gives `1`. SQL Server raises error 8115, an
+  arithmetic overflow.
+- A `UNIQUEIDENTIFIER` turns into lowercase text. SQL Server gives uppercase.
+- `CAST` of a string to `VARBINARY(MAX)` takes `\x41` as hex, so
+  `DATALENGTH(CAST('\x41' AS varbinary(max)))` gives 1. SQL Server gives 4.
+- `CAST(N'ab' AS varbinary(max))` holds the UTF-8 bytes, so `DATALENGTH`
+  gives 2. SQL Server stores UTF-16 and gives 4.
 
 ### Operators
 
