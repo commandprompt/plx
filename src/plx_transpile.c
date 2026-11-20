@@ -4388,6 +4388,7 @@ typedef struct
 	int			dollar_len;
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
+	char	   *cast_to;		/* wrapped typed literal: the type to CAST to */
 	bool		paren;			/* static SQL: write an unquoted value as (expr) */
 } PlxTplState;
 
@@ -4429,7 +4430,10 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 				if (st->wrapped)
 				{
 					appendStringInfoChar(buf, ')');
+					if (st->cast_to)
+						appendStringInfo(buf, " AS %s)", st->cast_to);
 					st->wrapped = false;
+					st->cast_to = NULL;
 				}
 				continue;
 			}
@@ -4522,6 +4526,87 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 }
 
 /*
+ * Read the SQL word that ends right before buf offset end, skipping spaces.
+ * Returns its length (0 if none) and sets *start.
+ */
+static int
+tpl_word_before(StringInfo buf, int end, int *start)
+{
+	int			e = end,
+				b;
+
+	while (e > 0 && (buf->data[e - 1] == ' ' || buf->data[e - 1] == '\t' ||
+					 buf->data[e - 1] == '\n' || buf->data[e - 1] == '\r'))
+		e--;
+	b = e;
+	while (b > 0 && sql_ident_char(buf->data[b - 1]) && buf->data[b - 1] != '$')
+		b--;
+	/* a quoted name, a qualified name or a parameter is not a type keyword */
+	if (b == e || (b > 0 && (buf->data[b - 1] == '"' || buf->data[b - 1] == '.' ||
+							 buf->data[b - 1] == '$')) ||
+		(buf->data[b] >= '0' && buf->data[b] <= '9'))
+		return 0;
+	*start = b;
+	return e - b;
+}
+
+static bool
+tpl_word_is(StringInfo buf, int at, int len, const char *w)
+{
+	return len == (int) strlen(w) && pg_strncasecmp(buf->data + at, w, len) == 0;
+}
+
+/*
+ * Is the quoted literal opening at buf offset at a typed literal, TYPE '...'?
+ * Returns the offset where the type name starts, or -1. Only built-in type
+ * names count: another word before a literal, such as an option name in
+ * OPTIONS (host '...'), leaves the literal alone.
+ */
+static int
+tpl_typed_literal(StringInfo buf, int at)
+{
+	static const char *const types[] = {
+		"interval", "date", "time", "timestamp", "timestamptz", "timetz",
+		"numeric", "decimal", "int", "int2", "int4", "int8", "integer",
+		"bigint", "smallint", "real", "float", "float4", "float8", "boolean",
+		"bool", "text", "varchar", "char", "character", "json", "jsonb",
+		"uuid", "bytea", "inet", "cidr", "macaddr", "money", "xml", "oid",
+		"regclass", "regtype", "regproc", "tsquery", "tsvector", "point", NULL
+	};
+	int			b,
+				l = tpl_word_before(buf, at, &b),
+				b2,
+				l2,
+				i;
+
+	if (l == 0)
+		return -1;
+	if (tpl_word_is(buf, b, l, "precision") || tpl_word_is(buf, b, l, "varying"))
+	{
+		l2 = tpl_word_before(buf, b, &b2);
+		if (l2 > 0 && (tpl_word_is(buf, b2, l2, "double") ? tpl_word_is(buf, b, l, "precision")
+					   : tpl_word_is(buf, b2, l2, "character")))
+			return b2;
+		return -1;
+	}
+	if (tpl_word_is(buf, b, l, "zone"))
+	{
+		/* time zone, after with or without, after time or timestamp */
+		if ((l2 = tpl_word_before(buf, b, &b2)) == 0 || !tpl_word_is(buf, b2, l2, "time") ||
+			(l2 = tpl_word_before(buf, b2, &b2)) == 0 ||
+			!(tpl_word_is(buf, b2, l2, "with") || tpl_word_is(buf, b2, l2, "without")) ||
+			(l2 = tpl_word_before(buf, b2, &b2)) == 0 ||
+			!(tpl_word_is(buf, b2, l2, "time") || tpl_word_is(buf, b2, l2, "timestamp")))
+			return -1;
+		return b2;
+	}
+	for (i = 0; types[i]; i++)
+		if (tpl_word_is(buf, b, l, types[i]))
+			return b;
+	return -1;
+}
+
+/*
  * Emit one value interpolation. ref is the text that stands for the value: the
  * rewritten expression (static) or "$n" (dynamic). Returns true when the
  * closing quote of a '#{x}' was consumed and must be skipped in the next run.
@@ -4558,11 +4643,36 @@ tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
 	{
 		/* before the quote, or before the E of an E'...' */
 		int			at = st->estr ? st->sq_open - 1 : st->sq_open;
+		int			ty = tpl_typed_literal(buf, at);
 
-		appendStringInfoChar(buf, ' ');		/* room for the '(' */
-		memmove(buf->data + at + 1, buf->data + at, buf->len - at - 1);
-		buf->data[at] = '(';
-		st->sq_open++;
+		if (ty >= 0)
+		{
+			/*
+			 * TYPE '...' -> CAST(('...' || v || '...') AS TYPE): TYPE (...)
+			 * would be a syntax error, or a type modifier
+			 */
+			int			tl = at;
+			char	   *rest;
+
+			while (tl > ty && (buf->data[tl - 1] == ' ' || buf->data[tl - 1] == '\t' ||
+							   buf->data[tl - 1] == '\n' || buf->data[tl - 1] == '\r'))
+				tl--;
+			st->cast_to = pnstrdup(buf->data + ty, tl - ty);
+			rest = pstrdup(buf->data + at);
+			buf->len = ty;
+			buf->data[buf->len] = '\0';
+			appendStringInfoString(buf, "CAST((");
+			st->sq_open = buf->len + (st->estr ? 1 : 0);
+			appendStringInfoString(buf, rest);
+			pfree(rest);
+		}
+		else
+		{
+			appendStringInfoChar(buf, ' ');		/* room for the '(' */
+			memmove(buf->data + at + 1, buf->data + at, buf->len - at - 1);
+			buf->data[at] = '(';
+			st->sq_open++;
+		}
 		st->wrapped = true;
 	}
 	appendStringInfo(buf, "' || (%s)::text || %s'", ref, st->estr ? "E" : "");

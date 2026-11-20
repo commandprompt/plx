@@ -62,7 +62,11 @@ Each entry names the dialects it affects.
   parameters (`CREATE`, `ALTER`, `SET`, `COMMENT`, ...), the value is spliced
   through `quote_nullable()`. `'#{x}'` is the value of `x` in static and
   dynamic SQL alike (it used to be the literal text `'x'` in static SQL), and
-  an interpolation inside a longer literal concatenates the value. An
+  an interpolation inside a longer literal concatenates the value. `'#{x}'` now has the type of `x`; before, it was an untyped literal that
+  took the type its context needed. So with a `text` variable, `ts > '#{since}'`
+  on a `date` column now fails with `operator does not exist: date > text`;
+  write `'#{since}'::date`. A literal after a built-in type name, such as
+  `interval '#{n} days'`, becomes `CAST(('' || (n)::text || ' days') AS interval)`. An
   interpolation inside a quoted identifier, a SQL comment, a dollar-quoted
   string or a prefixed literal (`U&'...'`, `N'...'`, `text'...'`) is
   rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`), and one

@@ -25,6 +25,7 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error | `FROM $k`: the statement fails when it runs |
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
+| inside a literal after a type name: `interval '#{n} days'` | `CAST(('' \|\| (n)::text \|\| ' days') AS interval)` | `CAST(('' \|\| ($k)::text \|\| ' days') AS interval)` |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
 | inside a SQL comment: `-- #{x}`, `/* #{x} */` | rejected | rejected |
 | inside a dollar-quoted string: `$q$#{s}$q$` | rejected | rejected |
@@ -41,6 +42,14 @@ that contains a backslash as `E'...'`, as it does for the function body, so
 the SQL reads the same whatever `standard_conforming_strings` the caller uses.
 To end the text of an `E'...'` string with a backslash right before an
 interpolation, write the backslash twice in the SQL text: `E'a\\#{x}'`.
+
+A whole quoted literal, `'#{s}'`, becomes the value itself, with the value's
+type. Where SQL needs another type, cast it: with a `text` variable `since`,
+`ts > '#{since}'` fails with `operator does not exist: date > text`, and
+`ts > '#{since}'::date` works. A type name before a literal that holds an
+interpolation makes plx write a `CAST` to that type. plx knows the built-in
+type names, including `double precision`, `character varying` and
+`timestamp with time zone`; after any other word the literal stays text.
 
 A call is static when its SQL argument is a single string literal and it has
 no bind arguments; otherwise it runs as dynamic SQL (`EXECUTE`). `execute` is
