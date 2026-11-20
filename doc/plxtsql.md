@@ -125,7 +125,7 @@ keyword or `BEGIN`); there is no `THEN` keyword in T-SQL.
 | `RAISERROR(...) WITH LOG` | adds `RAISE LOG '%', 'msg';` before the message |
 | `THROW n, 'msg', s` | `RAISE EXCEPTION '%', 'msg';` |
 | `THROW;` (bare, in CATCH) | `RAISE;` (re-raise) |
-| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
+| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` (undoes the writes made in TRY; see [below](#a-catch-block-undoes-the-writes-made-in-try)) |
 | `ERROR_MESSAGE()` | `SQLERRM` |
 
 RAISERROR follows SQL Server's severity rule. A severity of 10 or lower is an
@@ -143,6 +143,41 @@ server log. Any other option is an error when you create the function.
 
 `RAISERROR`'s format arguments (its `%d`/`%s` printf-style substitutions) are not
 applied; the message argument is emitted as-is.
+
+### A CATCH block undoes the writes made in TRY
+
+**Caution:** when an error reaches `CATCH`, plx undoes every database change
+that the `TRY` block made before the error. SQL Server keeps those changes when
+`XACT_ABORT` is `OFF`, its default. plx cannot keep them: `TRY` becomes a
+plpgsql block with an `EXCEPTION` clause, and PostgreSQL rolls such a block back
+to a savepoint when it catches an error. Variables keep the values they had
+when the error happened, as in SQL Server.
+
+```sql
+CREATE TABLE logt(msg text);
+CREATE FUNCTION r1() RETURNS text LANGUAGE plxtsql AS $$
+  BEGIN TRY
+    INSERT INTO logt VALUES ('attempt');
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO logt VALUES ('caught');
+  END CATCH
+  RETURN 'done';
+$$;
+SELECT r1();
+SELECT string_agg(msg, ',') FROM logt;
+```
+
+SQL Server leaves `attempt,caught` in `logt`. plx leaves only `caught`.
+
+To keep a write when the `TRY` block fails, make it outside the `TRY` block:
+
+1. Move a write that must survive, such as an audit or error-log row, before
+   `BEGIN TRY`.
+2. Or make it in the `CATCH` block, which runs after the rollback. To use a
+   value computed in `TRY`, assign it to a variable there; the variable keeps
+   its value.
 
 ### Types (in `DECLARE`)
 

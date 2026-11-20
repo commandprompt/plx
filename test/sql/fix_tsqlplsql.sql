@@ -655,3 +655,36 @@ $$;
 SET statement_timeout = '60s';
 SELECT fxr10_nest(-2.7) AS r;  -- SQL Server: -2
 RESET statement_timeout;
+-- R11 (PR 24 review [11]): a CATCH block undoes the writes its TRY block made
+-- before the error, because TRY becomes a plpgsql block with an EXCEPTION
+-- clause, which rolls back to a savepoint. SQL Server keeps them. plx cannot
+-- emulate this; the case pins the behaviour so that a change is noticed.
+CREATE TABLE fxr11_log(msg text);
+CREATE FUNCTION fxr11_try() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @n int = 0;
+  BEGIN TRY
+    INSERT INTO fxr11_log VALUES ('attempt');
+    SET @n = 1;
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO fxr11_log VALUES ('caught');
+  END CATCH
+  RETURN CONCAT('n=', @n);
+$$;
+SELECT fxr11_try() AS r;  -- SQL Server: n=1 (a variable keeps its value in both)
+SELECT string_agg(msg, ',' ORDER BY msg) AS r FROM fxr11_log;  -- SQL Server: attempt,caught; plx: caught
+-- the documented workaround: make a write that must survive before BEGIN TRY
+TRUNCATE fxr11_log;
+CREATE FUNCTION fxr11_fix() RETURNS text LANGUAGE plxtsql AS $$
+  INSERT INTO fxr11_log VALUES ('attempt');
+  BEGIN TRY
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO fxr11_log VALUES ('caught');
+  END CATCH
+  RETURN 'done';
+$$;
+SELECT fxr11_fix() AS r;
+SELECT string_agg(msg, ',' ORDER BY msg) AS r FROM fxr11_log;  -- SQL Server: attempt,caught

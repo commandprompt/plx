@@ -676,6 +676,11 @@ not here.
 
 #### plxtsql
 
+- The dialect chapter and doc/LIMITATIONS.md now say that a `CATCH` block
+  undoes the database changes its `TRY` block made before the error. SQL
+  Server keeps them. plx cannot, because `TRY` becomes a plpgsql exception
+  block, which rolls back to a savepoint. The behaviour is the same as in
+  2.0.1; only the documentation is new. It shows how to keep such a write.
 - A `CASE` expression works in `SET`, `RETURN`, `DECLARE` initializers, `IF`
   and `WHILE` conditions, and `SELECT` assignment lists. Before, plx cut the
   expression at the CASE's `ELSE` or `END`, and the function was rejected with
