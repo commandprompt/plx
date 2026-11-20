@@ -26,10 +26,17 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
 | inside a SQL comment: `-- #{x}`, `/* #{x} */` | rejected | rejected |
+| inside a dollar-quoted string: `$q$#{s}$q$` | rejected | rejected |
+| inside a prefixed literal: `U&'#{s}'`, `N'#{s}'`, `text'#{s}'` | rejected | rejected |
+| joined to a name, number or `$`: `v#{x}`, `#{x}abc` | rejected | rejected |
 
-plx reads the SQL string as PostgreSQL does: a quote inside a `--` or
-`/* */` comment (block comments nest) does not open a string, and an
-interpolation inside a comment is rejected when the function is created.
+plx reads the SQL string as PostgreSQL does. A quote inside a `--` or
+`/* */` comment (block comments nest) or inside a dollar-quoted string does
+not open a string, and `E'...'` strings, `U&'...'` strings, doubled quotes
+(`'it''s'`) and quoted identifiers are each read as one token. Each rejected
+form fails when the function is created. In dynamic SQL, plx writes a literal
+that contains a backslash as `E'...'`, as it does for the function body, so
+the SQL reads the same whatever `standard_conforming_strings` the caller uses.
 
 A call is static when its SQL argument is a single string literal and it has
 no bind arguments; otherwise it runs as dynamic SQL (`EXECUTE`). `execute` is

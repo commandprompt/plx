@@ -4129,14 +4129,26 @@ tpl_kind(const char *s, int len, const char **is, int *il)
 	return TPL_VALUE;
 }
 
-/* SQL lexical state of the template text emitted so far */
+static bool sql_ident_char(char c);
+static char *escape_backslash_literals(const char *s);
+
+/*
+ * SQL lexical state of the template text emitted so far. It follows the
+ * PostgreSQL scanner, with standard_conforming_strings on: the dynamic path
+ * rewrites backslash literals as E'...' (tpl_flush), and the static path is
+ * rewritten with the whole body (escape_backslash_literals), so the SQL reads
+ * the same under either setting.
+ */
 typedef struct
 {
 	bool		sq,				/* inside '...' */
 				dq,				/* inside "..." */
 				estr,			/* the '...' is an E'...' */
+				prefixed,		/* the '...' is U&'..', B'..', N'..', type'..' */
 				line_cmt;		/* inside a -- comment */
 	int			block_cmt;		/* depth of nested slash-star comments */
+	const char *dollar;			/* inside $tag$...$tag$: the tag, else NULL */
+	int			dollar_len;
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
 } PlxTplState;
@@ -4179,7 +4191,7 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 		}
 		else if (st->line_cmt)
 		{
-			if (c == '\n')
+			if (c == '\n' || c == '\r')
 				st->line_cmt = false;
 		}
 		else if (st->block_cmt > 0)
@@ -4191,6 +4203,17 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 				st->block_cmt += (c == '/') ? 1 : -1;
 				appendStringInfoChar(buf, c);
 				appendStringInfoChar(buf, s[++i]);
+				continue;
+			}
+		}
+		else if (st->dollar)
+		{
+			if (c == '$' && i + st->dollar_len <= len &&
+				strncmp(s + i, st->dollar, st->dollar_len) == 0)
+			{
+				appendBinaryStringInfo(buf, s + i, st->dollar_len);
+				i += st->dollar_len - 1;
+				st->dollar = NULL;
 				continue;
 			}
 		}
@@ -4211,11 +4234,32 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 		{
 			char		p1 = buf->len > 0 ? buf->data[buf->len - 1] : ' ';
 			char		p2 = buf->len > 1 ? buf->data[buf->len - 2] : ' ';
+			char		p3 = buf->len > 2 ? buf->data[buf->len - 3] : ' ';
 
 			st->sq = true;
 			st->sq_open = buf->len;
 			st->wrapped = false;
-			st->estr = (p1 == 'E' || p1 == 'e') && !plx_is_ident(p2);
+			st->estr = (p1 == 'E' || p1 == 'e') && !sql_ident_char(p2);
+			st->prefixed = !st->estr &&
+				(sql_ident_char(p1) ||
+				 (p1 == '&' && (p2 == 'U' || p2 == 'u') && !sql_ident_char(p3)));
+		}
+		else if (c == '$' && (buf->len == 0 || !sql_ident_char(buf->data[buf->len - 1])))
+		{
+			/* $tag$ opens a dollar quote; the tag cannot start with a digit */
+			int			j = i + 1;
+
+			if (j < len && !(s[j] >= '0' && s[j] <= '9'))
+				while (j < len && s[j] != '$' && sql_ident_char(s[j]))
+					j++;
+			if (j < len && s[j] == '$')
+			{
+				st->dollar = s + i;
+				st->dollar_len = j - i + 1;
+				appendBinaryStringInfo(buf, s + i, st->dollar_len);
+				i = j;
+				continue;
+			}
 		}
 		else if (c == '"')
 			st->dq = true;
@@ -4291,6 +4335,23 @@ tpl_needs_dynamic(PlxTplSeg *segs, int n)
 	return false;
 }
 
+/*
+ * An interpolation outside quotes must not touch a name, number or $ sign: in
+ * v#{x} the value would become part of the name (v$2 is one identifier), and
+ * $#{x}$ would form a dollar-quote tag.
+ */
+static void
+tpl_check_joined(Ctx *cx, Tok *tk, PlxTplSeg *segs, int n, int i)
+{
+	const PlxTplSeg *pv = i > 0 ? &segs[i - 1] : NULL;
+	const PlxTplSeg *nx = i + 1 < n ? &segs[i + 1] : NULL;
+
+	if ((pv && !pv->interp && pv->len > 0 && sql_ident_char(pv->s[pv->len - 1])) ||
+		(nx && !nx->interp && nx->len > 0 && sql_ident_char(nx->s[0])))
+		plx_err(cx, tk->line, "an interpolation cannot be joined to a SQL name, number "
+				"or $ sign; separate them with a space");
+}
+
 /* Static SQL text for a template (no ident()/raw(), checked by the caller). */
 void
 plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
@@ -4314,9 +4375,18 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		if (st.line_cmt || st.block_cmt > 0)
 			plx_err(cx, tk->line, "an interpolation inside a SQL comment is not allowed; "
 					"move it out of the comment");
+		if (st.dollar)
+			plx_err(cx, tk->line, "an interpolation inside a dollar-quoted SQL string is not "
+					"allowed; use a quoted literal '...' instead");
+		if (st.sq && st.prefixed)
+			plx_err(cx, tk->line, "an interpolation inside a prefixed SQL string (U&'...', "
+					"B'...', X'...', N'...' or type'...') is not allowed; interpolate the "
+					"whole value in place of the literal");
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");
+		if (!st.sq)
+			tpl_check_joined(cx, tk, segs, n, i);
 		skip = tpl_put_value(&st, out,
 							 plx_rewrite_expr(cx, segs[i].s, segs[i].len, false),
 							 i + 1 < n ? &segs[i + 1] : NULL);
@@ -4359,7 +4429,8 @@ tpl_flush(StringInfo expr, StringInfo lit)
 	if (expr->len)
 		appendStringInfoString(expr, " || ");
 	appendStringInfoChar(expr, '\'');
-	for (c = lit->data; *c; c++)
+	/* EXECUTE reads the SQL with the caller's standard_conforming_strings */
+	for (c = escape_backslash_literals(lit->data); *c; c++)
 	{
 		if (*c == '\'')
 			appendStringInfoChar(expr, '\'');
@@ -4411,6 +4482,13 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 		if (st.line_cmt || st.block_cmt > 0)
 			plx_err(cx, tk->line, "an interpolation inside a SQL comment is not allowed; "
 					"move it out of the comment");
+		if (st.dollar)
+			plx_err(cx, tk->line, "an interpolation inside a dollar-quoted SQL string is not "
+					"allowed; use a quoted literal '...' instead");
+		if (st.sq && st.prefixed)
+			plx_err(cx, tk->line, "an interpolation inside a prefixed SQL string (U&'...', "
+					"B'...', X'...', N'...' or type'...') is not allowed; interpolate the "
+					"whole value in place of the literal");
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");
@@ -4434,6 +4512,8 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 						: "this statement takes no parameters, so a value inside a quoted "
 						"SQL string cannot be bound");
 		}
+		if (!st.sq && kind != TPL_RAW)
+			tpl_check_joined(cx, tk, segs, n, i);
 		if ((kind == TPL_IDENT || kind == TPL_RAW) && st.sq)
 			plx_err(cx, tk->line, "%s() cannot be used inside a quoted SQL string",
 					kind == TPL_IDENT ? "ident" : "raw");

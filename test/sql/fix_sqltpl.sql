@@ -61,3 +61,101 @@ $$;
 CREATE FUNCTION fs_c_in_line(c text) RETURNS void LANGUAGE plxruby AS $$
 execute("COMMENT ON TABLE fs_victim IS 'x' -- #{c}\n")
 $$;
+
+-- [4]: a dollar-quoted string is skipped as a whole, so quotes inside it do
+-- not count, and a $ inside a name or a $n parameter does not start one
+CREATE FUNCTION fs_d_skip(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT $q$it's$q$ || '${x}' AS v`);
+return r.v;
+$f$;
+SELECT fs_d_skip('hello');
+CREATE FUNCTION fs_d_skip_dyn(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT $$it's$$ || '${x}' || $1 AS v`, '!');
+return r.v;
+$f$;
+SELECT fs_d_skip_dyn('hello');
+CREATE FUNCTION fs_d_name(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT v FROM (SELECT 1 AS a$q$, '${x}' AS v) AS s`);
+return r.v;
+$f$;
+SELECT fs_d_name('hello');
+-- [4]: an interpolation inside a dollar-quoted string is rejected: a $tag$ in
+-- the value would end the string, and the value would run as SQL
+CREATE FUNCTION fs_d_dyn(t text, c text) RETURNS void LANGUAGE plxjs AS $f$
+execute(`COMMENT ON TABLE ${ident(t)} IS $c$${c}$c$`);
+$f$;
+CREATE FUNCTION fs_d_dyn_rb(t text, c text) RETURNS void LANGUAGE plxruby AS $f$
+execute("COMMENT ON TABLE #{ident(t)} IS $c$ #{c} $c$")
+$f$;
+CREATE FUNCTION fs_d_static(s text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT $q$ ${s} $q$ AS c`);
+return r.c;
+$f$;
+CREATE FUNCTION fs_d_py(x text) RETURNS void LANGUAGE plxpython3 AS $f$
+execute(f"SELECT $q$ {x} $q$ AS v")
+$f$;
+-- [4]: E'' strings with backslash escapes, U&'' strings, doubled quotes and
+-- quoted identifiers are each read as one token
+CREATE FUNCTION fs_l_forms(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'it\\'s' || U&'d\\0061t\\+000061' || 'it''s' || '#{x}' AS \"it's\"")
+return r["it's"]
+$f$;
+SELECT fs_l_forms('hello');
+-- [4]: an interpolation inside a U&'', B'', X'', N'' or typed literal is
+-- rejected: the value cannot be spliced into such a literal
+CREATE FUNCTION fs_l_uesc(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT U&'\\0041#{x}' AS v")
+return r.v
+$f$;
+CREATE FUNCTION fs_l_nchar(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT N'${x}' AS v`);
+return r.v;
+$f$;
+CREATE FUNCTION fs_l_typed(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT text'a${x}' AS v`);
+return r.v;
+$f$;
+-- [4]: an interpolation joined to a SQL name, number or $ sign is rejected:
+-- it would change the name ($2 in v$2 is part of the name) or form a $tag$
+CREATE FUNCTION fs_a_name(x text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT count${x} AS v`);
+return r.v;
+$f$;
+CREATE FUNCTION fs_a_after(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT #{x}abc FROM fs_victim WHERE 1 = $1", 1)
+return r.abc
+$f$;
+CREATE FUNCTION fs_a_dollar(t text) RETURNS void LANGUAGE plxjs AS $f$
+execute(`SELECT $${ident(t)}$ AS v`);
+$f$;
+-- [4]: with standard_conforming_strings off (PostgreSQL 13 to 18), a literal
+-- in dynamic SQL that ends in a backslash still ends there, so the value
+-- after it stays data. fs_scs_off() turns the setting off where the server
+-- allows it; 19 and later reject the setting and the cases run with it on.
+CREATE PROCEDURE fs_scs_off() LANGUAGE plpgsql AS $h$
+BEGIN
+  PERFORM set_config('standard_conforming_strings', 'off', false);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $h$;
+CREATE FUNCTION fs_scs_note(c text) RETURNS text LANGUAGE plxruby AS $f$
+execute("COMMENT ON TABLE fs_victim IS 'C:\\'\n'#{c}'")
+d = fetch_one("SELECT obj_description('fs_victim'::regclass) AS d")
+return d.d
+$f$;
+CREATE FUNCTION fs_scs_bound(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT 'C:\\' || '#{x}' || $1 AS v", '!')
+return r.v
+$f$;
+CALL fs_scs_off();
+SELECT fs_scs_note('; DROP TABLE fs_victim; --');
+SELECT fs_scs_bound('hello');
+RESET standard_conforming_strings;
+SELECT to_regclass('fs_victim') IS NOT NULL AS victim_survives;
+SELECT fs_scs_note('hello');
+-- [4]: a -- comment ends at a carriage return as well as at a newline
+CREATE FUNCTION fs_c_cr(c text) RETURNS text LANGUAGE plxruby AS $f$
+execute("COMMENT ON TABLE fs_victim IS -- note\r'#{c}'")
+d = fetch_one("SELECT obj_description('fs_victim'::regclass) AS d")
+return d.d
+$f$;
+SELECT fs_c_cr('after a carriage return');
