@@ -599,6 +599,30 @@ CREATE FUNCTION fgh18_accn() RETURNS text LANGUAGE plxgo AS $$
 	s += 1
 	return s
 $$;
+-- appending an operand plx cannot type keeps s := s + (x), which fails
+-- loudly; || would cast a number or a jsonb value to text
+\set VERBOSITY terse
+CREATE FUNCTION fgh18_accu_row() RETURNS text LANGUAGE plxgo AS $$
+	s := "v"
+	for _, r := range query("SELECT 2 AS a") {
+		s += r.a
+	}
+	return s
+$$;
+SELECT fgh18_accu_row() AS go_error;
+CREATE FUNCTION fgh18_accu_call(x text) RETURNS text LANGUAGE plxgo AS $$
+	s := "v"
+	s += length(x)
+	return s
+$$;
+SELECT fgh18_accu_call('abc') AS go_error;
+CREATE FUNCTION fgh18_accu_json(j jsonb) RETURNS text LANGUAGE plxgo AS $$
+	s := "v"
+	s += j
+	return s
+$$;
+SELECT fgh18_accu_json('{"a":1}') AS go_error;
+\set VERBOSITY default
 
 -- make() is not supported; plx says so at CREATE FUNCTION instead of failing
 -- with a message about something else

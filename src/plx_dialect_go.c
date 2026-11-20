@@ -2860,20 +2860,28 @@ go_simple(Go *g, int ind, int stop)
 	/*
 	 * s += x on a string appends. plxgo string locals are text, so a plain ||
 	 * is enough (no string builder), and it propagates NULL as + chains do.
+	 * When plx cannot see that x is a string, the append stays s := s + (x),
+	 * which fails loudly; || would cast a number or a jsonb value to text,
+	 * where Go rejects the program.
 	 */
 	if (opc && strcmp(opc, "+") == 0 && go_expr_kind(g, e0, opidx) == 's')
 	{
-		if (go_expr_kind(g, opidx + 1, e1) == 'n')
+		char		rk = go_expr_kind(g, opidx + 1, e1);
+
+		if (rk == 'n')
 			plx_err(g->cx, g->t[opidx].line, "%s", GO_STRNUM_MSG);
-		plx_indent(&g->cx->out, ind);
-		go_emit_range(g, e0, opidx, &g->cx->out);
-		appendStringInfoString(&g->cx->out, " :=");
-		go_emit_range(g, e0, opidx, &g->cx->out);
-		appendStringInfoString(&g->cx->out, " || (");
-		go_emit_range(g, opidx + 1, e1, &g->cx->out);
-		appendStringInfoString(&g->cx->out, ");\n");
-		g->pos = e1;
-		return;
+		if (rk == 's')
+		{
+			plx_indent(&g->cx->out, ind);
+			go_emit_range(g, e0, opidx, &g->cx->out);
+			appendStringInfoString(&g->cx->out, " :=");
+			go_emit_range(g, e0, opidx, &g->cx->out);
+			appendStringInfoString(&g->cx->out, " || (");
+			go_emit_range(g, opidx + 1, e1, &g->cx->out);
+			appendStringInfoString(&g->cx->out, ");\n");
+			g->pos = e1;
+			return;
+		}
 	}
 
 	/* plain assignment: LHS <op> RHS */

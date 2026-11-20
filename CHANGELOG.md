@@ -629,8 +629,11 @@ not here.
   `operator does not exist: text + unknown`. A NULL operand makes the result
   NULL. `msg := "a" + s` now declares `msg` as `text`.
 - `s += x` on a string appends. It used to become `s := s + (x)`, which
-  failed when it ran. plx now writes `s := s || (x)`, so a NULL `x` makes `s`
-  NULL. `s += 1` on a string is rejected at `CREATE FUNCTION`, as in Go.
+  failed when it ran. plx now writes `s := s || (x)` when it can see that `x`
+  is a string, by the same rules as `+`. A NULL `x` makes `s` NULL. `s += 1`
+  on a string is rejected at `CREATE FUNCTION`, as in Go. When plx cannot see
+  the type of `x`, such as a row field or a SQL function call, it still writes
+  `s := s + (x)`, which fails when the function runs.
 - `make(...)` is not supported, but the error named something else: a syntax
   error at `[`, a type that could not be inferred, or a case clash between
   the type name and a variable. plx now rejects `make` at `CREATE FUNCTION`
