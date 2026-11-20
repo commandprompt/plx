@@ -90,8 +90,9 @@ SELECT int_csv(5) AS csv;
 ## Looping over a query
 
 `for row in query(...)` iterates the rows of a result set. Each `row` is a
-record; access columns with `row.col`. The f-string interpolates the argument
-`g` into the SQL text.
+record; access columns with `row.col`. The argument `g` interpolated into the
+f-string is bound as a value, not written into the SQL text (see
+[Interpolation in SQL](../DYNAMIC-SQL.md)).
 
 ```python
 CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxpython3 AS $$

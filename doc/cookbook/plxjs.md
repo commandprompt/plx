@@ -81,7 +81,7 @@ SELECT csv_repeat('ab', 4);
 
 ## Looping over a query
 
-`for (const r of query(...))` iterates a result set. The row is a record and columns are read as `r.col`. Use a template literal to interpolate the argument into the SQL text.
+`for (const r of query(...))` iterates a result set. The row is a record and columns are read as `r.col`. The argument interpolated into the template literal is bound as a value, not written into the SQL text (see [Interpolation in SQL](../DYNAMIC-SQL.md)).
 
 ```javascript
 CREATE FUNCTION order_total(g int) RETURNS bigint LANGUAGE plxjs AS $$

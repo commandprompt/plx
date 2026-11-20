@@ -78,7 +78,7 @@ SELECT csv_ints(5);
 
 ## Looping over a query result
 
-`foreach (query("...") as $r)` iterates a query. Each row is a record; read a column with `$r->col`. Values spliced with `{$g}` are interpolated into the SQL text.
+`foreach (query("...") as $r)` iterates a query. Each row is a record; read a column with `$r->col`. The interpolated `{$g}` is bound as a value, not written into the SQL text (see [Interpolation in SQL](../DYNAMIC-SQL.md)).
 
 ```php
 CREATE TABLE orders(id int, grp int, amount int);
