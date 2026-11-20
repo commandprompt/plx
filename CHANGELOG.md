@@ -135,6 +135,13 @@ Each entry names the dialects it affects.
   to the inner loop and the function returned a wrong value. `CREATE FUNCTION`
   now rejects a loop label that spells the label of an enclosing loop another
   way. Rename one of the labels.
+- **An escaped interpolation in SQL text is plain text** (plxphp, plxjs,
+  plxts, plxruby). In the SQL argument of `query`, `fetch_one` and the other
+  SQL calls, `\$x`, `\${x}` and `\#{x}` put a backslash and the value of `x`
+  into the SQL, so plxphp `fetch_one("SELECT '\$x' AS v")` returned `\5`
+  where `$x` held 5. They now put the text `$x`, `${x}` or `#{x}` there, as
+  in a string value. A plxpython3 f-string is unchanged: `\{x}` keeps the
+  backslash and still interpolates, as in Python.
 - **An integer literal with a leading zero is octal** (plxruby, plxphp,
   plxjs), as in the source language, so `0755` is 493, not 755. plxpython3 and
   plxts reject such a literal at `CREATE FUNCTION` and suggest `0o755`.
@@ -205,7 +212,8 @@ Each entry names the dialects it affects.
   loop reads again before the `for` (in its condition, or earlier in its body),
   and in plxjs and plxts a `for (var i ...)` whose variable is read after the
   loop. A read inside a string interpolation counts, as in `${i}` or
-  `"stopped at $i"`, including the SQL text of `query` and `fetch_one`. Plain
+  `"stopped at $i"`, including the SQL text of `query` and `fetch_one`. An
+  escaped interpolation such as `\$i` or `\${i}` is text, not a read. Plain
   counting loops compile as before.
 - **`throw` of an expression that is not a constructor call is rejected**
   (plxjs, plxts, plxphp), for example `throw a(x) + b(y)`. Before, it silently

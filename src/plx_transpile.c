@@ -4222,7 +4222,15 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 
 			if (!full)
 			{
-				if (c == '"' || c == '\\')
+				/*
+				 * \" and \\, and a backslash before an interpolation (\$i,
+				 * \${i}, \#{i}), which makes it plain text as it does in a
+				 * string value. Not in a Python f-string, where f"\{i}" keeps
+				 * the backslash and still interpolates.
+				 */
+				if (c == '"' || c == '\\' ||
+					(can_interp && !tk->fstr &&
+					 interp_at(cx->surf, false, true, s + 1, e, &exs, &exl, &nx)))
 				{
 					appendStringInfoChar(&lit, c);
 					s += 2;

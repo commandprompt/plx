@@ -252,3 +252,43 @@ for k in range(10, 0, -3):
 return k
 $body$;
 SELECT e3_r8_last();
+
+-- V1 (review of the PR 24 fixes): an escaped \$i, \${i} or \#{i} is plain
+-- text, not an interpolation, so it is not a read of the loop variable. A SQL
+-- template treats the escape the same way as a string value does (it used to
+-- interpolate there, so "SELECT '\$i'" ran with the value of $i).
+CREATE FUNCTION e3_v1_php(n int) RETURNS text LANGUAGE plxphp AS $body$
+for ($i = 0; $i < $n; $i++) {
+  if ($i > 2) { break; }
+}
+$r = fetch_one("SELECT '\$i {\$i}' AS v");
+return "esc \$i {\$i} " . $r['v'];
+$body$;
+SELECT e3_v1_php(5);
+CREATE FUNCTION e3_v1_js(n int) RETURNS text LANGUAGE plxjs AS $body$
+let i = 0;
+for (i = 0; i < n; i++) {
+  if (i > 2) { break; }
+}
+let r = fetch_one(`SELECT '\${i}' AS v`);
+return `esc \${i} ${r.v}`;
+$body$;
+SELECT e3_v1_js(5);
+CREATE FUNCTION e3_v1_rb() RETURNS text LANGUAGE plxruby AS $body$
+i = 5
+r = fetch_one("SELECT '\#{i}' AS v")
+return "esc \#{i} #{r.v}"
+$body$;
+SELECT e3_v1_rb();
+-- in a plxpython3 f-string a backslash does not escape the brace, as in Python
+CREATE FUNCTION e3_v1_py() RETURNS text LANGUAGE plxpython3 AS $body$
+i = 5
+r = fetch_one(f"SELECT '\{i}' AS v")
+return r["v"]
+$body$;
+SELECT e3_v1_py();
+-- an escaped backslash before the interpolation does not escape it: still a read
+CREATE FUNCTION e3_v1_php_bs(n int) RETURNS text LANGUAGE plxphp AS $body$
+for ($i = 0; $i < $n; $i++) { }
+return "bs \\$i";
+$body$;

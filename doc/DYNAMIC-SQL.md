@@ -77,6 +77,14 @@ for (const row of query(`SELECT name FROM users ORDER BY ${raw(order)}`)) { ... 
 to put caller-supplied text into SQL unquoted, and it is the author's
 responsibility to make that text safe.
 
+## Escaped interpolations
+
+A backslash before an interpolation makes it plain text, as it does in a
+string value: plxphp `\$x` and `{\$x}`, plxjs and plxts `\${x}`, plxruby
+`\#{x}`. So `fetch_one("SELECT '\$x' AS v")` in plxphp returns the text `$x`.
+In a plxpython3 f-string, `\{x}` keeps the backslash and still interpolates,
+as in Python; write `{{x}}` for the text `{x}`.
+
 ## What is not covered
 
 Only interpolation written directly in the SQL argument is seen. A string
@@ -101,4 +109,6 @@ When a function is created or replaced under 3.0:
 - a value interpolated to build SQL text on purpose (`ORDER BY #{col} DESC`
   where `col` holds `name`) is now bound as data; write `#{raw(col)}` (or
   `#{ident(col)}` when it is a column name);
-- `'#{x}'` now compares against the value of `x`, not the string `'x'`.
+- `'#{x}'` now compares against the value of `x`, not the string `'x'`;
+- an escaped interpolation (`\$x`, `\${x}`, `\#{x}`) is plain text in the
+  SQL; 2.x put a backslash and the value of `x` there.
