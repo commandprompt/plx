@@ -137,9 +137,10 @@ CREATE FUNCTION grade_js(score int) RETURNS text LANGUAGE plxjs AS $$
 $$;
 ```
 
-The stored plpgsql (in `pg_proc.prosrc`) for the plxruby and plxphp versions is
-shown below. The plxjs version differs in two places: it initializes `grade` in
-its `DECLARE` (`grade text := 'F';`), and it has no `ELSE` arm.
+The stored plpgsql (in `pg_proc.prosrc`) for the plxruby version is shown
+below. The plxphp version is the same apart from its first line, which names
+its dialect. The plxjs version differs in one more place: it initializes
+`grade` in its `DECLARE` (`grade text := 'F';`).
 
 ```plpgsql
 /*plx:v1:plxruby:b04416a1*/
