@@ -93,6 +93,12 @@ typedef struct
 	int		   *kgen;
 	int			gen;
 	int			edepth;
+	/*
+	 * guards counts the shift guards (see GO_SHL_OPEN) open around the code
+	 * being emitted. Each is a subquery, and PostgreSQL needs memory that
+	 * grows faster than linearly to plan subqueries nested in one another.
+	 */
+	int			guards;
 } Go;
 
 static void go_stmt(Go *g, int ind);
@@ -1855,6 +1861,57 @@ go_int_const(Go *g, int a, int b)
 }
 
 /*
+ * A shift whose count is not a small literal is emitted as a subquery that
+ * evaluates the value (__plx_a) and the count (__plx_c) once each and gives
+ * Go's result for every count. SQL takes the count mod 64 for a bigint and
+ * mod 32 for a smallint or integer, so 1 << 64 would be 1; Go gives 0 for <<,
+ * and 0 or -1 for >>. A negative count panics in Go, and fails here. plx maps
+ * Go's 64-bit int to a 32-bit integer, so a non-zero integer shifted left by
+ * 32 or more fails with "integer out of range", as any shift that leaves the
+ * range of an int does. Neither error arm can be folded into an error while
+ * the planner simplifies the CASE, even with a constant value and count, as
+ * custom plans have: each one depends on || or pg_typeof(), which are stable.
+ * GO_SHIFT_WIDTH is the width of the value in bits. OFFSET 0 keeps the
+ * planner from pulling the subquery up, which would copy the value into each
+ * place __plx_a appears: shifts nested n deep would then grow as 6^n.
+ */
+#define GO_MAX_GUARDS 64
+#define GO_GUARDS_MSG "too many shifts by a count that is not a literal, nested in one another; split the expression"
+#define GO_SHIFT_WIDTH "CASE WHEN pg_typeof(__plx_a) = 'bigint'::regtype THEN 64 ELSE 32 END"
+static const char GO_SHL_OPEN[] =
+"(SELECT CASE WHEN __plx_c IS NULL THEN NULL"
+" WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
+" WHEN __plx_c < " GO_SHIFT_WIDTH " THEN __plx_a << __plx_c::integer"
+" WHEN __plx_a = 0 OR pg_typeof(__plx_a) = 'bigint'::regtype THEN __plx_a & 0"
+" ELSE (__plx_a::bigint << " GO_SHIFT_WIDTH ")::integer"
+" END FROM (SELECT (";
+static const char GO_SHR_OPEN[] =
+"(SELECT CASE WHEN __plx_c IS NULL THEN NULL"
+" WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
+" ELSE __plx_a >> least(__plx_c, " GO_SHIFT_WIDTH " - 1)::integer"
+" END FROM (SELECT (";
+static const char GO_SHIFT_MID[] = ") AS __plx_a, (";
+static const char GO_SHIFT_CLOSE[] = ") AS __plx_c OFFSET 0) AS __plx_s)";
+
+/*
+ * [a,b) is a decimal literal below 32, a shift count that SQL takes as Go
+ * does for a value of any width, so the shift needs no guard.
+ */
+static bool
+go_small_count(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+
+	if (b - a != 1 || tk->kind != GO_NUM || tk->len > 2 ||
+		(tk->len == 2 && tk->s[0] == '0'))
+		return false;
+	if (tk->s[0] < '0' || tk->s[0] > '9' ||
+		(tk->len == 2 && (tk->s[1] < '0' || tk->s[1] > '9')))
+		return false;
+	return atoi(pnstrdup(tk->s, tk->len)) < 32;
+}
+
+/*
  * Emit operands lo..hi of a split binary expression, nesting by Go
  * precedence: os/oe bound each operand's tokens and op[k] is the operator
  * between operands k and k+1. Each Go level goes in brackets, with an inner
@@ -1872,6 +1929,8 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 				j;
 	int		   *sp;
 	bool	   *brk;
+	char	   *guard;			/* '<' or '>' for a guarded shift, else 0 */
+	int			nguard = 0;
 
 	if (lo == hi)
 	{
@@ -1881,18 +1940,43 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 	for (k = lo; k < hi; k++)
 		minp = Min(minp, go_binop_prec(&g->t[op[k]]));
 	sp = palloc(sizeof(int) * (hi - lo));
-	brk = palloc(sizeof(bool) * (hi - lo));
+	brk = palloc0(sizeof(bool) * (hi - lo));
+	guard = palloc0(hi - lo);
 	for (k = lo; k < hi; k++)
 		if (go_binop_prec(&g->t[op[k]]) == minp)
 			sp[m++] = k;
+	for (j = 0; j < m; j++)
+	{
+		GoTok	   *o = &g->t[op[sp[j]]];
+
+		if (j > 0)
+		{
+			char		c = go_sql_class(o);
+
+			brk[j] = (c == 'c' || c != go_sql_class(&g->t[op[sp[j - 1]]]));
+		}
+		if ((go_op_is(o, "<<") || go_op_is(o, ">>")) &&
+			!go_small_count(g, os[sp[j] + 1], oe[j + 1 < m ? sp[j + 1] : hi]))
+		{
+			guard[j] = o->s[0];
+			nguard++;
+		}
+	}
+	/* each guard nests a subquery around the shifts before it */
+	if (g->guards + nguard > GO_MAX_GUARDS)
+		go_err(g, GO_GUARDS_MSG);
+	g->guards += nguard;
 	go_sp(out);
 	appendStringInfoChar(out, '(');
-	for (j = 1; j < m; j++)
+	/*
+	 * Open the bracket or guard that ends at each operator. The one that ends
+	 * first is innermost, so they open from the last operator back.
+	 */
+	for (j = m - 1; j >= 0; j--)
 	{
-		char		c = go_sql_class(&g->t[op[sp[j]]]);
-
-		brk[j] = (c == 'c' || c != go_sql_class(&g->t[op[sp[j - 1]]]));
-		if (brk[j])
+		if (guard[j])
+			appendStringInfoString(out, guard[j] == '<' ? GO_SHL_OPEN : GO_SHR_OPEN);
+		else if (j > 0 && brk[j])
 			appendStringInfoChar(out, '(');
 	}
 	/*
@@ -1922,6 +2006,13 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 		GoTok	   *o = &g->t[op[sp[j]]];
 		bool		andnot = go_op_is(o, "&^");
 
+		if (guard[j])
+		{
+			appendStringInfoString(out, GO_SHIFT_MID);
+			go_emit_binary(g, os, oe, op, sp[j] + 1, j + 1 < m ? sp[j + 1] : hi, out);
+			appendStringInfoString(out, GO_SHIFT_CLOSE);
+			continue;
+		}
 		if (j > 0 && brk[j])
 			appendStringInfoChar(out, ')');
 		go_sp(out);
@@ -1944,8 +2035,10 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 			appendStringInfoChar(out, ')');
 	}
 	appendStringInfoChar(out, ')');
+	g->guards -= nguard;
 	pfree(sp);
 	pfree(brk);
+	pfree(guard);
 }
 
 /*
@@ -3359,7 +3452,21 @@ go_simple(Go *g, int ind, int stop)
 	plx_indent(&g->cx->out, ind);
 	go_emit_range(g, e0, opidx, &g->cx->out);
 	appendStringInfoString(&g->cx->out, " :=");
-	if (opc)
+	if (opc && (strcmp(opc, "<<") == 0 || strcmp(opc, ">>") == 0) &&
+		!go_small_count(g, opidx + 1, e1))
+	{
+		/* x <<= n: the shift takes Go's result for every count */
+		if (++g->guards > GO_MAX_GUARDS)
+			go_err(g, GO_GUARDS_MSG);
+		appendStringInfoString(&g->cx->out, opc[0] == '<' ? GO_SHL_OPEN : GO_SHR_OPEN);
+		go_emit_range(g, e0, opidx, &g->cx->out);
+		appendStringInfoString(&g->cx->out, GO_SHIFT_MID);
+		go_emit_range(g, opidx + 1, e1, &g->cx->out);
+		appendStringInfoString(&g->cx->out, GO_SHIFT_CLOSE);
+		g->guards--;
+		appendStringInfoString(&g->cx->out, ";\n");
+	}
+	else if (opc)
 	{
 		go_emit_range(g, e0, opidx, &g->cx->out);
 		appendStringInfo(&g->cx->out, " %s (", opc);

@@ -214,6 +214,14 @@ shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
 shift that does not fit in an `int` fails with `integer out of range`. Go's
 64-bit `int` would hold it; declare the variable `int64`.
 
+A shift count that is not a decimal literal below 32 gives Go's result for
+every count. `x << n` is 0 when `n` is at least the width of `x` (64 bits for
+`int64`), and `x >> n` is then 0 or -1. A negative count fails, as it panics in
+Go. A non-zero `int` shifted left by 32 or more fails with
+`integer out of range`, since a plx `int` has 32 bits. plx evaluates such a
+shift in a subquery, and rejects an expression with more than 64 of them nested
+in one another; split it into several statements.
+
 ### String concatenation with `+`
 
 In Go, `+` with a string operand joins strings. Go has no implicit

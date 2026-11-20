@@ -820,3 +820,38 @@ CREATE FUNCTION fgsh_cexpr() RETURNS text LANGUAGE plxgo AS $$
  return fmt.Sprintf("%d %d %d %d %d", a, b, c, d, e)
 $$;
 SELECT fgsh_cexpr() AS go_shifts;
+-- Review of the PR 24 fixes, problem 3: a shift count at least as large as the
+-- width of the value. Go gives 0 for <<, and 0 or -1 for >>. SQL takes the
+-- count mod 64 for a bigint and mod 32 for an integer, so 1 << 64 gave 1.
+CREATE FUNCTION fgsh_count(n int) RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 1 << n
+ var x int64 = -8
+ var y int64 = 8
+ var z int64 = 5
+ z <<= n
+ return fmt.Sprintf("%d %d %d %d", a, x >> n, y >> n, z)
+$$;
+SELECT fgsh_count(63) AS go_63, fgsh_count(64) AS go_64, fgsh_count(65) AS go_65;
+SELECT fgsh_count(NULL) IS NULL AS go_null;
+-- a negative count panics in Go; plx fails
+SELECT fg_err('SELECT fgsh_count(-1)') AS go_negative;
+-- an integer (32 bits in plx) shifted right by 32 or more is 0 or -1
+CREATE FUNCTION fgsh_r32(v int, n int) RETURNS int LANGUAGE plxgo AS $$ return v >> n $$;
+SELECT fgsh_r32(-8, 33) AS go_m1, fgsh_r32(8, 33) AS go_0, fgsh_r32(-8, 1) AS go_m4;
+-- shifted left by 32 or more, a non-zero integer does not fit: Go's int is 64
+-- bits wide, so plx fails as it does for any shift that leaves the range
+CREATE FUNCTION fgsh_l32(v int, n int) RETURNS int LANGUAGE plxgo AS $$ return v << n $$;
+SELECT fgsh_l32(1, 4) AS go_16, fgsh_l32(0, 40) AS go_0;
+SELECT fg_err('SELECT fgsh_l32(1, 32)') AS go_out_of_range;
+-- Each such shift is a subquery, and PostgreSQL needs memory that grows faster
+-- than linearly to plan subqueries nested in one another: shifts nested 800
+-- deep ran out of memory. plx allows 64 nested in one another.
+CREATE FUNCTION fgsh_mk(k int, lv int) RETURNS text LANGUAGE sql AS $f$
+  SELECT format('CREATE FUNCTION fgsh_many_%s_%s(n int) RETURNS bigint LANGUAGE plxgo AS %L',
+                k, lv, 'var x int64 = 1' || chr(10) || 'return ' || repeat('(', lv) || 'x' ||
+                repeat(repeat(' << n', k) || ')', lv))
+$f$;
+SELECT fg_err(fgsh_mk(64, 1)) AS go_no_error;
+SELECT fgsh_many_64_1(0) AS go_1;
+SELECT fg_err(fgsh_mk(65, 1)) AS go_too_many;
+SELECT fg_err(fgsh_mk(100, 8)) AS go_too_many;

@@ -270,8 +270,17 @@ Each entry names the dialects it affects.
   `var m int64 = 1 << n` gave -2147483648 for n = 31 and 1 for n = 32, and
   `1 << 40` gave 256. plx now shifts the constant as `bigint`, which gives
   Go's values. This includes a constant expression or a rune literal, such as
-  `(1) << 40`, `2 * 1 << 40` and `'a' << 40`. Stored in an `int` (a 32-bit `integer` in plx), a result that
-  does not fit now fails with `integer out of range` instead of wrapping.
+  `(1) << 40`, `2 * 1 << 40` and `'a' << 40`. Stored in an `int` (a 32-bit
+  `integer` in plx), a result that does not fit now fails with
+  `integer out of range` instead of wrapping.
+- **A shift count at least as large as the width of the value gives Go's
+  result.** SQL took the count mod 64 for a `bigint` and mod 32 for an
+  `integer`, so with `n` = 64, `1 << n` gave 1 and `x >> n` gave `x`. Go gives 0
+  for `<<`, and 0 or -1 for `>>`, and so does plx now. A negative count fails,
+  as it panics in Go. A non-zero `int` shifted left by 32 or more fails with
+  `integer out of range`. An expression with more than 64 shifts by a count
+  that is not a literal, nested in one another, is rejected at
+  `CREATE FUNCTION`.
 - **Integer conversions truncate.** `int(x)`, `int64(x)` and the other integer
   conversions truncate a float toward zero, as Go does, instead of rounding
   (`int(3.7)` is now 3). `int(x)` and `int64(x)` of a row field or an
