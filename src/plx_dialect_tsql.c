@@ -14,6 +14,9 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "parser/parse_coerce.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
 #include "plx.h"
@@ -22,6 +25,7 @@
 
 PG_FUNCTION_INFO_V1(plx_tsql_validator);
 PG_FUNCTION_INFO_V1(plx_tsql_inline_handler);
+PG_FUNCTION_INFO_V1(plx_tsql_toint);
 
 /* ======================================================================== */
 /* T-SQL front end (plxtsql, Transact-SQL: SQL Server / Sybase).            */
@@ -582,6 +586,8 @@ tq_read_type(Tq *tq, StringInfo dest)
 				tq->pos++;
 		}
 	}
+	else if (base && strcmp(base, "numeric") == 0)
+		appendStringInfoString(dest, "(18,0)");	/* SQL Server's default */
 }
 
 /* map a type reference spanning tokens [a,b) into dest (for CONVERT) */
@@ -645,6 +651,8 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 		}
 		appendStringInfoChar(dest, ')');
 	}
+	else if (base && strcmp(base, "numeric") == 0)
+		appendStringInfoString(dest, "(18,0)");	/* SQL Server's default */
 }
 
 /*
@@ -717,14 +725,16 @@ tq_cast_as(Tq *tq, int lp, int close)
  * keep SQL Server's value is kept too, so the call fails instead of returning
  * a different value: tinyint and smallmoney have a smaller range than smallint
  * and numeric(10,4), binary(n) and varbinary(n) cut the value to n bytes,
- * smalldatetime rounds to the minute, and sysname is nvarchar(128).
+ * smalldatetime rounds to the minute, and sysname is nvarchar(128). An
+ * integer type is not mapped here: tq_emit_call truncates the value first.
  */
 static bool
 tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
 {
 	static const char *mapped[] = {
 		"nvarchar", "varchar", "ntext", "bit", "money", "datetime",
-		"datetime2", "uniqueidentifier", "image", "varbinary", NULL
+		"datetime2", "uniqueidentifier", "image", "varbinary", "decimal",
+		"numeric", "dec", NULL
 	};
 	TqTok	   *arg = NULL;
 	const char *base;
@@ -781,6 +791,12 @@ tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
 	}
 	if (arg)
 		return false;
+	if (strcmp(base, "numeric") == 0)
+	{
+		/* a bare DECIMAL or NUMERIC is decimal(18,0) in SQL Server */
+		appendStringInfoString(dest, "numeric(18,0)");
+		return true;
+	}
 	appendStringInfoString(dest, base);
 	return true;
 }
@@ -1173,6 +1189,203 @@ tq_mark_concat(Tq *tq, int a, int b)
 	}
 }
 
+/*
+ * SQL Server converts a decimal or float value to an integer type by
+ * truncating toward zero; a PostgreSQL cast rounds, so CAST(2.7 AS int) gives
+ * 3 instead of 2. The helpers below put trunc() in front of every conversion
+ * to an integer type: CAST, CONVERT, and assignment to an integer variable.
+ */
+
+/* is the PostgreSQL type text one of the integer types? */
+static bool
+tq_is_int_type(const char *typ)
+{
+	return typ && (strcmp(typ, "integer") == 0 || strcmp(typ, "bigint") == 0 ||
+				   strcmp(typ, "smallint") == 0);
+}
+
+/* PostgreSQL type text of an @variable (local or parameter), or NULL */
+static const char *
+tq_var_type(Tq *tq, TqTok *tk)
+{
+	char	   *name = tq_ident(tk->s, tk->len);
+	PlxLocal2  *l = plx_local_find(tq->cx, name, tk->len);
+	const PlxFuncMeta *m = tq->cx->meta;
+	int			i;
+
+	if (l)
+		return l->is_record ? NULL : l->typ;
+	if (m == NULL || m->argnames == NULL || m->argtypes == NULL)
+		return NULL;
+	for (i = 0; i < m->nargs; i++)
+	{
+		const char *an = m->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len &&
+			pg_strncasecmp(an, tk->s, tk->len) == 0)
+		{
+			switch (m->argtypes[i])
+			{
+				case INT2OID:
+					return "smallint";
+				case INT4OID:
+					return "integer";
+				case INT8OID:
+					return "bigint";
+				case NUMERICOID:
+					return "numeric";
+				case FLOAT4OID:
+					return "real";
+				case FLOAT8OID:
+					return "double precision";
+				case TEXTOID:
+				case VARCHAROID:
+				case BPCHAROID:
+					return "text";
+				case BOOLOID:
+					return "boolean";
+				default:
+					return NULL;
+			}
+		}
+	}
+	return NULL;
+}
+
+/*
+ * kind of a type text for an integer conversion: 'i' an integer type, 'f' a
+ * decimal or float type (truncate), 's' a string or boolean (a plain cast,
+ * which rejects '2.7' as SQL Server does), 0 anything else.
+ */
+static char
+tq_type_numkind(const char *typ)
+{
+	static const char *const ik[] = {"integer", "bigint", "smallint", NULL};
+	static const char *const fk[] = {"numeric", "real", "double precision", NULL};
+	static const char *const sk[] = {"varchar", "text", "char", "boolean", NULL};
+	int			len,
+				i;
+
+	if (typ == NULL)
+		return 0;
+	len = strcspn(typ, "(");
+	for (i = 0; ik[i]; i++)
+		if ((int) strlen(ik[i]) == len && strncmp(typ, ik[i], len) == 0)
+			return 'i';
+	for (i = 0; fk[i]; i++)
+		if ((int) strlen(fk[i]) == len && strncmp(typ, fk[i], len) == 0)
+			return 'f';
+	for (i = 0; sk[i]; i++)
+		if ((int) strlen(sk[i]) == len && strncmp(typ, sk[i], len) == 0)
+			return 's';
+	return 0;
+}
+
+/*
+ * kind of the expression [a,b) for an integer conversion, from what plx can
+ * see: 'i' when it needs no trunc() (integer literals and integer variables
+ * under + - * / %, or one string or boolean operand), 'f' when trunc() takes
+ * it directly (the same with a decimal literal or a decimal or float
+ * variable), 0 when its type is known only at run time.
+ */
+static char
+tq_num_kind(Tq *tq, int a, int b)
+{
+	char		k = 'i';
+	int			i,
+				j;
+
+	if (a >= b)
+		return 0;
+	if (b - a == 1 && tq->t[a].kind == TQ_STR)
+		return 'i';
+	for (i = a; i < b; i++)
+	{
+		TqTok	   *t = &tq->t[i];
+		char		c;
+
+		switch (t->kind)
+		{
+			case TQ_LP:
+			case TQ_RP:
+				break;
+			case TQ_OP:
+				if (t->len != 1 || strchr("+-*/%", t->s[0]) == NULL)
+					return 0;
+				break;
+			case TQ_NUM:
+				for (j = 0; j < t->len; j++)
+				{
+					if (t->s[j] == '.')
+						k = 'f';
+					else if (t->s[j] < '0' || t->s[j] > '9')
+						return 0;
+				}
+				break;
+			case TQ_VAR:
+				c = tq_type_numkind(tq_var_type(tq, t));
+				if (c == 's' && b - a == 1)
+					return 'i';
+				if (c != 'i' && c != 'f')
+					return 0;
+				if (c == 'f')
+					k = 'f';
+				break;
+			default:
+				return 0;
+		}
+	}
+	return k;
+}
+
+/*
+ * emit the conversion of the SQL text e to the integer type typ, truncating
+ * toward zero. kind is from tq_num_kind. With kind 0 the type of e is known
+ * only at run time, so e goes to plx_tsql_int2, plx_tsql_int4 or
+ * plx_tsql_int8 (see plx_tsql_toint). A function call evaluates e once, keeps
+ * an aggregate or window function in e at the query level it was written at,
+ * is allowed in a DEFAULT or CHECK, and plans in time linear in its size.
+ */
+static void
+tq_int_conv_str(const char *e, char kind, const char *typ, StringInfo out)
+{
+	if (kind == 'i' || kind == 's')
+		appendStringInfo(out, "CAST(%s AS %s)", e, typ);
+	else if (kind == 'f')
+		appendStringInfo(out, "CAST(trunc(%s) AS %s)", e, typ);
+	else
+		appendStringInfo(out, "%s((%s))",
+						 plx_ext_object(strcmp(typ, "bigint") == 0 ? "plx_tsql_int8" :
+										strcmp(typ, "smallint") == 0 ? "plx_tsql_int2" :
+										"plx_tsql_int4"), e);
+}
+
+/* emit the expression [a,b) converted to the integer type typ */
+static void
+tq_int_conv(Tq *tq, int a, int b, const char *typ, StringInfo out)
+{
+	StringInfoData e;
+
+	initStringInfo(&e);
+	tq_emit_range(tq, a, b, &e);
+	tq_sp(out);
+	tq_int_conv_str(e.data, tq_num_kind(tq, a, b), typ, out);
+	pfree(e.data);
+}
+
+/*
+ * emit the value [a,b) assigned to a variable of type typ: truncated when typ
+ * is an integer type and the value may have a fraction, else as written.
+ */
+static void
+tq_emit_assign_value(Tq *tq, int a, int b, const char *typ, StringInfo out)
+{
+	if (tq_is_int_type(typ) && tq_num_kind(tq, a, b) != 'i')
+		tq_int_conv(tq, a, b, typ, out);
+	else
+		tq_emit_range(tq, a, b, out);
+}
+
 /* emit a function-call rename for a WORD at index i (followed by '('), or
  * return false to fall through to the generic path. On success sets *ni. */
 static bool
@@ -1200,6 +1413,12 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 			return false;
 		initStringInfo(&ty);
 		tq_type_from_range(tq, c1, comma, &ty);
+		if (tq_is_int_type(ty.data))
+		{
+			tq_int_conv(tq, comma + 1, comma2 > 0 ? comma2 : close, ty.data, out);
+			*ni = close + 1;
+			return true;
+		}
 		tq_sp(out);
 		appendStringInfoString(out, "CAST(");
 		tq_emit_range(tq, comma + 1, comma2 > 0 ? comma2 : close, out);
@@ -1216,6 +1435,15 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 
 		if (as < 0)
 			return false;
+		if (as + 2 == close && tq->t[as + 1].kind == TQ_WORD &&
+			(tq_ci(&tq->t[as + 1], "INT") || tq_ci(&tq->t[as + 1], "INTEGER") ||
+			 tq_ci(&tq->t[as + 1], "BIGINT") || tq_ci(&tq->t[as + 1], "SMALLINT")))
+		{
+			tq_int_conv(tq, lp + 1, as,
+						tq_base_type(tq->t[as + 1].s, tq->t[as + 1].len), out);
+			*ni = close + 1;
+			return true;
+		}
 		initStringInfo(&ty);
 		if (!tq_cast_type(tq, as + 1, close, &ty))
 			return false;
@@ -1619,7 +1847,7 @@ tq_declare(Tq *tq, int ind)
 			}
 			plx_indent(&tq->cx->out, ind);
 			appendStringInfo(&tq->cx->out, "%s :=", name);
-			tq_emit_range(tq, e0, e1, &tq->cx->out);
+			tq_emit_assign_value(tq, e0, e1, l->typ, &tq->cx->out);
 			appendStringInfoString(&tq->cx->out, ";\n");
 			tq->pos = e1;
 		}
@@ -1718,6 +1946,23 @@ tq_set(Tq *tq, int ind)
 		tq_emit_range(tq, e0, e1, &tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ");\n");
 	}
+	else if (arith && tq_is_int_type(tq_var_type(tq, v)) &&
+			 tq_num_kind(tq, e0, e1) != 'i')
+	{
+		/* @i += 1.5 is @i = @i + 1.5, which truncates into an integer @i */
+		StringInfoData e;
+		char	   *sum;
+
+		initStringInfo(&e);
+		tq_emit_range(tq, e0, e1, &e);
+		sum = psprintf("%s %c (%s)", name, arith, e.data);
+		appendStringInfo(&tq->cx->out, "%s := ", name);
+		tq_int_conv_str(sum, tq_num_kind(tq, e0, e1), tq_var_type(tq, v),
+						&tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ";\n");
+		pfree(sum);
+		pfree(e.data);
+	}
 	else if (arith)
 	{
 		appendStringInfo(&tq->cx->out, "%s := %s %c (", name, name, arith);
@@ -1727,7 +1972,7 @@ tq_set(Tq *tq, int ind)
 	else
 	{
 		appendStringInfo(&tq->cx->out, "%s :=", name);
-		tq_emit_range(tq, e0, e1, &tq->cx->out);
+		tq_emit_assign_value(tq, e0, e1, tq_var_type(tq, v), &tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ";\n");
 	}
 	tq->pos = e1;
@@ -1758,6 +2003,7 @@ tq_select(Tq *tq, int ind)
 		char	  **names = palloc(sizeof(char *) * cap);
 		int		   *estart = palloc(sizeof(int) * cap),
 				   *eend = palloc(sizeof(int) * cap);
+		const char **ttyp = palloc(sizeof(char *) * cap);
 		int			frompos = -1;
 
 		for (;;)
@@ -1780,8 +2026,10 @@ tq_select(Tq *tq, int ind)
 				names = repalloc(names, sizeof(char *) * cap);
 				estart = repalloc(estart, sizeof(int) * cap);
 				eend = repalloc(eend, sizeof(int) * cap);
+				ttyp = repalloc(ttyp, sizeof(char *) * cap);
 			}
 			names[nassign] = tq_ident(v->s, v->len);
+			ttyp[nassign] = tq_var_type(tq, v);
 			tq->pos += 2;				/* @v = */
 			e0 = tq->pos;
 			e1 = e0;
@@ -1878,8 +2126,21 @@ tq_select(Tq *tq, int ind)
 			appendStringInfoString(&tq->cx->out, " LOOP\n");
 			for (k = 0; k < nassign; k++)
 			{
+				char		kind = tq_num_kind(tq, estart[k], eend[k]);
+
 				plx_indent(&tq->cx->out, ind + 1);
-				appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
+				if (tq_is_int_type(ttyp[k]) && kind != 'i')
+				{
+					/* the column has the value's type: truncate it the same way */
+					char	   *col = psprintf("%s.c%d", rec, k + 1);
+
+					appendStringInfo(&tq->cx->out, "%s := ", names[k]);
+					tq_int_conv_str(col, kind, ttyp[k], &tq->cx->out);
+					appendStringInfoString(&tq->cx->out, ";\n");
+					pfree(col);
+				}
+				else
+					appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
 			}
 			plx_indent(&tq->cx->out, ind);
 			appendStringInfoString(&tq->cx->out, "END LOOP;\n");
@@ -1893,7 +2154,7 @@ tq_select(Tq *tq, int ind)
 			{
 				plx_indent(&tq->cx->out, ind);
 				appendStringInfo(&tq->cx->out, "%s :=", names[k]);
-				tq_emit_range(tq, estart[k], eend[k], &tq->cx->out);
+				tq_emit_assign_value(tq, estart[k], eend[k], ttyp[k], &tq->cx->out);
 				appendStringInfoString(&tq->cx->out, ";\n");
 			}
 		}
@@ -2497,4 +2758,115 @@ Datum
 plx_tsql_inline_handler(PG_FUNCTION_ARGS)
 {
 	return plx_generic_inline_handler(fcinfo, &plx_tsql_dialect);
+}
+
+/*
+ * plx_tsql_toint: SQL Server's conversion of a value to an integer type, for a
+ * value whose type plxtsql cannot see when it transpiles. The SQL functions
+ * plx_tsql_int2, plx_tsql_int4 and plx_tsql_int8 all call this one; the
+ * declared result type picks the integer type. A numeric, real or double
+ * precision value, or a value of a domain over one, is truncated toward zero
+ * first, as SQL Server does; a PostgreSQL cast would round it. Any other type
+ * takes PostgreSQL's explicit cast to the integer type, so a string that is
+ * not an integer fails as before, and a type with no such cast fails with
+ * "cannot cast type". The argument is declared "any", so a literal of
+ * unknown type, such as NULL or a quoted string in parentheses, reaches it
+ * unresolved and is read as text.
+ */
+typedef struct TqIntCast
+{
+	Oid			argtype;		/* the argument type the rest is for */
+	Oid			src;			/* the type the cast starts from */
+	char		trunc;			/* 'n' numeric, 'f' real, 'd' double, 0 none */
+	CoercionPathType path;
+	int			nargs;			/* of the cast function */
+	FmgrInfo	fn;				/* cast function, or src's output function */
+	FmgrInfo	in;				/* the result type's input function */
+	Oid			ioparam;
+} TqIntCast;
+
+Datum
+plx_tsql_toint(PG_FUNCTION_ARGS)
+{
+	TqIntCast  *c = (TqIntCast *) fcinfo->flinfo->fn_extra;
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	Datum		v = PG_GETARG_DATUM(0);
+
+	if (c == NULL || c->argtype != argtype)
+	{
+		MemoryContext mcxt = fcinfo->flinfo->fn_mcxt;
+		Oid			rettype = get_func_rettype(fcinfo->flinfo->fn_oid);
+		Oid			funcid = InvalidOid;
+
+		if (!OidIsValid(argtype))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("could not determine the type of the value to convert")));
+		c = MemoryContextAllocZero(mcxt, sizeof(TqIntCast));
+		c->argtype = argtype;
+		/* a domain, such as a T-SQL alias type, converts as its base type */
+		c->src = getBaseType(argtype);
+		if (c->src == NUMERICOID)
+			c->trunc = 'n';
+		else if (c->src == FLOAT4OID)
+		{
+			c->trunc = 'f';
+			c->src = FLOAT8OID;
+		}
+		else if (c->src == FLOAT8OID)
+			c->trunc = 'd';
+		if (argtype == UNKNOWNOID)
+			c->path = COERCION_PATH_COERCEVIAIO;	/* a literal: read its text */
+		else
+			c->path = find_coercion_pathway(rettype, c->src, COERCION_EXPLICIT,
+											&funcid);
+		switch (c->path)
+		{
+			case COERCION_PATH_FUNC:
+				fmgr_info_cxt(funcid, &c->fn, mcxt);
+				c->nargs = get_func_nargs(funcid);
+				break;
+			case COERCION_PATH_RELABELTYPE:
+				break;
+			case COERCION_PATH_COERCEVIAIO:
+				{
+					Oid			outfn,
+								infn;
+					bool		varlena;
+
+					getTypeOutputInfo(c->src, &outfn, &varlena);
+					fmgr_info_cxt(outfn, &c->fn, mcxt);
+					getTypeInputInfo(rettype, &infn, &c->ioparam);
+					fmgr_info_cxt(infn, &c->in, mcxt);
+				}
+				break;
+			default:
+				ereport(ERROR,
+						(errcode(ERRCODE_CANNOT_COERCE),
+						 errmsg("cannot cast type %s to %s",
+								format_type_be(argtype), format_type_be(rettype))));
+		}
+		fcinfo->flinfo->fn_extra = c;
+	}
+
+	if (c->trunc == 'f')
+		v = DirectFunctionCall1(ftod, v);
+	if (c->trunc == 'n')
+		v = DirectFunctionCall2(numeric_trunc, v, Int32GetDatum(0));
+	else if (c->trunc)
+		v = DirectFunctionCall1(dtrunc, v);
+
+	switch (c->path)
+	{
+		case COERCION_PATH_FUNC:
+			if (c->nargs == 1)
+				return FunctionCall1Coll(&c->fn, PG_GET_COLLATION(), v);
+			return FunctionCall3Coll(&c->fn, PG_GET_COLLATION(), v,
+									 Int32GetDatum(-1), BoolGetDatum(true));
+		case COERCION_PATH_COERCEVIAIO:
+			return InputFunctionCall(&c->in, OutputFunctionCall(&c->fn, v),
+									 c->ioparam, -1);
+		default:
+			return v;			/* binary-compatible */
+	}
 }

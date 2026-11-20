@@ -440,6 +440,22 @@ Each entry names the dialects it affects.
   `CAST('$5' AS money)` fails with `invalid input syntax for type numeric`.
   Before, it gave `$5.00`, and SQL Server gives 5.00. Remove the sign before
   the cast.
+- **A conversion to an integer type truncates, and `DECIMAL` with no
+  precision is `decimal(18,0)`**, as in SQL Server. `CAST` and `CONVERT` to
+  `INT`, `INTEGER`, `BIGINT` or `SMALLINT` (and `CONVERT` to `TINYINT`), and an
+  assignment to a variable of one of these types, now truncate a fraction
+  toward zero. Before, they rounded: `CAST(1.5 AS int)` gave 2 instead of 1,
+  `CONVERT(int, -2.5)` gave -3 instead of -2, and `DECLARE @i int = 2.7` gave 3
+  instead of 2. A bare `DECIMAL`, `NUMERIC` or `DEC` in `DECLARE`, `CAST` or
+  `CONVERT` now becomes `numeric(18,0)`. Before, it was PostgreSQL `numeric`,
+  which keeps every digit: `DECLARE @d DECIMAL = 2.7` gave 2.7 instead of 3.
+  `RETURN` and `INSERT` into an integer column still round; see
+  doc/LIMITATIONS.md. For a value whose type plx cannot see, such as a column
+  or a function call, the generated code calls the new functions
+  `plx_tsql_int2`, `plx_tsql_int4` and `plx_tsql_int8`, which
+  `ALTER EXTENSION plx UPDATE TO '3.0.0'` installs. A value of a domain over
+  `numeric`, `real` or `double precision`, such as a T-SQL alias type,
+  truncates too.
 
 #### plxplsql
 
@@ -783,6 +799,11 @@ not here.
 
 #### plxtsql
 
+- The dialect chapter and doc/LIMITATIONS.md now say that a `CATCH` block
+  undoes the database changes its `TRY` block made before the error. SQL
+  Server keeps them. plx cannot, because `TRY` becomes a plpgsql exception
+  block, which rolls back to a savepoint. The behaviour is the same as in
+  2.0.1; only the documentation is new. It shows how to keep such a write.
 - A `CASE` expression works in `SET`, `RETURN`, `DECLARE` initializers, `IF`
   and `WHILE` conditions, and `SELECT` assignment lists. Before, plx cut the
   expression at the CASE's `ELSE` or `END`, and the function was rejected with

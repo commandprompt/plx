@@ -596,3 +596,155 @@ CREATE FUNCTION fxmx_nv() RETURNS int LANGUAGE plxtsql AS $$
   RETURN LEN(CONVERT(nvarchar(MAX), 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')) + DATALENGTH(CONVERT(varbinary(MAX), 'ab'));
 $$;
 SELECT fxmx_nv() AS r;  -- SQL Server: 42
+-- R10 (PR 24 review [10]): a conversion to an integer type truncates toward zero, as in SQL Server,
+-- in CAST, CONVERT and assignment to an integer variable; a DECIMAL or NUMERIC with no precision is decimal(18,0)
+CREATE FUNCTION fxr10_s2(d numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @i int = 2.7;
+  DECLARE @j int;
+  SET @j = @d;
+  RETURN CONCAT(CAST(1.5 AS int), ' ', CONVERT(int, -2.5), ' ', @i, ' ', @j);
+$$;
+SELECT fxr10_s2(3.9) AS r;  -- SQL Server: 1 -2 2 3
+CREATE FUNCTION fxr10_v1(x numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @d DECIMAL = 2.7;
+  RETURN CONCAT(CAST(@x AS numeric), '|', @d);
+$$;
+SELECT fxr10_v1(12.345) AS r;  -- SQL Server: 12|3
+CREATE FUNCTION fxr10_more(x numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @f float = 2.9;
+  DECLARE @b bit = 1;
+  DECLARE @t tinyint = 2.9;
+  DECLARE @s smallint = -2.9;
+  DECLARE @n int = 1;
+  DECLARE @e dec = -2.5;
+  SET @n += 1.5;
+  RETURN CONCAT(CAST(@f AS int), ' ', CAST(@f * -1 AS int), ' ', CAST(@b AS int), ' ',
+                CAST('12' AS int), ' ', CONVERT(bigint, 9007199254740993.9), ' ', CONVERT(bigint, @x * -1), ' ',
+                @t, ' ', @s, ' ', @n, ' ', CONVERT(decimal, 2.5), ' ', @e, ' ', CAST(@x AS numeric(5,2)));
+$$;
+SELECT fxr10_more(12.345) AS r;  -- SQL Server: 2 -2 1 12 9007199254740993 -12 2 -2 2 3 -3 12.35
+CREATE TABLE fxr10_t(v numeric);
+INSERT INTO fxr10_t VALUES (1.2), (2.9);
+CREATE FUNCTION fxr10_sel() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @a int;
+  DECLARE @b int;
+  SELECT @a = v FROM fxr10_t WHERE v > 2;
+  SELECT @b = -7.9;
+  RETURN CONCAT(@a, ' ', @b);
+$$;
+SELECT fxr10_sel() AS r;  -- SQL Server: 2 -7
+CREATE FUNCTION fxr10_q() RETURNS SETOF int LANGUAGE plxtsql AS $$
+  SELECT CAST(v AS int) FROM fxr10_t ORDER BY v;
+$$;
+SELECT * FROM fxr10_q();  -- SQL Server: 1, 2
+-- a string that is not an integer still fails, as in SQL Server
+CREATE FUNCTION fxr10_str() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST('1.5' AS int);
+$$;
+SELECT ft_err($q$SELECT fxr10_str()$q$) AS r;  -- SQL Server: error, conversion failed
+-- aggregates, a window function and GROUP BY
+CREATE FUNCTION fxr10_agg() RETURNS SETOF text LANGUAGE plxtsql AS $$
+  SELECT CONCAT(CAST(SUM(v) AS int), ' ', CAST(AVG(v) OVER () AS int), ' ', CONVERT(int, ABS(v) * -1))
+    FROM fxr10_t GROUP BY v ORDER BY v;
+$$;
+SELECT * FROM fxr10_agg();  -- SQL Server: 1 2 -1, 2 2 -2
+-- nested conversions evaluate each value once: the text and the plan grow linearly
+CREATE FUNCTION fxr10_nest(x numeric) RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(@x AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int);
+$$;
+SET statement_timeout = '60s';
+SELECT fxr10_nest(-2.7) AS r;  -- SQL Server: -2
+RESET statement_timeout;
+-- R10b (review of the PR 24 fixes): a conversion whose value holds a function
+-- call goes through one helper function call, so the value is evaluated once,
+-- an aggregate or window function in it stays in the outer query, it works in
+-- DDL, and the plan grows linearly with nesting
+CREATE TABLE fxr10b_t(g int, x numeric);
+INSERT INTO fxr10b_t VALUES (1, 1.5), (1, 1.2), (2, 1.9);
+CREATE FUNCTION fxr10b_agg() RETURNS SETOF text LANGUAGE plxtsql AS $$
+  SELECT CONCAT(g, ':', CAST(COUNT(*) AS int)) FROM fxr10b_t GROUP BY g ORDER BY g;
+$$;
+SELECT * FROM fxr10b_agg();  -- SQL Server: 1:2, 2:1
+CREATE FUNCTION fxr10b_agg2() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @n int;
+  DECLARE @m int;
+  SELECT @n = CAST(COUNT(*) AS int) FROM fxr10b_t;
+  SET @m = (SELECT CONVERT(int, COUNT(*)) FROM fxr10b_t);
+  RETURN CONCAT(@n, ' ', @m, ' ', (SELECT CAST(SUM(1) * 1.5 AS int) FROM fxr10b_t));
+$$;
+SELECT fxr10b_agg2() AS r;  -- SQL Server: 3 3 4
+CREATE FUNCTION fxr10b_win() RETURNS SETOF int LANGUAGE plxtsql AS $$
+  SELECT CAST(SUM(CAST(x AS int)) OVER () AS int) FROM fxr10b_t ORDER BY g;
+$$;
+SELECT * FROM fxr10b_win();  -- SQL Server: 3, 3, 3
+-- a call inside a converted window expression runs once per row
+CREATE SEQUENCE fxr10b_seq;
+CREATE FUNCTION fxr10b_once() RETURNS SETOF int LANGUAGE plxtsql AS $$
+  SELECT CAST(nextval('fxr10b_seq') * 0 + ROW_NUMBER() OVER (ORDER BY x) * 1.5 AS int) FROM fxr10b_t ORDER BY x;
+$$;
+SELECT * FROM fxr10b_once();  -- SQL Server: 1, 3, 4
+SELECT last_value AS r FROM fxr10b_seq;  -- one call per row: 3
+-- a conversion in a DEFAULT or a CHECK of a table the function creates
+CREATE FUNCTION fxr10b_ddl() RETURNS text LANGUAGE plxtsql AS $$
+  CREATE TABLE fxr10b_c (a numeric, b int DEFAULT CAST(abs(-2.5) AS int), CHECK (CAST(abs(a) AS int) < 5));
+  INSERT INTO fxr10b_c (a) VALUES (-4.9);
+  RETURN (SELECT CONCAT(a, ' ', b) FROM fxr10b_c);
+$$;
+SELECT fxr10b_ddl() AS r;  -- SQL Server: -4.9 2
+-- a literal of unknown type in parentheses converts as before
+CREATE FUNCTION fxr10b_unk() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONCAT(CAST((NULL) AS int), '|', CAST(('12') AS int), '|', CONVERT(bigint, (NULL)));
+$$;
+SELECT fxr10b_unk() AS r;  -- SQL Server: |12|
+-- 300 nested conversions plan in linear time (before the fix: over 2 GB of memory and over a second)
+DO $d$
+BEGIN
+  EXECUTE format('CREATE FUNCTION fxr10b_deep(d numeric) RETURNS int LANGUAGE plxtsql AS %L',
+                 'RETURN ' || repeat('CAST(abs(', 300) || '@d' || repeat(') AS int)', 300) || ';');
+END $d$;
+SET statement_timeout = '1s';
+SELECT fxr10b_deep(-2.7) AS r;  -- SQL Server: 2
+RESET statement_timeout;
+-- a value of a domain type over numeric truncates too
+CREATE DOMAIN fxr10b_price AS numeric(10,2);
+CREATE TABLE fxr10b_p(p fxr10b_price);
+INSERT INTO fxr10b_p VALUES (2.70);
+CREATE FUNCTION fxr10b_dom(q fxr10b_price) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @i int;
+  SELECT @i = p FROM fxr10b_p;
+  RETURN CONCAT(@i, CAST((SELECT p FROM fxr10b_p) AS int), CONVERT(int, @q));
+$$;
+SELECT fxr10b_dom(2.70) AS r;  -- SQL Server: 222
+-- R11 (PR 24 review [11]): a CATCH block undoes the writes its TRY block made
+-- before the error, because TRY becomes a plpgsql block with an EXCEPTION
+-- clause, which rolls back to a savepoint. SQL Server keeps them. plx cannot
+-- emulate this; the case pins the behaviour so that a change is noticed.
+CREATE TABLE fxr11_log(msg text);
+CREATE FUNCTION fxr11_try() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @n int = 0;
+  BEGIN TRY
+    INSERT INTO fxr11_log VALUES ('attempt');
+    SET @n = 1;
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO fxr11_log VALUES ('caught');
+  END CATCH
+  RETURN CONCAT('n=', @n);
+$$;
+SELECT fxr11_try() AS r;  -- SQL Server: n=1 (a variable keeps its value in both)
+SELECT string_agg(msg, ',' ORDER BY msg) AS r FROM fxr11_log;  -- SQL Server: attempt,caught; plx: caught
+-- the documented workaround: make a write that must survive before BEGIN TRY
+TRUNCATE fxr11_log;
+CREATE FUNCTION fxr11_fix() RETURNS text LANGUAGE plxtsql AS $$
+  INSERT INTO fxr11_log VALUES ('attempt');
+  BEGIN TRY
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO fxr11_log VALUES ('caught');
+  END CATCH
+  RETURN 'done';
+$$;
+SELECT fxr11_fix() AS r;
+SELECT string_agg(msg, ',' ORDER BY msg) AS r FROM fxr11_log;  -- SQL Server: attempt,caught

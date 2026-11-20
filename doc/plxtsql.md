@@ -92,6 +92,12 @@ variables the same `SELECT` assigns, such as `SELECT @t = @t + v FROM t`, is
 rejected when you create the function. Use an aggregate instead, for example
 `SELECT @t = SUM(v) FROM t` or `SELECT @s = string_agg(name, ',') FROM t`.
 
+An assignment to an integer variable truncates a fraction toward zero, as in
+SQL Server: `DECLARE @i int = 2.7` gives 2, `SET @i = -2.7` gives -2, and
+`SET @i += 1.5` adds 1.5 and then truncates. This applies to `DECLARE`, `SET`
+and `SELECT @x = ...`. See
+[Conversion to an integer type](#conversion-to-an-integer-type).
+
 ### Control flow
 
 | T-SQL | plpgsql |
@@ -119,7 +125,7 @@ keyword or `BEGIN`); there is no `THEN` keyword in T-SQL.
 | `RAISERROR(...) WITH LOG` | adds `RAISE LOG '%', 'msg';` before the message |
 | `THROW n, 'msg', s` | `RAISE EXCEPTION '%', 'msg';` |
 | `THROW;` (bare, in CATCH) | `RAISE;` (re-raise) |
-| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` |
+| `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` | `BEGIN ... EXCEPTION WHEN OTHERS THEN ... END;` (undoes the writes made in TRY; see [below](#a-catch-block-undoes-the-writes-made-in-try)) |
 | `ERROR_MESSAGE()` | `SQLERRM` |
 
 RAISERROR follows SQL Server's severity rule. A severity of 10 or lower is an
@@ -138,6 +144,41 @@ server log. Any other option is an error when you create the function.
 `RAISERROR`'s format arguments (its `%d`/`%s` printf-style substitutions) are not
 applied; the message argument is emitted as-is.
 
+### A CATCH block undoes the writes made in TRY
+
+**Caution:** when an error reaches `CATCH`, plx undoes every database change
+that the `TRY` block made before the error. SQL Server keeps those changes when
+`XACT_ABORT` is `OFF`, its default. plx cannot keep them: `TRY` becomes a
+plpgsql block with an `EXCEPTION` clause, and PostgreSQL rolls such a block back
+to a savepoint when it catches an error. Variables keep the values they had
+when the error happened, as in SQL Server.
+
+```sql
+CREATE TABLE logt(msg text);
+CREATE FUNCTION r1() RETURNS text LANGUAGE plxtsql AS $$
+  BEGIN TRY
+    INSERT INTO logt VALUES ('attempt');
+    RAISERROR('fail', 16, 1);
+  END TRY
+  BEGIN CATCH
+    INSERT INTO logt VALUES ('caught');
+  END CATCH
+  RETURN 'done';
+$$;
+SELECT r1();
+SELECT string_agg(msg, ',') FROM logt;
+```
+
+SQL Server leaves `attempt,caught` in `logt`. plx leaves only `caught`.
+
+To keep a write when the `TRY` block fails, make it outside the `TRY` block:
+
+1. Move a write that must survive, such as an audit or error-log row, before
+   `BEGIN TRY`.
+2. Or make it in the `CATCH` block, which runs after the rollback. To use a
+   value computed in `TRY`, assign it to a variable there; the variable keeps
+   its value.
+
 ### Types (in `DECLARE`)
 
 | T-SQL | PostgreSQL |
@@ -145,7 +186,9 @@ applied; the message argument is emitted as-is.
 | `INT`, `INTEGER` | `integer` |
 | `BIGINT`, `SMALLINT`, `TINYINT` | `bigint`, `smallint`, `smallint` |
 | `BIT` | `boolean` |
-| `DECIMAL(p,s)`, `NUMERIC`, `MONEY` | `numeric(p,s)`, `numeric`, `numeric(19,4)` |
+| `DECIMAL(p,s)`, `NUMERIC(p,s)`, `DEC(p,s)` | `numeric(p,s)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)`, as in SQL Server |
+| `MONEY` | `numeric(19,4)` |
 | `FLOAT`, `REAL` | `double precision`, `real` |
 | `VARCHAR(n)`, `NVARCHAR(n)` | `varchar(n)` |
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)` | `text` |
@@ -197,6 +240,8 @@ PostgreSQL type names work.
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
 | `BIT` | `boolean` |
 | `MONEY` | `numeric(19,4)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)` |
+| `INT`, `INTEGER`, `BIGINT`, `SMALLINT` | the same type, with the value truncated first (see below) |
 | `DATETIME`, `DATETIME2` | `timestamp` |
 | `DATETIME2(n)` | `timestamp(n)`; `DATETIME2(7)` gives `timestamp` (6 digits) |
 | `UNIQUEIDENTIFIER` | `uuid` |
@@ -228,6 +273,45 @@ A mapped type takes the PostgreSQL rules for its values, as in `DECLARE` and
   `DATALENGTH(CAST('\x41' AS varbinary(max)))` gives 1. SQL Server gives 4.
 - `CAST(N'ab' AS varbinary(max))` holds the UTF-8 bytes, so `DATALENGTH`
   gives 2. SQL Server stores UTF-16 and gives 4.
+
+### Conversion to an integer type
+
+SQL Server truncates a decimal or float value toward zero when it converts it
+to an integer type. A PostgreSQL cast rounds. plx truncates in these places:
+
+- `CAST(e AS int)`, and the same with `INTEGER`, `BIGINT` and `SMALLINT`.
+- `CONVERT(int, e)`, and the same with `INTEGER`, `BIGINT`, `SMALLINT` and
+  `TINYINT`.
+- An assignment to a variable of one of these types (`DECLARE @i int = e`,
+  `SET @i = e`, `SET @i += e`, `SELECT @i = e`).
+
+So `CAST(2.7 AS int)` gives 2 and `CONVERT(int, -2.5)` gives -2, where
+PostgreSQL gives 3 and -3. A string still converts as before:
+`CAST('1.5' AS int)` fails, as in SQL Server.
+
+When plx can see that the value is an integer, it emits a plain cast. When the
+value is a decimal or float literal or variable, it emits `trunc()`. Otherwise,
+such as for a column or a function call, it emits a call to `plx_tsql_int4`
+(`plx_tsql_int2` for `SMALLINT` and `TINYINT`, `plx_tsql_int8` for
+`BIGINT`). The extension installs these functions. Each one evaluates the
+value once and checks its type when the function runs: it truncates a
+`numeric`, `real` or `double precision` value, or a value of a domain over
+one of these, and casts any other value. A T-SQL alias type created as a
+PostgreSQL domain, such as `CREATE DOMAIN price AS numeric(10,2)`, so
+truncates too. The
+call works wherever the cast does, such as around an aggregate or a window
+function, or in a `DEFAULT` or `CHECK` of a table the function creates.
+
+A conversion to a decimal type with fewer fractional digits rounds, in plx and
+in SQL Server: `CONVERT(decimal, 2.5)` gives 3.
+
+These places still round, because the conversion happens in PostgreSQL, not in
+the function body:
+
+- `RETURN e` from a function that returns an integer type: `RETURN 2.7` gives
+  3. Write `RETURN CAST(e AS int)`.
+- `INSERT` and `UPDATE` of a decimal value into an integer column. Write
+  `CAST(e AS int)` in the statement.
 
 ### Operators
 

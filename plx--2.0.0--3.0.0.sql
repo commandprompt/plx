@@ -71,3 +71,15 @@ WHERE r.rngsubtype = t.oid AND r.rngcollation = 0 AND t.typcollation = 100
 CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
 	AS '$libdir/plx', 'plx_sb_append' LANGUAGE C IMMUTABLE STRICT
 	SUPPORT plx_sb_append_support;
+
+/*
+ * plxtsql converts a value whose type it cannot see to an integer type with
+ * one of these: a numeric, real or double precision value is truncated toward
+ * zero, as SQL Server does, and any other value takes the explicit cast.
+ */
+CREATE FUNCTION plx_tsql_int2("any") RETURNS smallint
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION plx_tsql_int4("any") RETURNS integer
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION plx_tsql_int8("any") RETURNS bigint
+	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
