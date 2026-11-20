@@ -202,7 +202,7 @@ bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
 binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
 plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 
-In Go, an integer constant on the left of a shift takes the type of its
+In Go, an integer or rune constant on the left of a shift takes the type of its
 context, such as `int64`. SQL would type it as a 32-bit integer and take the
 shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
 1099511627776, as in Go. plx maps `int` to the 32-bit `integer`, so storing a

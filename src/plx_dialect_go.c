@@ -1675,13 +1675,14 @@ go_sql_class(const GoTok *tk)
 	return 'o';					/* << >> & &^ | ^: SQL's "other" operators */
 }
 
-/* [a,b) is an integer literal, with an optional sign */
+/* [a,b) is an integer or rune literal, with an optional sign */
 static bool
 go_int_const(Go *g, int a, int b)
 {
 	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
 		a++;
-	return b - a == 1 && g->t[a].kind == GO_NUM && !go_num_is_float(&g->t[a]);
+	return b - a == 1 && ((g->t[a].kind == GO_NUM && !go_num_is_float(&g->t[a])) ||
+						  go_is_rune(&g->t[a]));
 }
 
 /*

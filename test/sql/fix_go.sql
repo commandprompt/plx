@@ -775,3 +775,12 @@ SELECT fgsp_prec() AS go_prec;
 -- where the directives and arguments do not line up, * is rejected, since the
 -- format() lowering cannot take a width from an argument
 CREATE FUNCTION fgsp_starfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%*d %d", 5, 42) $$;
+-- Review of the PR 24 fixes, problem 1: a rune literal on the left of a shift
+-- is an integer constant too, so it is shifted as a 64-bit value. It was
+-- shifted as a 32-bit integer, with the count taken mod 32.
+CREATE FUNCTION fgsh_rune(n int) RETURNS text LANGUAGE plxgo AS $$
+ var m int64 = 'a' << 40
+ var k int64 = 'a' << n
+ return fmt.Sprintf("%d %d", m, k)
+$$;
+SELECT fgsh_rune(40) AS go_rune_shift;

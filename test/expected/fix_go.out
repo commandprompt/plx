@@ -1301,3 +1301,17 @@ SELECT fgsp_prec() AS go_prec;
 CREATE FUNCTION fgsp_starfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%*d %d", 5, 42) $$;
 ERROR:  plxgo: fmt.Sprintf with a * width or precision needs exactly one argument for each directive and each *, and at most 16
 DETAIL:  at plxgo source line 1
+-- Review of the PR 24 fixes, problem 1: a rune literal on the left of a shift
+-- is an integer constant too, so it is shifted as a 64-bit value. It was
+-- shifted as a 32-bit integer, with the count taken mod 32.
+CREATE FUNCTION fgsh_rune(n int) RETURNS text LANGUAGE plxgo AS $$
+ var m int64 = 'a' << 40
+ var k int64 = 'a' << n
+ return fmt.Sprintf("%d %d", m, k)
+$$;
+SELECT fgsh_rune(40) AS go_rune_shift;
+          go_rune_shift          
+---------------------------------
+ 106652627894272 106652627894272
+(1 row)
+
