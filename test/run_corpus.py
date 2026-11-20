@@ -5,7 +5,10 @@ A case that should succeed must produce the expected result rows in the same
 order, with the same values and row counts, and the same NOTICE lines in the
 same order. Only trailing spaces and blank lines at either end are ignored.
 psql prints NULL and the empty string the same way, so they compare equal.
-Reject-* categories PASS when transpile/exec raises an ERROR.
+A case that expects an error passes when psql prints an ERROR. When its
+expected output records the error, each recorded ERROR line must appear in
+the output word for word; CONTEXT, DETAIL and HINT lines are not compared.
+Reject-* cases that record no error pass on any ERROR.
 
 Usage: make corpuscheck                  (runs it against contrib_regression)
        python3 test/run_corpus.py
@@ -33,9 +36,6 @@ def psql(sql):
         argv += ["-U", user]
     p = subprocess.run(argv, input=sql, capture_output=True, text=True)
     return p.stdout + p.stderr
-
-CHROME = {"CREATE", "EXTENSION", "FUNCTION", "DROP", "TABLE", "TEMP", "INSERT",
-          "SET", "PL/pgSQL", "CONTEXT:", "line", "at"}
 
 MESSAGE = ("NOTICE:", "WARNING:", "INFO:")
 ERRORISH = ("ERROR:", "CONTEXT:", "DETAIL:", "HINT:", "LINE ", "QUERY:")
@@ -117,6 +117,23 @@ def selftest():
         (reject_case, "ERROR:  plxruby: not supported\n", True),
         (reject_case, " x \n---\n 1\n(1 row)\n", False),
     ]
+    # A case that expects an error passes only on that error. The CONTEXT
+    # line names where the error was raised, so it must not be enough: a
+    # different error raised at the same place fails.
+    ctx = "CONTEXT:  PL/pgSQL function c5i(text,text) line 3 at EXECUTE"
+    err_case = {"category": "execute-dynamic",
+                "expected_output": 'ERROR:  syntax error at or near "$2"\n' + ctx}
+    verdicts += [
+        (err_case, 'ERROR:  syntax error at or near "$2"\n'
+                   "LINE 1: INSERT INTO $2(msg) VALUES ($1)\n"
+                   "QUERY:  INSERT INTO $2(msg) VALUES ($1)\n" + ctx + "\n", True),
+        (err_case, 'psql:<stdin>:5: ERROR:  syntax error at or near "$2"\n'
+                   + ctx + "\n", True),
+        (err_case, 'ERROR:  relation "aud" does not exist\n' + ctx + "\n", False),
+        (err_case, "ERROR:  division by zero\n" + ctx + "\n", False),
+        (err_case, 'ERROR:  syntax error at or near "INSERT"\n' + ctx + "\n", False),
+        (err_case, " c5i \n-----\n \n(1 row)\n", False),
+    ]
     for case, out, want in verdicts:
         got = judge(case, out)[0]
         if got != want:
@@ -126,19 +143,10 @@ def selftest():
                                "PASS" if want else "FAIL"))
     return failures
 
-def datatokens(s):
-    toks = set()
-    for ln in s.splitlines():
-        ln = ln.strip()
-        if not ln or set(ln) <= set("-+| "):
-            continue
-        if re.match(r"^\(\d+ rows?\)$", ln):
-            continue
-        for t in re.split(r"[\s|]+", ln):
-            t = t.strip().strip(",;\"")
-            if t and t not in CHROME:
-                toks.add(t)
-    return toks
+def error_lines(s):
+    """The ERROR lines of psql output, without psql's file and line prefix."""
+    lines = (re.sub(r"^psql:[^:]*:\d+: ", "", ln).rstrip() for ln in s.splitlines())
+    return [ln for ln in lines if ln.startswith("ERROR:")]
 
 def judge(c, out):
     """Decide whether case c passed, given what psql printed for it.
@@ -149,10 +157,11 @@ def judge(c, out):
     exp_err = "ERROR:" in c["expected_output"]
     had_error = "ERROR:" in out
     if reject or exp_err:
-        # expected to raise: PASS if it errored (and a keyword from expected shows)
-        kw = datatokens(c["expected_output"].split("ERROR:")[-1]) if exp_err else set()
-        got = datatokens(out)
-        ok = had_error and (not kw or len(kw & got) >= max(1, len(kw) // 2))
+        # Expected to raise. When the expected output records the error,
+        # each recorded ERROR line must appear in the output word for word.
+        # CONTEXT, DETAIL and HINT lines are not compared.
+        got = error_lines(out)
+        ok = had_error and all(e in got for e in error_lines(c["expected_output"]))
     else:
         # Compare in order: values, row pairing, row count and messages
         # must all match the expected output, and nothing may be extra.
