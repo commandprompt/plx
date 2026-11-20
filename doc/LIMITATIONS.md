@@ -123,14 +123,22 @@ These follow from running as plpgsql and are not specific to any one dialect.
   result NULL. That append is not accelerated. In plxruby, `<<` on an array
   local appends an element (`array_append`). In plxphp, `.=` on an array local
   is rejected at `CREATE FUNCTION` time.
-- **The string builder must be on the search path.** Functions that use the
-  append operators reference the extension's `plx_strbuild` type and
-  `plx_sb_append` or `plx_sb_append_strict` function unqualified, so the
-  extension's schema must be on the
-  function's `search_path` at run time, including any `SET search_path` clause
-  on the function. Otherwise the function is created but fails when called with
-  `type "plx_strbuild" does not exist`. Because the lookup goes through the
-  path, a `SECURITY DEFINER` function should pin it; see
+- **Choose plx's schema when you install it.** Functions that use the append
+  operators name the extension's `plx_strbuild` type and its append function
+  with the schema plx is installed in, so they work whatever their
+  `search_path` is. The schema name is stored in each such function, so:
+  - `ALTER EXTENSION plx SET SCHEMA` fails with
+    `extension "plx" does not support SET SCHEMA`. Give the schema in
+    `CREATE EXTENSION plx SCHEMA ...`.
+  - A function restored into a database where plx is in another schema (from
+    a `pg_dump -n` of one schema, say) fails when it runs, with
+    `schema "..." does not exist`. Install plx in the same schema in the
+    target database, or run the function's `CREATE FUNCTION` again.
+  - A function created before 3.0.0 keeps the unqualified names it was
+    generated with. Until you run its `CREATE FUNCTION` again, it needs plx's
+    schema on its `search_path`.
+
+  Functions without a string append are not affected. See
   [Trust and security](USERGUIDE.md#trust-and-security).
 - **Runtime errors point at the generated plpgsql.** plpgsql requires all
   declarations at the top, so line numbers in a runtime error refer to the
