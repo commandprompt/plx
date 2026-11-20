@@ -152,7 +152,7 @@ $$;
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
 | `a + b` on strings | `(a) \|\| (b)` (see below) |
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
-| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
+| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence; an integer constant on the left of `<<` or `>>` becomes `(1)::bigint` (see below) |
 | `nil` | `NULL` |
 | `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
 | `0x1F`, `0o17`, `017`, `0b101`, `1_000` | the decimal value (`31`, `15`, `15`, `5`, `1000`) |
@@ -193,6 +193,13 @@ bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
 `(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
 binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
 plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
+
+In Go, an integer constant on the left of a shift takes the type of its
+context, such as `int64`. SQL would type it as a 32-bit integer and take the
+shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
+1099511627776, as in Go. plx maps `int` to the 32-bit `integer`, so storing a
+shift that does not fit in an `int` fails with `integer out of range`. Go's
+64-bit `int` would hold it; declare the variable `int64`.
 
 ### String concatenation with `+`
 

@@ -1532,6 +1532,15 @@ go_sql_class(const GoTok *tk)
 	return 'o';					/* << >> & &^ | ^: SQL's "other" operators */
 }
 
+/* [a,b) is an integer literal, with an optional sign */
+static bool
+go_int_const(Go *g, int a, int b)
+{
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
+		a++;
+	return b - a == 1 && g->t[a].kind == GO_NUM && !go_num_is_float(&g->t[a]);
+}
+
 /*
  * Emit operands lo..hi of a split binary expression, nesting by Go
  * precedence: os/oe bound each operand's tokens and op[k] is the operator
@@ -1573,7 +1582,24 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 		if (brk[j])
 			appendStringInfoChar(out, '(');
 	}
-	go_emit_binary(g, os, oe, op, lo, sp[0], out);
+	/*
+	 * An integer constant shifted by << or >>: Go gives the untyped constant
+	 * the type of its context, and Go's int64 is 64 bits wide. SQL types the
+	 * literal as a 32-bit integer and takes the shift count mod 32, so 1 << 32
+	 * is 1. Shift a bigint instead; a 32-bit target that cannot hold the
+	 * result then fails with "integer out of range" instead of wrapping.
+	 */
+	if (lo == sp[0] && (go_op_is(&g->t[op[sp[0]]], "<<") ||
+						go_op_is(&g->t[op[sp[0]]], ">>")) &&
+		go_int_const(g, os[lo], oe[lo]))
+	{
+		go_sp(out);
+		appendStringInfoChar(out, '(');
+		go_emit_range(g, os[lo], oe[lo], out);
+		appendStringInfoString(out, ")::bigint");
+	}
+	else
+		go_emit_binary(g, os, oe, op, lo, sp[0], out);
 	for (j = 0; j < m; j++)
 	{
 		GoTok	   *o = &g->t[op[sp[j]]];

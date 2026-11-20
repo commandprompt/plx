@@ -696,3 +696,28 @@ SELECT fg_timed('CREATE FUNCTION fgdos_args(x text) RETURNS text LANGUAGE plxgo 
   || repeat(')', 24)), '5s') AS go_args;
 SELECT fgdos_args('b') AS go_b;
 RESET statement_timeout;
+-- PR 24 review [9]: an integer constant on the left of << or >> is shifted as
+-- a 64-bit value, as Go gives it the type of its 64-bit context. SQL typed the
+-- literal as a 32-bit integer and took the shift count mod 32.
+CREATE FUNCTION fgsh_var(n int) RETURNS bigint LANGUAGE plxgo AS $$
+ var mask int64 = 1 << n
+ return mask
+$$;
+SELECT fgsh_var(31) AS go_2147483648, fgsh_var(32) AS go_4294967296,
+       fgsh_var(35) AS go_34359738368;
+CREATE FUNCTION fgsh_const() RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 1 << 40
+ var c int64 = 3
+ c = c << 33
+ var d int64 = -1 << 40
+ var e int64 = (1 << 40) >> 39
+ return fmt.Sprintf("%d %d %d %d", a, c, d, e)
+$$;
+SELECT fgsh_const() AS go_1099511627776_25769803776_m1099511627776_2;
+-- a 32-bit int target that cannot hold the value fails loudly
+CREATE FUNCTION fgsh_int(n int) RETURNS int LANGUAGE plxgo AS $$
+ var m int = 1 << n
+ return m
+$$;
+SELECT fgsh_int(4) AS go_16;
+SELECT fg_err('SELECT fgsh_int(31)') AS go_out_of_range;

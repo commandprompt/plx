@@ -265,6 +265,12 @@ Each entry names the dialects it affects.
   SQL power, so `6 ^ 3` gave 216), unary `^x` and `&^` work, `1 << 2 + 1` is
   5, and `<<=`, `>>=`, `&=`, `|=`, `^=` and `&^=` are accepted. Unary `^x`
   binds tighter than `+` and `*`, so `^y + 1` gives `-y`.
+- **An integer constant shifted by `<<` or `>>` is a 64-bit value.** SQL typed
+  the literal as a 32-bit integer and took the shift count mod 32, so
+  `var m int64 = 1 << n` gave -2147483648 for n = 31 and 1 for n = 32, and
+  `1 << 40` gave 256. plx now shifts the constant as `bigint`, which gives
+  Go's values. Stored in an `int` (a 32-bit `integer` in plx), a result that
+  does not fit now fails with `integer out of range` instead of wrapping.
 - **Integer conversions truncate.** `int(x)`, `int64(x)` and the other integer
   conversions truncate a float toward zero, as Go does, instead of rounding
   (`int(3.7)` is now 3). `int(x)` and `int64(x)` of a row field or an
