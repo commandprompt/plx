@@ -304,23 +304,33 @@ CREATE FUNCTION fxps_pe_num() RETURNS text LANGUAGE plxtsql AS $$
   SET @s += 1;
   RETURN @s;
 $$;
-SELECT fxps_pe_num();  -- SQL Server: 6
+-- ft_err(q) runs q and returns 'SQLSTATE: message' if it fails. The message
+-- leaves out the error position, which differs between PostgreSQL 13
+-- (plpgsql prefixes each expression with SELECT) and later versions.
+CREATE FUNCTION ft_err(q text) RETURNS text LANGUAGE plpgsql AS $h$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END $h$;
+SELECT ft_err($q$SELECT fxps_pe_num()$q$);  -- SQL Server: 6
 CREATE FUNCTION fxps_pe_var() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '5', @n int = 2;
   SET @s += @n;
   RETURN @s;
 $$;
-SELECT fxps_pe_var();  -- SQL Server: 7
+SELECT ft_err($q$SELECT fxps_pe_var()$q$);  -- SQL Server: 7
 CREATE FUNCTION fxps_un_len() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '5';
   RETURN @s + LEN(@s);
 $$;
-SELECT fxps_un_len();  -- SQL Server: 6
+SELECT ft_err($q$SELECT fxps_un_len()$q$);  -- SQL Server: 6
 CREATE FUNCTION fxps_un_paren() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '5', @n int = 1;
   RETURN (@n + 1) + @s;
 $$;
-SELECT fxps_un_paren();  -- SQL Server: 7
+SELECT ft_err($q$SELECT fxps_un_paren()$q$);  -- SQL Server: 7
 CREATE TABLE fxps_t(qty int);
 INSERT INTO fxps_t VALUES (2);
 CREATE FUNCTION fxps_un_col() RETURNS text LANGUAGE plxtsql AS $$
@@ -328,24 +338,24 @@ CREATE FUNCTION fxps_un_col() RETURNS text LANGUAGE plxtsql AS $$
   SELECT @r = qty + @s FROM fxps_t;
   RETURN @r;
 $$;
-SELECT fxps_un_col();  -- SQL Server: 7
+SELECT ft_err($q$SELECT fxps_un_col()$q$);  -- SQL Server: 7
 CREATE FUNCTION fxps_un_bit() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '5', @b bit = 1;
   RETURN @s + @b;
 $$;
-SELECT fxps_un_bit();  -- SQL Server: 6
+SELECT ft_err($q$SELECT fxps_un_bit()$q$);  -- SQL Server: 6
 -- a number later in the chain: T-SQL groups (@n + '2') + @s and adds; || there would give 35
 CREATE FUNCTION fxps_un_mid() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '5', @n int = 1;
   RETURN @n + '2' + @s;
 $$;
-SELECT fxps_un_mid();  -- SQL Server: 8
+SELECT ft_err($q$SELECT fxps_un_mid()$q$);  -- SQL Server: 8
 -- a - after the chain: T-SQL computes (@s + '0') - 1; || binds looser than - in PostgreSQL and would give 1-1
 CREATE FUNCTION fxps_un_minus() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s varchar(10) = '1';
   RETURN @s + '0' - 1;
 $$;
-SELECT fxps_un_minus();  -- SQL Server: 9
+SELECT ft_err($q$SELECT fxps_un_minus()$q$);  -- SQL Server: 9
 DROP TABLE fxps_t;
 -- review of 641976f: COALESCE is a known string only when every argument is one. SQL Server's COALESCE
 -- takes the type of its highest-precedence argument, and PostgreSQL resolves COALESCE('1', 2) to integer,
@@ -381,7 +391,7 @@ CREATE FUNCTION fxco_pe() RETURNS text LANGUAGE plxtsql AS $$
   SET @s += COALESCE('1', 2);
   RETURN @s;
 $$;
-SELECT fxco_pe() AS r;  -- SQL Server: 6
+SELECT ft_err($q$SELECT fxco_pe()$q$);  -- SQL Server: 6
 -- COALESCE whose every argument is a known string still concatenates
 CREATE FUNCTION fxco_str() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @z varchar(10), @s varchar(10) = 'b';
@@ -394,30 +404,30 @@ SELECT fxco_str() AS r;  -- SQL Server: abBc
 CREATE FUNCTION fxch_cast() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CAST('a' AS char(3)) + 'b';
 $$;
-SELECT fxch_cast();  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxch_cast()$q$);  -- SQL Server: 'a  b'
 CREATE FUNCTION fxch_conv() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CONVERT(char(3), 'a') + 'b';
 $$;
-SELECT fxch_conv();  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxch_conv()$q$);  -- SQL Server: 'a  b'
 CREATE FUNCTION fxch_castn() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CAST('' AS nchar) + 'b';
 $$;
-SELECT fxch_castn();  -- SQL Server: ' b' (NCHAR without a length is NCHAR(1))
+SELECT ft_err($q$SELECT fxch_castn()$q$);  -- SQL Server: ' b' (NCHAR without a length is NCHAR(1))
 CREATE FUNCTION fxch_var() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @s nchar(2) = 'a';
   RETURN @s + 'b';
 $$;
-SELECT fxch_var();  -- SQL Server: 'a b'
+SELECT ft_err($q$SELECT fxch_var()$q$);  -- SQL Server: 'a b'
 CREATE FUNCTION fxch_par(p char(3)) RETURNS text LANGUAGE plxtsql AS $$
   RETURN @p + 'b';
 $$;
-SELECT fxch_par('a');  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxch_par('a')$q$);  -- SQL Server: 'a  b'
 CREATE FUNCTION fxch_pe() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @c char(3) = 'c';
   SET @c += 'y';
   RETURN @c;
 $$;
-SELECT fxch_pe();  -- SQL Server: 'c  ' (the result cut to 3 characters)
+SELECT ft_err($q$SELECT fxch_pe()$q$);  -- SQL Server: 'c  ' (the result cut to 3 characters)
 -- T-SQL binds unary ~ tighter than any other operator, so ~a + b is (~a) + b. PostgreSQL binds prefix ~
 -- looser than + and *, so ~ must apply to its operand only. SQL Server's answer is in each comment.
 CREATE FUNCTION fxtl_lit() RETURNS int LANGUAGE plxtsql AS $$

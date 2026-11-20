@@ -52,7 +52,17 @@ CREATE FUNCTION a0_cstring(x int) RETURNS cstring LANGUAGE plxruby AS $$
 return nil
 $$;
 RESET check_function_bodies;
-SELECT a0_syntax();
+-- fc_err(q) runs q and returns 'SQLSTATE: message' if it fails. The message
+-- leaves out the error position, which differs between PostgreSQL 13
+-- (plpgsql prefixes each expression with SELECT) and later versions.
+CREATE FUNCTION fc_err(q text) RETURNS text LANGUAGE plpgsql AS $h$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END $h$;
+SELECT fc_err($q$SELECT a0_syntax()$q$);
 \set VERBOSITY default
 
 -- A4: plx_strbuild has binary I/O and a collation, like text
