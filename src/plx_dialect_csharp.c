@@ -6684,6 +6684,8 @@ static const PlxSurface csharp_surface = {
 	.nexcs = 0,
 	.flags = PLX_TRUSTED,
 	.parse_body = csharp_parse_body,
+	.own_assign_check = true,
+	.append_null_empty = true,
 };
 
 static char *

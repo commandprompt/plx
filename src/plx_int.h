@@ -68,6 +68,14 @@ typedef struct PlxSurface
 									 * '#' and '~' operators, braces nest like
 									 * brackets, no backtick strings, '.5' and '3.'
 									 * numbers, lines counted inside strings */
+	bool		append_null_empty;	/* an append treats a NULL as an empty
+									 * string, as C# string concatenation
+									 * does: plx_sb_append, not the strict
+									 * one that gives NULL as || does */
+	bool		own_assign_check;	/* the front end rejects an assignment
+									 * inside an expression itself and hands
+									 * the engine translated text (C#), where
+									 * '=' is SQL equality */
 	bool		own_name_case;		/* the front end gives names that differ
 									 * only in case their own plpgsql names
 									 * (Lua), so the shared table need not

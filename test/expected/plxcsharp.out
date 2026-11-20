@@ -646,15 +646,15 @@ SELECT cs_src('cs_query');
    rc integer;                                                                                                                                                            +
    hit boolean;                                                                                                                                                           +
  BEGIN                                                                                                                                                                    +
-   FOR row IN SELECT amount FROM cs_orders WHERE grp = g ORDER BY id LOOP                                                                                                 +
+   FOR row IN SELECT amount FROM cs_orders WHERE grp = (g) ORDER BY id LOOP                                                                                               +
      total := total + row.amount;                                                                                                                                         +
    END LOOP;                                                                                                                                                              +
    FOR amt IN EXECUTE 'SELECT amount FROM cs_orders WHERE grp = $1' USING g LOOP                                                                                          +
      total := total + amt;                                                                                                                                                +
    END LOOP;                                                                                                                                                              +
-   SELECT * INTO first FROM (SELECT id, amount FROM cs_orders WHERE grp = g ORDER BY id LIMIT 1) AS __plx_fo_1;                                                           +
-   SELECT * INTO cnt FROM (SELECT count(*) FROM cs_orders WHERE grp = g) AS __plx_fo_2;                                                                                   +
-   UPDATE cs_orders SET amount = amount WHERE grp = g;                                                                                                                    +
+   SELECT * INTO first FROM (SELECT id, amount FROM cs_orders WHERE grp = (g) ORDER BY id LIMIT 1) AS __plx_fo_1;                                                         +
+   SELECT * INTO cnt FROM (SELECT count(*) FROM cs_orders WHERE grp = (g)) AS __plx_fo_2;                                                                                 +
+   UPDATE cs_orders SET amount = amount WHERE grp = (g);                                                                                                                  +
    GET DIAGNOSTICS rc = ROW_COUNT;                                                                                                                                        +
    hit := FOUND;                                                                                                                                                          +
    RETURN (total)::text || ' first=' || (first.id)::text || ' cnt=' || (cnt)::text || ' rc=' || (rc)::text || ' found=' || (hit)::text || ' col=' || (first.amount)::text;+
@@ -973,7 +973,7 @@ SELECT cs_fin(4), cs_fin(0);
 
 SELECT cs_fin(-1);
 ERROR:  n must not be negative
-CONTEXT:  PL/pgSQL function cs_fin(integer) line 18 at ASSERT
+CONTEXT:  PL/pgSQL function cs_fin(integer) line 23 at ASSERT
 SELECT * FROM cs_audit ORDER BY msg;
   msg  
 -------

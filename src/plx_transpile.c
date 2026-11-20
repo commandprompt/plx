@@ -3213,6 +3213,9 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 					 (surf->concat_op || !(j < len && s[j] == '.')) &&
 					 /* outside plxphp, r.s or r . s names a field, not the local s */
 					 (surf->concat_op || !prev_is_dot(s, i)) &&
+					 /* (s)::type is cast already (plxcsharp writes it) */
+					 !(i > 0 && s[i - 1] == '(' && j + 3 <= len &&
+					   strncmp(s + j, ")::", 3) == 0) &&
 					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
 					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{
@@ -5793,6 +5796,9 @@ reject_chained_assignment(Ctx *cx, int ra, int rb, int line)
 {
 	int			i, depth = 0;
 
+	if (cx->surf->own_assign_check)
+		return;
+
 	for (i = ra; i < rb; i++)
 	{
 		Tok		   *tk = &cx->t[i];
@@ -6085,7 +6091,9 @@ plx_emit_core(Ctx *cx, int a, int b, int ind, bool toplevel)
 			plx_indent(o, ind);
 			/* cast the appended value to text (int, numeric, etc. render) */
 			appendStringInfo(o, "%.*s := %s(%.*s, (%s)::text);\n",
-							 t0->len, t0->s, plx_ext_object("plx_sb_append_strict"),
+							 t0->len, t0->s,
+							 plx_ext_object(cx->surf->append_null_empty ?
+											"plx_sb_append" : "plx_sb_append_strict"),
 							 t0->len, t0->s, r);
 			return;
 		}
