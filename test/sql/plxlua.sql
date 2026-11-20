@@ -763,3 +763,56 @@ DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_bad() RETURNS int LANGUAGE plxlua AS '
 DO $$ BEGIN EXECUTE 'CREATE FUNCTION lua_longchain() RETURNS bigint LANGUAGE plxlua AS '
   || quote_literal('return 0' || repeat(' + 1', 20000)); END $$;
 SELECT length(prosrc) < 300000 AS linear FROM pg_proc WHERE proname = 'lua_longchain';
+
+-- 3.1.0 review: shifts are Lua's 64-bit logical shifts. A count of 64 or
+-- more gives 0, a negative count shifts the other way, and >> fills with
+-- zeros. Expected values from lua5.4.
+CREATE FUNCTION lua_shifts(m int) RETURNS text LANGUAGE plxlua AS $$
+local x1 = 1
+local r = { x1 << 31, m >> 2, 8 << -1, 1 << 64, -1 >> 60, 1 << 40,
+            3 << 32, 1 << 63, 256 >> -2, 5 >> 64, 7 << 0 }
+return table.concat(r, " ")
+$$;
+SELECT lua_shifts(-16);
+-- 2147483648 4611686018427387900 4 0 15 1099511627776 12884901888 -9223372036854775808 1024 0 7
+CREATE FUNCTION lua_shift_null(n int) RETURNS bigint LANGUAGE plxlua AS $$
+return 1 << n
+$$;
+SELECT lua_shift_null(NULL) IS NULL AS null_count;  -- t
+
+-- 3.1.0 review: ipairs reads the array as it is on each step, so elements
+-- appended or changed during the loop are seen, as in Lua.
+CREATE FUNCTION lua_bfs(n int) RETURNS text LANGUAGE plxlua AS $$
+local queue = {1}
+local out = ""
+for _, v in ipairs(queue) do
+  out = out .. v .. " "
+  if v < n then queue[#queue + 1] = v * 2; queue[#queue + 1] = v * 2 + 1 end
+end
+return out
+$$;
+SELECT lua_bfs(3);  -- 1 2 3 4 5
+CREATE FUNCTION lua_ipairs_write() RETURNS text LANGUAGE plxlua AS $$
+local t = {1, 2, 3}
+local s = ""
+for i, v in ipairs(t) do
+  if i == 1 then t[2] = 20 end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_write();  -- 1,20,3,
+
+-- 3.1.0 review: c and false or d, and c and nil or d, are d whatever c is.
+CREATE FUNCTION lua_and_false(c boolean) RETURNS text LANGUAGE plxlua AS $$
+return tostring(c and false or "D") .. tostring(c and nil or "E")
+$$;
+SELECT lua_and_false(true) AS t, lua_and_false(false) AS f;  -- DE DE
+
+-- 3.1.0 review: string.byte past the end of the string is nil.
+CREATE FUNCTION lua_byte(s text, i int) RETURNS text LANGUAGE plxlua AS $$
+local b = s:byte(i)
+if b == nil then return "nil" end
+return tostring(b)
+$$;
+SELECT lua_byte('ABC', 10), lua_byte('', 1), lua_byte('ABC', 2);  -- nil nil 66

@@ -509,7 +509,7 @@ SELECT lua_src('lua_strs');
  BEGIN                                                                                                                     +
    a := upper(s) || '|' || lower(s) || '|' || length(s)::text || '|' || reverse(s);                                        +
    b := substr(s, 2, 3) || '|' || right(s, 3) || '|' || substr(s, 2) || '|' || substr(s, 1, 0) || '|' || repeat(('ab'), 3);+
-   c := ascii('A')::text || '|' || chr(72) || chr(105) || '|' || ascii(right(s, 1))::text;                                 +
+   c := NULLIF(ascii('A'), 0)::text || '|' || chr(72) || chr(105) || '|' || NULLIF(ascii(right(s, 1)), 0)::text;           +
    RETURN a || ' / ' || b || ' / ' || c;                                                                                   +
  END;                                                                                                                      +
  
@@ -1503,28 +1503,47 @@ SELECT lua_src('lua_ipairs');
  DECLARE                                                                        +
    total integer := 0;                                                          +
    idx integer := 0;                                                            +
+   __plx_k_1 integer;                                                           +
    i integer;                                                                   +
    v integer;                                                                   +
    names text[] := ARRAY['x', 'y'];                                             +
    s public.plx_strbuild := '';                                                 +
+   __plx_k_3 integer;                                                           +
    nm text;                                                                     +
    cnt integer := 0;                                                            +
+   __plx_k_5 integer;                                                           +
    u text[] := '{}';                                                            +
+   __plx_k_7 integer;                                                           +
    w text;                                                                      +
  BEGIN                                                                          +
-   i := 0;                                                                      +
-   FOREACH v IN ARRAY a LOOP                                                    +
-     i := i + 1;                                                                +
+   __plx_k_1 := 0;                                                              +
+   LOOP                                                                         +
+     __plx_k_1 := __plx_k_1 + 1;                                                +
+     EXIT WHEN __plx_k_1 > coalesce(cardinality(a), 0);                         +
+     i := __plx_k_1;                                                            +
+     v := a[__plx_k_1];                                                         +
      total := total + v;                                                        +
      idx := idx + i;                                                            +
    END LOOP;                                                                    +
-   FOREACH nm IN ARRAY names LOOP                                               +
+   __plx_k_3 := 0;                                                              +
+   LOOP                                                                         +
+     __plx_k_3 := __plx_k_3 + 1;                                                +
+     EXIT WHEN __plx_k_3 > coalesce(cardinality(names), 0);                     +
+     nm := names[__plx_k_3];                                                    +
      s := public.plx_sb_append(s, nm);                                          +
    END LOOP;                                                                    +
-   FOR i IN 1..cardinality(a) LOOP                                              +
+   __plx_k_5 := 0;                                                              +
+   LOOP                                                                         +
+     __plx_k_5 := __plx_k_5 + 1;                                                +
+     EXIT WHEN __plx_k_5 > coalesce(cardinality(a), 0);                         +
+     i := __plx_k_5;                                                            +
      cnt := cnt + 1;                                                            +
    END LOOP;                                                                    +
-   FOREACH w IN ARRAY u LOOP                                                    +
+   __plx_k_7 := 0;                                                              +
+   LOOP                                                                         +
+     __plx_k_7 := __plx_k_7 + 1;                                                +
+     EXIT WHEN __plx_k_7 > coalesce(cardinality(u), 0);                         +
+     w := u[__plx_k_7];                                                         +
      s := public.plx_sb_append(s, w);                                           +
    END LOOP;                                                                    +
    RETURN total::text || '/' || idx::text || '/' || s::text || '/' || cnt::text;+
@@ -1628,5 +1647,84 @@ SELECT length(prosrc) < 300000 AS linear FROM pg_proc WHERE proname = 'lua_longc
  linear 
 --------
  t
+(1 row)
+
+-- 3.1.0 review: shifts are Lua's 64-bit logical shifts. A count of 64 or
+-- more gives 0, a negative count shifts the other way, and >> fills with
+-- zeros. Expected values from lua5.4.
+CREATE FUNCTION lua_shifts(m int) RETURNS text LANGUAGE plxlua AS $$
+local x1 = 1
+local r = { x1 << 31, m >> 2, 8 << -1, 1 << 64, -1 >> 60, 1 << 40,
+            3 << 32, 1 << 63, 256 >> -2, 5 >> 64, 7 << 0 }
+return table.concat(r, " ")
+$$;
+SELECT lua_shifts(-16);
+                                          lua_shifts                                           
+-----------------------------------------------------------------------------------------------
+ 2147483648 4611686018427387900 4 0 15 1099511627776 12884901888 -9223372036854775808 1024 0 7
+(1 row)
+
+-- 2147483648 4611686018427387900 4 0 15 1099511627776 12884901888 -9223372036854775808 1024 0 7
+CREATE FUNCTION lua_shift_null(n int) RETURNS bigint LANGUAGE plxlua AS $$
+return 1 << n
+$$;
+SELECT lua_shift_null(NULL) IS NULL AS null_count;  -- t
+ null_count 
+------------
+ t
+(1 row)
+
+-- 3.1.0 review: ipairs reads the array as it is on each step, so elements
+-- appended or changed during the loop are seen, as in Lua.
+CREATE FUNCTION lua_bfs(n int) RETURNS text LANGUAGE plxlua AS $$
+local queue = {1}
+local out = ""
+for _, v in ipairs(queue) do
+  out = out .. v .. " "
+  if v < n then queue[#queue + 1] = v * 2; queue[#queue + 1] = v * 2 + 1 end
+end
+return out
+$$;
+SELECT lua_bfs(3);  -- 1 2 3 4 5
+  lua_bfs   
+------------
+ 1 2 3 4 5 
+(1 row)
+
+CREATE FUNCTION lua_ipairs_write() RETURNS text LANGUAGE plxlua AS $$
+local t = {1, 2, 3}
+local s = ""
+for i, v in ipairs(t) do
+  if i == 1 then t[2] = 20 end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_write();  -- 1,20,3,
+ lua_ipairs_write 
+------------------
+ 1,20,3,
+(1 row)
+
+-- 3.1.0 review: c and false or d, and c and nil or d, are d whatever c is.
+CREATE FUNCTION lua_and_false(c boolean) RETURNS text LANGUAGE plxlua AS $$
+return tostring(c and false or "D") .. tostring(c and nil or "E")
+$$;
+SELECT lua_and_false(true) AS t, lua_and_false(false) AS f;  -- DE DE
+ t  | f  
+----+----
+ DE | DE
+(1 row)
+
+-- 3.1.0 review: string.byte past the end of the string is nil.
+CREATE FUNCTION lua_byte(s text, i int) RETURNS text LANGUAGE plxlua AS $$
+local b = s:byte(i)
+if b == nil then return "nil" end
+return tostring(b)
+$$;
+SELECT lua_byte('ABC', 10), lua_byte('', 1), lua_byte('ABC', 2);  -- nil nil 66
+ lua_byte | lua_byte | lua_byte 
+----------+----------+----------
+ nil      | nil      | 66
 (1 row)
 

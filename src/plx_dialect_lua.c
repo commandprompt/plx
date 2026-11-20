@@ -1803,10 +1803,14 @@ x_strfunc(LuaX *x, Tok *fn, LuaV **args, int n)
 	{
 		if (n < 1 || n > 2)
 			x_err(x, "string.byte takes a string and an optional position");
+		/*
+		 * ascii('') is 0, and text cannot hold a NUL, so 0 means there is
+		 * no character at that position: Lua returns nil there.
+		 */
 		if (n == 1)
-			v = lv_new(psprintf("ascii(%s)", lv_text_arg(args[0])), SP_ATOM);
+			v = lv_new(psprintf("NULLIF(ascii(%s), 0)", lv_text_arg(args[0])), SP_ATOM);
 		else
-			v = lv_new(psprintf("ascii(%s)", x_sub(x, args[0], args[1], args[1])->s), SP_ATOM);
+			v = lv_new(psprintf("NULLIF(ascii(%s), 0)", x_sub(x, args[0], args[1], args[1])->s), SP_ATOM);
 		v->typ = "integer";
 	}
 	else if (strcmp(nm, "char") == 0)
@@ -2583,6 +2587,15 @@ x_logic(LuaX *x, int op, LuaV *l, LuaV *r)
 		lv_nest(x, l, l, false, r, false);
 		return l;
 	}
+	if ((l->and_a || l->and_plen) && l->and_b && l->and_b->lit &&
+		(l->and_b->isnil || l->and_b->isfalse))
+	{
+		/*
+		 * c and false or d, c and nil or d: "c and false" is false or nil
+		 * whatever c is, so the value is d.
+		 */
+		return r;
+	}
 	if (lv_and_lit(l))
 	{
 		/* c and a or b, Lua's conditional expression */
@@ -2765,6 +2778,31 @@ x_binary(LuaX *x, int op, LuaV *l, LuaV *r)
 			so = "%";
 			sp = SP_MUL;
 			break;
+		case OP_SHL:
+		case OP_SHR:
+			{
+				/*
+				 * Lua shifts 64-bit integers logically: >> fills with
+				 * zeros, a count of 64 or more gives 0, and a negative
+				 * count shifts the other way. SQL's << and >> keep the
+				 * operand's width, shift >> arithmetically and take the
+				 * count modulo the width. The subquery names each operand
+				 * once, so nested shifts do not repeat their operands.
+				 */
+				const char *cnt = op == OP_SHL ? "%s" : "-(%s)";
+
+				v = lv_new(psprintf("(SELECT CASE WHEN __plx_sc IS NULL THEN NULL::bigint"
+									" WHEN __plx_sc <= -64 OR __plx_sc >= 64 THEN 0::bigint"
+									" WHEN __plx_sc >= 0 THEN __plx_sa << __plx_sc"
+									" ELSE (__plx_sa >> -__plx_sc) & ~((-1)::bigint << (64 + __plx_sc)) END"
+									" FROM (SELECT (%s)::bigint AS __plx_sa, (%s)::integer AS __plx_sc"
+									" OFFSET 0) AS __plx_s)",
+									l->s, psprintf(cnt, r->s)),
+						   SP_ATOM);
+				v->typ = "bigint";
+				lv_nest(x, v, l, false, r, false);
+				return v;
+			}
 		default:
 			/* bitwise: all at SQL's "any other operator" level */
 			so = op == OP_BOR ? "|" : op == OP_BXOR ? "#" : op == OP_BAND ? "&" :
@@ -4481,6 +4519,8 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 					n;
 		LuaV	   *arr;
 		char	   *et = NULL;
+		char	   *k = NULL;
+		bool		dyn;
 		bool		idx = (nn == 2 && !tk_name(&t[nm[0]], "_"));
 
 		n = plx_parse_args(cx, it, as, ae, 4, &after);
@@ -4488,9 +4528,77 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 			plx_err(cx, line, "ipairs takes one array");
 		cx->pos = it;
 		arr = lua_expr(L, as[0], ae[0], false);
+		/*
+		 * Lua's ipairs reads t[i] afresh on each step, so elements the body
+		 * appends or changes are seen. That is visible only when the array
+		 * is a variable the body can change: then the loop re-reads its
+		 * length and the element on each step. Any other array expression
+		 * makes a new array that nothing else can reach, and FOR/FOREACH
+		 * over it gives the same result.
+		 */
+		dyn = (ae[0] == as[0] + 1 && t[as[0]].kind == T_IDENT);
+		if (dyn)
+		{
+			k = lua_hidden(L, "k", "integer");
+			lua_emit_assign(L, ind, k, "0");
+		}
 		lp = lua_loop_push(L, LOOP_FOR, dok, L->match[dok] >= 0 ? L->match[dok] + 1 : -1);
 		lua_scope_push(L);
-		if (nn == 1)
+		if (dyn)
+		{
+			StringInfoData pro;
+			LuaBind    *ib = NULL,
+					   *vb = NULL;
+
+			if (nn == 2)
+			{
+				if (ann)
+					et = (char *) ann;
+				else if (arr->typ)
+					et = typ_elem(arr->typ);
+				if (!et && !lua_lookup(L, t[as[0]].s, t[as[0]].len))
+				{
+					Oid			o = lua_param_oid(cx, lua_param(cx, t[as[0]].s, t[as[0]].len));
+					Oid			el = OidIsValid(o) ? get_element_type(o) : InvalidOid;
+
+					if (OidIsValid(el))
+						et = format_type_be(el);
+				}
+				if (!et)
+					plx_err(cx, line,
+							"cannot infer the element type of the array; annotate it after do, e.g. for i, v in ipairs(a) do --:: integer");
+			}
+			if (nn == 1 || idx)
+			{
+				ib = lua_declare(L, t[nm[0]].s, t[nm[0]].len, "integer", false, false,
+								 L->scope, NULL, 0, line, &isnew);
+				lua_activate(L, ib, L->scope);
+			}
+			if (nn == 2)
+			{
+				vb = lua_declare(L, t[nm[1]].s, t[nm[1]].len, et, false, false, L->scope,
+								 NULL, 0, line, &isnew);
+				lua_activate(L, vb, L->scope);
+			}
+			header = pstrdup("LOOP");
+			initStringInfo(&pro);
+			plx_indent(&pro, ind + 1);
+			appendStringInfo(&pro, "%s := %s + 1;\n", k, k);
+			plx_indent(&pro, ind + 1);
+			appendStringInfo(&pro, "EXIT WHEN %s > coalesce(cardinality(%s), 0);\n", k, arr->s);
+			if (ib)
+			{
+				plx_indent(&pro, ind + 1);
+				appendStringInfo(&pro, "%s := %s;\n", ib->pgname, k);
+			}
+			if (vb)
+			{
+				plx_indent(&pro, ind + 1);
+				appendStringInfo(&pro, "%s := %s[%s];\n", vb->pgname, arr->s, k);
+			}
+			prologue = pro.data;
+		}
+		else if (nn == 1)
 		{
 			/* for i in ipairs(a): the indexes */
 			LuaBind    *bd = lua_declare(L, t[nm[0]].s, t[nm[0]].len, NULL, false, true,
