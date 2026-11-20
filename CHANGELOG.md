@@ -418,8 +418,8 @@ the plx extension.
    and receive functions to `plx_strbuild` and makes it collatable. It gives
    the collation to every type built on `plx_strbuild` (its array type,
    domains, domains over those domains, and their array types) and to
-   existing columns and range types of all of these, as a fresh install
-   does. It also adds the function that string appends call in 3.0.0. A view created before the
+   existing columns, range types, index keys and partition keys of all of
+   these, as a fresh install does. It also adds the function that string appends call in 3.0.0. A view created before the
    update keeps no collation in its stored query until you re-create it.
 
    To check the result, run
@@ -567,8 +567,9 @@ not here.
   duplicates. `ALTER EXTENSION plx UPDATE` sets the collation on the same
   objects a fresh install does: `plx_strbuild`, every domain and array type
   built on it at any depth (such as a domain over a domain, or an array of a
-  domain), and existing columns, composite-type fields and range types of
-  these types. So sorting and the range constructors and operators work on
+  domain), and existing columns, composite-type fields, range types, index
+  keys and partition keys of these types. So sorting, the range constructors
+  and operators, hash indexes, and hash, list and range partitions work on
   them after the update.
 
 #### Several dialects
