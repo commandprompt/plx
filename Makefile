@@ -47,6 +47,16 @@ corpuscheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/run_corpus.py
 
+# Oracle check: run plxlua and plxcsharp programs and compare their results
+# with what real Lua and C# print for the same programs (recorded in
+# test/oracle_cases.json; refresh them with python3 test/oracle_check.py
+# --refresh, which needs lua5.4 and dotnet). Needs the extension installed
+# and a running server, like installcheck.
+.PHONY: oraclecheck
+oraclecheck:
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/oracle_check.py
+
 # Upgrade check: ALTER EXTENSION plx UPDATE in situations that need more
 # than one session. Needs the extension installed and a running server.
 .PHONY: upgradecheck
