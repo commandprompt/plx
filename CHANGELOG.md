@@ -283,6 +283,10 @@ Each entry names the dialects it affects.
   binary and `_`-separated integer literals keep their value on every
   supported PostgreSQL version (`017` was 17, `0o17` was 0, and on PostgreSQL
   13 to 15 `0x1F` was 0). A number with letters glued to it is rejected.
+- **`+` between a string and a number is rejected** at `CREATE FUNCTION`, as
+  Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
+  because SQL read the literal as a number. Convert the number with
+  `strconv.Itoa` or `fmt.Sprintf`.
 
 #### plxcobol
 
@@ -616,6 +620,12 @@ not here.
 #### plxgo
 
 - `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
+- `+` with a string operand now joins strings (#18, #23). plx writes it as
+  `||` when one operand is a string literal, a `string` local, a `text` or
+  `varchar` parameter, or a call that returns a string. Before,
+  `strconv.Itoa(n) + "x"` failed when the function ran, with
+  `operator does not exist: text + unknown`. A NULL operand makes the result
+  NULL. `msg := "a" + s` now declares `msg` as `text`.
 
 #### plxcobol
 

@@ -470,3 +470,65 @@ CREATE FUNCTION fg34_type(INT64 bigint) RETURNS bigint LANGUAGE plxgo AS $$ var 
 a := []int64{x, 2}
 return a[0] $$;
 SELECT fg34_type(4) AS go_4;
+
+-- GH18: + with an operand plx knows is a string is concatenation (||)
+CREATE FUNCTION fgh18_itoa(n int) RETURNS text LANGUAGE plxgo AS $$
+	return strconv.Itoa(n) + "x"
+$$;
+SELECT fgh18_itoa(5) AS go_5x;
+-- literals, a raw literal, a text parameter and a varchar parameter
+CREATE FUNCTION fgh18_lit(s text, v varchar) RETURNS text LANGUAGE plxgo AS $$
+	return "a" + `b` + s + v
+$$;
+SELECT fgh18_lit('c', 'd') AS go_abcd;
+-- a declaration from a concatenation is typed text
+CREATE FUNCTION fgh18_decl(n int) RETURNS text LANGUAGE plxgo AS $$
+	msg := "n=" + strconv.Itoa(n)
+	var t string = "<"
+	return t + msg + ">"
+$$;
+SELECT fgh18_decl(7) AS go_n7;
+-- a chain runs left to right: the addition inside the call stays addition
+CREATE FUNCTION fgh18_chain(n int) RETURNS text LANGUAGE plxgo AS $$
+	return "x" + strconv.Itoa(n + 1) + strconv.Itoa(n) + "y"
+$$;
+SELECT fgh18_chain(1) AS go_x21y;
+-- in a comparison, in call arguments, and in a bracketed group
+CREATE FUNCTION fgh18_ctx(s text) RETURNS text LANGUAGE plxgo AS $$
+	if s + "x" == "ax" && len(s) == 1 {
+		return strings.ToUpper(s + "b") + fmt.Sprintf("[%s]", s + "c") + ("d" + (s + "e"))
+	}
+	return "no"
+$$;
+SELECT fgh18_ctx('a') AS go_AB_ac_dae, fgh18_ctx('z') AS go_no;
+-- calls that return a string, and string(x)
+CREATE FUNCTION fgh18_calls(n int) RETURNS text LANGUAGE plxgo AS $$
+	return strings.TrimSpace("  z ") + strings.ToLower("Q") + string(n) + fmt.Sprintf("%d", n)
+$$;
+SELECT fgh18_calls(4) AS go_zq44;
+-- an element of a []string local, in a slice literal and in call arguments
+CREATE FUNCTION fgh18_slice(s text) RETURNS text LANGUAGE plxgo AS $$
+	a := []string{s + "1", "b" + s}
+	return a[1] + a[0]
+$$;
+SELECT fgh18_slice('z') AS go_bzz1;
+-- a NULL operand makes the result NULL, as interpolation does
+CREATE FUNCTION fgh18_null(s text) RETURNS text LANGUAGE plxgo AS $$
+	return "x" + s
+$$;
+SELECT fgh18_null(NULL) IS NULL AS go_null;
+-- + on numbers, and on row fields plx cannot type, stays addition
+CREATE FUNCTION fgh18_num(n int) RETURNS int LANGUAGE plxgo AS $$
+	for _, r := range query("SELECT 2 AS a, 3 AS b") {
+		return n + 1 + r.a + r.b
+	}
+	return 0
+$$;
+SELECT fgh18_num(1) AS go_7;
+-- a string and a number together is a Go compile error, so plx rejects it
+CREATE FUNCTION fgh18_mix(n int) RETURNS text LANGUAGE plxgo AS $$
+	return n + "1"
+$$;
+CREATE FUNCTION fgh18_mix2() RETURNS text LANGUAGE plxgo AS $$
+	return "x" + 1
+$$;

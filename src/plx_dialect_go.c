@@ -81,6 +81,7 @@ typedef struct
 static void go_stmt(Go *g, int ind);
 static void go_block(Go *g, int ind);
 static void go_emit_range(Go *g, int a, int b, StringInfo out);
+static char go_expr_kind(Go *g, int a, int b);
 
 static GoTok *
 go_cur(Go *g)
@@ -1114,6 +1115,9 @@ go_infer_type(Go *g, int a, int b)
 		if (tc)
 			return tc;
 	}
+	/* a call that returns a string, or a concatenation */
+	if (go_expr_kind(g, a, b) == 's')
+		return "text";
 	return NULL;
 }
 
@@ -1891,10 +1895,415 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 	}
 }
 
+/*
+ * String concatenation with +.
+ *
+ * Go has no implicit conversions, so + with a string operand is always string
+ * concatenation, and both operands are strings. Where plx can see that one
+ * operand of a + is a string, it writes the + as SQL ||, which propagates NULL
+ * the way plx's interpolation does. Where it cannot see a string, + stays +.
+ */
+
+/* 's' for a string type, 'n' for a numeric or boolean type, 0 otherwise */
+static char
+go_type_kind(const char *typ)
+{
+	static const char *const num[] = {
+		"integer", "smallint", "bigint", "real", "double precision",
+		"numeric", "boolean", NULL
+	};
+	int			k;
+
+	if (!typ)
+		return 0;
+	if (strcmp(typ, "text") == 0 || strcmp(typ, "varchar") == 0 ||
+		strcmp(typ, "character varying") == 0)
+		return 's';
+	for (k = 0; num[k]; k++)
+		if (strcmp(typ, num[k]) == 0)
+			return 'n';
+	return 0;
+}
+
+/* the kind (as go_type_kind) of a local or parameter name; 0 if neither */
+static char
+go_name_kind(Go *g, const GoTok *tk)
+{
+	PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+	int			i;
+
+	if (l)
+		return go_type_kind(l->typ);
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return 0;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+		{
+			switch (g->cx->meta->argtypes[i])
+			{
+				case TEXTOID:
+				case VARCHAROID:
+					return 's';
+				case INT2OID:
+				case INT4OID:
+				case INT8OID:
+				case FLOAT4OID:
+				case FLOAT8OID:
+				case NUMERICOID:
+				case BOOLOID:
+					return 'n';
+				default:
+					return 0;
+			}
+		}
+	}
+	return 0;
+}
+
+/*
+ * The kind of a single operand [a,b): 's' when plx can see it is a string, 'n'
+ * when it can see it is a number or a bool, and 0 when it cannot tell (a row
+ * field, an unmapped call, an expression).
+ */
+static char
+go_operand_type(Go *g, int a, int b)
+{
+	GoTok	   *tk;
+
+	if (b <= a)
+		return 0;
+	tk = &g->t[a];
+	if (go_op_is(tk, "-") || go_op_is(tk, "+"))		/* unary sign */
+		return go_operand_type(g, a + 1, b) == 'n' ? 'n' : 0;
+	if (b - a == 1)
+	{
+		if (tk->kind == GO_STR)				/* a rune literal is a number */
+			return tk->s[0] == '\'' ? 'n' : 's';
+		if (tk->kind == GO_NUM || go_ci(tk, "true") || go_ci(tk, "false"))
+			return 'n';
+		if (tk->kind == GO_WORD)
+			return go_name_kind(g, tk);
+		return 0;
+	}
+	/* a bracketed expression */
+	if (tk->kind == GO_LP && go_match(g, a, b) == b - 1)
+		return go_expr_kind(g, a + 1, b - 1);
+	/* an element s[i] of a slice local */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LBRACK &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+		int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+		if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+			return go_type_kind(pnstrdup(l->typ, tl - 2));
+		return 0;
+	}
+	/* pkg.Func(...): only the calls plx maps */
+	if (tk->kind == GO_WORD && b - a >= 5 && g->t[a + 1].kind == GO_DOT &&
+		g->t[a + 2].kind == GO_WORD && g->t[a + 3].kind == GO_LP &&
+		go_match(g, a + 3, b) == b - 1)
+	{
+		GoTok	   *m = &g->t[a + 2];
+
+		if (go_ci(tk, "strconv"))
+			return go_ci(m, "Itoa") ? 's' : go_ci(m, "Atoi") ? 'n' : 0;
+		if (go_ci(tk, "fmt"))
+			return go_ci(m, "Sprintf") ? 's' : 0;
+		if (go_ci(tk, "strings"))
+			return (go_ci(m, "ToUpper") || go_ci(m, "ToLower") ||
+					go_ci(m, "TrimSpace") || go_ci(m, "ReplaceAll")) ? 's' :
+				go_ci(m, "Contains") ? 'n' : 0;
+		if (go_ci(tk, "math"))
+			return (go_ci(m, "Abs") || go_ci(m, "Floor") || go_ci(m, "Ceil") ||
+					go_ci(m, "Sqrt") || go_ci(m, "Pow") || go_ci(m, "Max") ||
+					go_ci(m, "Min") || go_ci(m, "Mod")) ? 'n' : 0;
+		return 0;
+	}
+	/* T(x) for a base type T, and len(x) / cap(x) */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LP &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		const char *conv = go_base_type(tk->s, tk->len);
+
+		if (conv)
+			return go_type_kind(conv);
+		if (go_ci(tk, "len") || go_ci(tk, "cap"))
+			return 'n';
+	}
+	return 0;
+}
+
+/*
+ * Split [a,b) at its top-level binary operators: ops[] receives their token
+ * indexes. Returns the count, or -1 when the range holds a top-level comma or
+ * an operator that is not a Go binary operator (such as : in a slice).
+ */
+static int
+go_split_binops(Go *g, int a, int b, int *ops)
+{
+	int			i,
+				depth = 0,
+				n = 0;
+
+	for (i = a; i < b; i++)
+	{
+		GoKind		k = g->t[i].kind;
+
+		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+			depth++;
+		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
+			depth--;
+		else if (depth == 0 && k == GO_COMMA)
+			return -1;
+		else if (depth == 0 && k == GO_OP && i > a && go_operand_end(&g->t[i - 1]))
+		{
+			if (go_binop_prec(&g->t[i]) == 0)
+				return -1;
+			ops[n++] = i;
+		}
+	}
+	return n;
+}
+
+/*
+ * The kind of the operands a..b joined by + at ops[lo..hi): 's' when one is a
+ * string, 'n' when all are numbers, 0 otherwise. A string and a number
+ * together is a Go compile error, and plx rejects it too.
+ */
+static char
+go_plus_run_kind(Go *g, int a, int b, const int *ops, int lo, int hi)
+{
+	bool		str = false,
+				num = false,
+				unknown = false;
+	int			k;
+
+	for (k = lo; k <= hi; k++)
+	{
+		int			s = (k == lo) ? a : ops[k - 1] + 1,
+					e = (k == hi) ? b : ops[k];
+		char		c = go_operand_type(g, s, e);
+
+		if (c == 's')
+			str = true;
+		else if (c == 'n')
+			num = true;
+		else
+			unknown = true;
+	}
+	if (str && num)
+		plx_err(g->cx, g->t[ops[lo]].line,
+				"invalid operation: + between a string and a number; Go does not convert between them, so use strconv.Itoa or fmt.Sprintf");
+	if (str)
+		return 's';
+	return (num && !unknown) ? 'n' : 0;
+}
+
+/*
+ * The kind of the expression [a,b): an operand, or operands joined only by +.
+ * 0 for anything else.
+ */
+static char
+go_expr_kind(Go *g, int a, int b)
+{
+	int		   *ops;
+	int			n,
+				k;
+	char		r = 0;
+
+	if (b <= a)
+		return 0;
+	ops = palloc(sizeof(int) * (b - a));
+	n = go_split_binops(g, a, b, ops);
+	if (n == 0)
+		r = go_operand_type(g, a, b);
+	else if (n > 0)
+	{
+		for (k = 0; k < n; k++)
+			if (!go_op_is(&g->t[ops[k]], "+"))
+				break;
+		if (k == n)
+			r = go_plus_run_kind(g, a, b, ops, 0, n);
+	}
+	pfree(ops);
+	return r;
+}
+
+/*
+ * Emit [a,b) with each run of + that has a string operand written as ||.
+ * The range is cut at the operators that bind looser than + in Go (the
+ * comparisons, && and ||), which SQL also ranks below ||. A run that joins
+ * its operands only with + and has a string operand becomes
+ * ((x) || (y)) || (z), left to right as Go evaluates it; every other piece is
+ * emitted in brackets as before. A top-level comma list is handled element by
+ * element. Returns false, emitting nothing, when no run has a string operand,
+ * so the caller emits the range as it always did.
+ */
+static bool
+go_emit_strcat(Go *g, int a, int b, StringInfo out)
+{
+	int		   *ops,
+			   *cut;
+	char	   *isstr;
+	int			n,
+				ncut = 0,
+				k,
+				lo;
+	bool		any = false;
+
+	if (b <= a)
+		return false;
+	ops = palloc(sizeof(int) * (b - a));
+	n = go_split_binops(g, a, b, ops);
+	if (n < 0)
+	{
+		/* a comma list: lower its elements one by one, if any needs it */
+		int			depth = 0,
+					s = a,
+					i,
+					ne = 0;
+		int		   *es = palloc(sizeof(int) * (b - a + 1)),
+				   *ee = palloc(sizeof(int) * (b - a + 1));
+
+		pfree(ops);
+		for (i = a; i <= b; i++)
+		{
+			GoKind		kk = (i < b) ? g->t[i].kind : GO_COMMA;
+
+			if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+				depth++;
+			else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+				depth--;
+			else if (depth == 0 && kk == GO_COMMA)
+			{
+				es[ne] = s;
+				ee[ne] = i;
+				ne++;
+				s = i + 1;
+			}
+		}
+		if (ne < 2)
+			return false;			/* no comma: an operator plx does not model */
+		for (k = 0; k < ne && !any; k++)
+		{
+			StringInfoData probe;
+
+			initStringInfo(&probe);
+			any = go_emit_strcat(g, es[k], ee[k], &probe);
+			pfree(probe.data);
+		}
+		if (!any)
+			return false;
+		for (k = 0; k < ne; k++)
+		{
+			if (k > 0)
+				appendStringInfoChar(out, ',');
+			go_emit_range(g, es[k], ee[k], out);
+		}
+		return true;
+	}
+	if (n == 0)
+	{
+		pfree(ops);
+		return false;
+	}
+
+	/* cut at the operators looser than + */
+	cut = palloc(sizeof(int) * (n + 2));
+	isstr = palloc(n + 1);
+	cut[ncut++] = -1;
+	for (k = 0; k < n; k++)
+		if (go_binop_prec(&g->t[ops[k]]) < 4)
+			cut[ncut++] = k;
+	cut[ncut] = n;
+
+	/* each piece runs over operands cut[j]+1 .. cut[j+1] */
+	for (k = 0; k < ncut; k++)
+	{
+		int			ol = cut[k] + 1,
+					oh = cut[k + 1],
+					s = (ol == 0) ? a : ops[ol - 1] + 1,
+					e = (oh == n) ? b : ops[oh],
+					j;
+
+		isstr[k] = false;
+		if (oh == ol)
+			continue;			/* one operand, no + */
+		for (j = ol; j < oh; j++)
+			if (!go_op_is(&g->t[ops[j]], "+"))
+				break;
+		if (j == oh && go_plus_run_kind(g, s, e, ops, ol, oh) == 's')
+			isstr[k] = any = true;
+	}
+	if (!any)
+	{
+		pfree(ops);
+		pfree(cut);
+		pfree(isstr);
+		return false;
+	}
+
+	for (k = 0; k < ncut; k++)
+	{
+		int			ol = cut[k] + 1,
+					oh = cut[k + 1],
+					s = (ol == 0) ? a : ops[ol - 1] + 1,
+					e = (oh == n) ? b : ops[oh];
+
+		if (k > 0)
+		{
+			GoTok	   *o = &g->t[ops[cut[k]]];
+
+			go_sp(out);
+			if (go_op_is(o, "=="))
+				appendStringInfoChar(out, '=');
+			else if (go_op_is(o, "!="))
+				appendStringInfoString(out, "<>");
+			else if (go_op_is(o, "&&"))
+				appendStringInfoString(out, "AND");
+			else if (go_op_is(o, "||"))
+				appendStringInfoString(out, "OR");
+			else
+				appendBinaryStringInfo(out, o->s, o->len);
+		}
+		go_sp(out);
+		if (!isstr[k])
+		{
+			if (ncut > 1)
+				appendStringInfoChar(out, '(');
+			go_emit_range(g, s, e, out);
+			if (ncut > 1)
+				appendStringInfoChar(out, ')');
+			continue;
+		}
+		for (lo = ol; lo < oh; lo++)
+			appendStringInfoChar(out, '(');
+		appendStringInfoChar(out, '(');
+		go_emit_range(g, s, ops[ol], out);
+		appendStringInfoChar(out, ')');
+		for (lo = ol; lo < oh; lo++)
+		{
+			appendStringInfoString(out, " || (");
+			go_emit_range(g, ops[lo] + 1, lo + 1 < oh ? ops[lo + 1] : e, out);
+			appendStringInfoString(out, "))");
+		}
+	}
+	pfree(ops);
+	pfree(cut);
+	pfree(isstr);
+	return true;
+}
+
 /* emit tokens [a,b) as a plpgsql expression */
 static void
 go_emit_range_inner(Go *g, int a, int b, StringInfo out)
 {
+	if (go_emit_strcat(g, a, b, out))
+		return;
 	if (go_needs_prec(g, a, b) && go_emit_prec(g, a, b, out))
 		return;
 	go_emit_tokens(g, a, b, out);

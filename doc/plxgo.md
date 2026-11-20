@@ -149,6 +149,7 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
+| `a + b` with a string operand | `(a) \|\| (b)` (see below) |
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
@@ -191,6 +192,43 @@ bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
 `(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
 binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
 plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
+
+### String concatenation with `+`
+
+In Go, `+` with a string operand joins strings. Go has no implicit
+conversions, so both operands are then strings. plx writes such a `+` as SQL
+`||` when it can see that one operand is a string. plx sees a string in:
+
+- a string literal, `"..."` or `` `...` ``
+- a call that returns a string: `strconv.Itoa`, `fmt.Sprintf`,
+  `strings.ToUpper`, `strings.ToLower`, `strings.TrimSpace`,
+  `strings.ReplaceAll`, and `string(x)`
+- a local of type `string` (`var s string`, `s := "..."`), or an element of a
+  `[]string` local
+- a `text` or `varchar` parameter
+
+```go
+return "n=" + strconv.Itoa(n) + "!"
+```
+```sql
+RETURN ((('n=') || ((n)::text)) || ('!'));
+```
+
+plx keeps Go's left-to-right order, and an addition inside a call stays an
+addition: `"x" + strconv.Itoa(n + 1)` adds first and then joins. A short
+declaration from a concatenation, such as `msg := "n=" + strconv.Itoa(n)`,
+declares `msg` as `text`. A NULL operand makes the whole result NULL, as it
+does in `fmt.Sprintf`.
+
+Go rejects `+` between a string and a number, and so does plx, when you run
+`CREATE FUNCTION`. `n + "1"` with an integer `n` fails with
+`invalid operation: + between a string and a number`. Convert the number with
+`strconv.Itoa` or `fmt.Sprintf`.
+
+When plx cannot see a string on either side, `+` stays SQL `+`. This happens
+with two row fields: `r.first + r.last` fails when the function runs, with
+`operator does not exist: text + text`. Write `string(r.first) + r.last`, or
+`fmt.Sprintf("%s%s", r.first, r.last)`.
 
 ### Slices and indexing
 
@@ -288,11 +326,6 @@ $$;
 - `switch` `fallthrough`.
 - Transaction control. `commit()` and `rollback()` are accepted when a procedure
   is created but fail when it runs (`function commit() does not exist`).
-- String concatenation with `+`. Go overloads `+` for numeric addition and
-  string concatenation; plx cannot tell which is meant without type information,
-  so it leaves `+` as `+`. `||` is logical OR in plxgo, so use
-  `fmt.Sprintf("%s%s", a, b)` for text concatenation (a NULL operand makes the
-  result NULL).
 - The full `fmt`/`strings`/`math`/`strconv` packages; only the subset above is
   translated.
 
