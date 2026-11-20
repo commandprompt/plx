@@ -1372,6 +1372,147 @@ go_operand_kind(Go *g, int a, int b)
 	return 0;
 }
 
+static bool go_op_is(const GoTok *tk, const char *op);
+static int	go_binop_prec(const GoTok *tk);
+static int	go_split_binops(Go *g, int a, int b, int *ops);
+static char go_name_kind(Go *g, const GoTok *tk);
+static void go_kind_enter(Go *g);
+static void go_kind_leave(Go *g);
+static char go_int_class(Go *g, int a, int b);
+
+/* go_int_class of a value of the PostgreSQL type typ */
+static char
+go_typ_int_class(const char *typ)
+{
+	if (!typ)
+		return 0;
+	if (strcmp(typ, "integer") == 0 || strcmp(typ, "smallint") == 0 ||
+		strcmp(typ, "bigint") == 0)
+		return 'i';
+	if (strcmp(typ, "real") == 0 || strcmp(typ, "double precision") == 0 ||
+		strcmp(typ, "numeric") == 0 || strcmp(typ, "boolean") == 0)
+		return 'x';
+	return 0;
+}
+
+/*
+ * go_int_class of one operand [a,b) with no top-level binary operator: a
+ * literal, a name, a bracketed expression, a slice element, a conversion or a
+ * call plx maps.
+ */
+static char
+go_int_operand_class(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	char		c;
+
+	c = go_operand_kind(g, a, b);
+	if (c)
+		return c == 'i' ? 'i' : 'x';
+	if (b - a == 1)
+	{
+		if (go_ci(tk, "true") || go_ci(tk, "false"))
+			return 'x';
+		/* go_operand_kind has typed the integer and float names already */
+		if (tk->kind == GO_WORD && go_name_kind(g, tk) == 'n')
+			return 'x';
+		return 0;
+	}
+	if (go_op_is(tk, "!"))
+		return 'x';
+	/* a bracketed expression */
+	if (tk->kind == GO_LP && go_match(g, a, b) == b - 1)
+	{
+		go_kind_enter(g);
+		c = go_int_class(g, a + 1, b - 1);
+		go_kind_leave(g);
+		return c;
+	}
+	/* an element s[i] of a slice local */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LBRACK &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+		int			tl = (l && l->typ) ? (int) strlen(l->typ) : 0;
+
+		if (tl > 2 && strcmp(l->typ + tl - 2, "[]") == 0)
+			return go_typ_int_class(pnstrdup(l->typ, tl - 2));
+		return 0;
+	}
+	/* pkg.Func(...): only the calls plx maps */
+	if (tk->kind == GO_WORD && b - a >= 5 && g->t[a + 1].kind == GO_DOT &&
+		g->t[a + 2].kind == GO_WORD && g->t[a + 3].kind == GO_LP &&
+		go_match(g, a + 3, b) == b - 1)
+	{
+		GoTok	   *m = &g->t[a + 2];
+
+		if (go_ci(tk, "strconv") && go_ci(m, "Atoi"))
+			return 'i';
+		if (go_ci(tk, "strings") && go_ci(m, "Contains"))
+			return 'x';
+		if (go_ci(tk, "math"))
+			return 'x';
+		return 0;
+	}
+	/* T(x) for a base type T, and len(x) / cap(x) */
+	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LP &&
+		go_match(g, a + 1, b) == b - 1)
+	{
+		const char *conv = go_base_type(tk->s, tk->len);
+
+		if (conv)
+			return go_typ_int_class(conv);
+		if (go_ci(tk, "len") || go_ci(tk, "cap"))
+			return 'i';
+	}
+	return 0;
+}
+
+/*
+ * Whether [a,b) is an integer, which string(x) needs to know: 'i' when plx can
+ * see it is an integer, 'x' when it can see it is a float, a numeric or a
+ * bool, and 0 when it cannot tell (a row field, an unmapped call). Operands
+ * joined by + are an integer when all of them are.
+ */
+static char
+go_int_class(Go *g, int a, int b)
+{
+	int		   *ops;
+	int			n,
+				k;
+	char		r = 'i';
+
+	/* unary signs keep the class */
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
+		a++;
+	if (b <= a)
+		return 0;
+	n = go_split_binops(g, a, b, NULL);
+	if (n < 0)
+		return 0;
+	if (n == 0)
+		return go_int_operand_class(g, a, b);
+	ops = palloc(sizeof(int) * n);
+	go_split_binops(g, a, b, ops);
+	for (k = 0; k < n && r; k++)
+	{
+		if (go_binop_prec(&g->t[ops[k]]) <= 3)
+			r = 'x';			/* a comparison, && or ||: a bool */
+		else if (!go_op_is(&g->t[ops[k]], "+"))
+			r = 0;
+	}
+	for (k = 0; k <= n && r == 'i'; k++)
+	{
+		char		c = go_int_class(g, k == 0 ? a : ops[k - 1] + 1,
+									 k == n ? b : ops[k]);
+
+		if (c != 'i')
+			r = c;
+	}
+	pfree(ops);
+	return r;
+}
+
 /* a stdlib / builtin / type-conversion call at index i; sets *ni on success */
 static bool
 go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
@@ -1380,6 +1521,7 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	int			lp,
 				close;
 	const char *conv;
+	char		strc = 0;		/* go_int_class of the operand of string(x) */
 
 	/* qualified call: pkg.Method(...) */
 	if (tk->kind == GO_WORD && i + 2 < b && g->t[i + 1].kind == GO_DOT &&
@@ -1503,12 +1645,15 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	conv = go_base_type(tk->s, tk->len);
 	/*
 	 * string(x) of an integer (such as a rune) is the character with that
-	 * code point in Go, not its decimal digits. Go accepts no other number
-	 * here, so an operand plx can see is a number is an integer.
+	 * code point in Go, not its decimal digits. Go rejects string(x) of a
+	 * float or a bool, and so does plx, rather than print a character for it.
 	 */
-	if (conv && strcmp(conv, "text") == 0 &&
-		(go_operand_kind(g, lp + 1, close) == 'i' ||
-		 go_expr_kind(g, lp + 1, close) == 'n'))
+	if (conv && strcmp(conv, "text") == 0)
+		strc = go_int_class(g, lp + 1, close);
+	if (strc == 'x')
+		plx_err(g->cx, tk->line, "string(x) of a float, numeric or bool value "
+				"does not compile in Go; format it with fmt.Sprintf");
+	if (strc == 'i')
 	{
 		go_sp(out);
 		appendStringInfoString(out, "chr((");

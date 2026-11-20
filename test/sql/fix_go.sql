@@ -784,3 +784,18 @@ CREATE FUNCTION fgsh_rune(n int) RETURNS text LANGUAGE plxgo AS $$
  return fmt.Sprintf("%d %d", m, k)
 $$;
 SELECT fgsh_rune(40) AS go_rune_shift;
+-- Review of the PR 24 fixes, problem 2: string(x) is a character only for an
+-- integer x. Go rejects string(x) of a float or a bool, and so does plx at
+-- CREATE FUNCTION. plx made each of these a character, or a run-time error.
+CREATE FUNCTION fgstr_float(f float8) RETURNS text LANGUAGE plxgo AS $$ return string(f) $$;
+CREATE FUNCTION fgstr_flit() RETURNS text LANGUAGE plxgo AS $$ return string(1.5) $$;
+CREATE FUNCTION fgstr_bool(b bool) RETURNS text LANGUAGE plxgo AS $$ return string(b) $$;
+CREATE FUNCTION fgstr_true() RETURNS text LANGUAGE plxgo AS $$ return string(true) $$;
+CREATE FUNCTION fgstr_num(x numeric) RETURNS text LANGUAGE plxgo AS $$ return string(x + x) $$;
+CREATE FUNCTION fgstr_conv(n int) RETURNS text LANGUAGE plxgo AS $$ return string(float64(n)) $$;
+-- an integer operand still gives its character
+CREATE FUNCTION fgstr_int(n int) RETURNS text LANGUAGE plxgo AS $$
+ var r rune = 'a'
+ return string(n) + string(r + 1) + string(int(66.9))
+$$;
+SELECT fgstr_int(65) AS go_abb;

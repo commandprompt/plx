@@ -183,7 +183,10 @@ digit's value. A rune literal must hold exactly one character. `string(x)` of
 an integer is the character with that code point (`string('a' + 1)` is `"b"`),
 and `%c` in `fmt.Sprintf` prints that character too. plx sees an integer in a
 rune or integer literal, a local or parameter of an integer type, and a `+` of
-these. `string(x)` of any other operand, such as a row field, is its text.
+these. Go rejects `string(x)` of a float or a bool, and plx rejects `string(x)`
+of a float, `numeric` or bool value at `CREATE FUNCTION`; format such a value
+with `fmt.Sprintf`. `string(x)` of any other operand, such as a row field, is
+its text.
 
 A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
 3 and `int(-2.7)` is -2. A SQL cast would round instead. plx casts an integer

@@ -302,7 +302,9 @@ Each entry names the dialects it affects.
   `integer`. A rune literal must hold exactly one character. `string(x)` of an
   integer is now the character with that code point, as in Go, instead of the
   number's digits: `string(65)` is `"A"`, not `"65"`. Use `strconv.Itoa` for
-  the digits. `%c` in `fmt.Sprintf` prints the character.
+  the digits. `%c` in `fmt.Sprintf` prints the character. `string(x)` of a
+  float, `numeric` or bool value gave its text and is now rejected at
+  `CREATE FUNCTION`, as Go rejects it. Format such a value with `fmt.Sprintf`.
 - **`+` between a string and a number is rejected** at `CREATE FUNCTION`, as
   Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
   because SQL read the literal as a number. Convert the number with
