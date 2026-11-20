@@ -2229,6 +2229,63 @@ group_close(Ctx *cx, const char *s, int len, int i)
 }
 
 /*
+ * Bracket matches and ** positions of a whole expression, found in one pass so
+ * that rewrite_expr_inner need not call group_close and find_pow at every
+ * bracket: that took time quadratic in the nesting depth. close[i] is what
+ * group_close(i) returns for a bracket at i that is not inside a string, and
+ * -2 for any other position. npow[i] counts the ** operators (as find_pow
+ * sees them) that start before i, so a group (o, e) holds one when
+ * npow[e - 1] > npow[o + 1].
+ */
+typedef struct GroupMap
+{
+	int		   *close;
+	int		   *npow;
+} GroupMap;
+
+static void
+group_map(Ctx *cx, const char *s, int len, GroupMap *gm)
+{
+	int		   *stack = palloc(sizeof(int) * (len + 1));
+	int			sp = 0,
+				pows = 0,
+				i;
+
+	gm->close = palloc(sizeof(int) * (len + 1));
+	gm->npow = palloc(sizeof(int) * (len + 1));
+	for (i = 0; i <= len; i++)
+		gm->close[i] = -2;
+	for (i = 0; i < len; i++)
+	{
+		int			e;
+
+		CHECK_FOR_INTERRUPTS();
+		gm->npow[i] = pows;
+		e = skip_string(cx, s, len, i);
+		if (e >= 0)
+		{
+			while (++i < e)
+				gm->npow[i] = pows;
+			i = e - 1;
+			continue;
+		}
+		if (s[i] == '(' || s[i] == '[' || s[i] == '{')
+		{
+			gm->close[i] = -1;
+			stack[sp++] = i;
+		}
+		else if ((s[i] == ')' || s[i] == ']' || s[i] == '}') && sp > 0)
+			gm->close[stack[--sp]] = i;
+		else if (s[i] == '*' && i + 1 < len && s[i + 1] == '*' &&
+				 (i == 0 || s[i - 1] != '*') &&
+				 !(i + 2 < len && (s[i + 2] == '*' || s[i + 2] == '=')))
+			pows++;
+	}
+	gm->npow[len] = pows;
+	pfree(stack);
+}
+
+/*
  * Start of the operand that ends just before the ** at p: a name, number,
  * string or bracketed group, with any calls, subscripts and .field parts.
  * A '.' is not crossed when it is the dialect's string-concatenation operator.
@@ -2501,6 +2558,7 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	signed char bw_prev[PLX_BW_MAXDEPTH];	/* see bitwise_prec */
 	int			bw_depth = 0;
 	bool		bw_on = !names_fold_case(cx);
+	GroupMap	gm = {NULL, NULL};	/* built at the first bracket */
 
 	memset(bw_prev, 0, sizeof(bw_prev));
 
@@ -2570,6 +2628,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 	while (i < len)
 	{
 		char		c = s[i];
+
+		CHECK_FOR_INTERRUPTS();
 
 		/* Python: an f-string interpolation can hold a string the lexer never saw */
 		if (surf->fstrings && plx_is_ident_start(c) && (i == 0 || !plx_is_ident(s[i - 1])))
@@ -3099,9 +3159,21 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		 */
 		if ((c == '(' || c == '[') && !names_fold_case(cx))
 		{
-			int			e = group_close(cx, s, len, i);
+			int			e;
+			bool		haspow;
 
-			if (e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0)
+			if (gm.close == NULL)
+				group_map(cx, s, len, &gm);
+			e = gm.close[i];
+			if (e >= -1)
+				haspow = e > i && gm.npow[e - 1] > gm.npow[i + 1];
+			else
+			{
+				/* a bracket the one pass saw inside a string: ask directly */
+				e = group_close(cx, s, len, i);
+				haspow = e > i && find_pow(cx, s + i + 1, e - i - 1, false) >= 0;
+			}
+			if (e > i && haspow)
 			{
 				char	   *inner = plx_rewrite_expr(cx, s + i + 1, e - i - 1,
 													 c == '(' ? boolctx : false);
@@ -3211,6 +3283,11 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 		}
 		appendStringInfoChar(&out, c);
 		i++;
+	}
+	if (gm.close)
+	{
+		pfree(gm.close);
+		pfree(gm.npow);
 	}
 	return out.data;
 }

@@ -513,6 +513,13 @@ PUBLIC has USAGE by default).
   `CONVERT`, `IIF`, `CHARINDEX` or `RAISE_APPLICATION_ERROR` calls with no
   comma. These now transpile in linear time, and `statement_timeout` can
   cancel the transpile.
+- **Quadratic, uninterruptible transpile time for nested brackets.** In
+  plxjs, plxts, plxphp, plxpython3 and plxruby, the rewriter for `**` scanned
+  each bracketed group to its end at every `(` or `[`, so deeply nested
+  brackets took quadratic time: 60,000 levels of `("x" + ...)` took 44
+  seconds, and `statement_timeout` could not cancel it. The rewriter now finds
+  every group in one pass, which takes 33 milliseconds for the same body, and
+  checks for interrupts as it goes.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.
