@@ -166,6 +166,9 @@ Each entry names the dialects it affects.
   where `$x` held 5. They now put the text `$x`, `${x}` or `#{x}` there, as
   in a string value. A plxpython3 f-string is unchanged: `\{x}` keeps the
   backslash and still interpolates, as in Python.
+  plxphp `"\{$x}"` keeps the backslash and the braces and interpolates
+  `$x`, as PHP does: with `$x` 5 it gives `\{5}`, in a string value and in
+  SQL. Before, it gave `\5` in a string value and `{5}` in SQL.
 - **A quote or brace inside an interpolation does not end it** (plxruby,
   plxpython3, plxjs, plxts, plxphp). plx ended an interpolated expression at
   the first `}`, even inside a string in the expression, so plxpython3

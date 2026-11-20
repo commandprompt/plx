@@ -109,6 +109,8 @@ string value: plxphp `\$x` and `{\$x}`, plxjs and plxts `\${x}`, plxruby
 `\#{x}`. So `fetch_one("SELECT '\$x' AS v")` in plxphp returns the text `$x`.
 In a plxpython3 f-string, `\{x}` keeps the backslash and still interpolates,
 as in Python; write `{{x}}` for the text `{x}`.
+In plxphp, `\{` is no escape, as in PHP: `"\{$x}"` keeps the backslash and
+the braces and interpolates `$x`, giving `\{5}` when `$x` is 5.
 
 ## What is not covered
 

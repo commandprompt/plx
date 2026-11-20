@@ -2010,6 +2010,18 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 			}
 			continue;
 		}
+		/*
+		 * plxphp "\{$x}": \{ is no escape, and the { opens no {$...}. PHP
+		 * keeps the backslash and the brace, and $x interpolates as $x.
+		 */
+		if (!raw && can_interp && cx->surf->concat_op && s[0] == '\\' &&
+			s + 2 < e && s[1] == '{' && s[2] == '$')
+		{
+			appendStringInfoString(&lit, "\\\\{");
+			need_e = true;
+			s += 2;
+			continue;
+		}
 		if (!raw && s[0] == '\\' && s + 1 < e)
 		{
 			s = decode_escape(cx, s, e, &lit, &need_e);
@@ -4238,6 +4250,15 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 		{
 			char		c = s[1];
 
+			/* plxphp "\{$x}": a backslash and a brace, then $x (see emit_string_value) */
+			if (can_interp && !raw && cx->surf->concat_op && c == '{' &&
+				s + 2 < e && s[2] == '$')
+			{
+				appendStringInfoChar(&lit, '\\');
+				appendStringInfoChar(&lit, '{');
+				s += 2;
+				continue;
+			}
 			if (!full)
 			{
 				/*

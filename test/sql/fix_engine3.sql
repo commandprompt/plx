@@ -394,3 +394,13 @@ return f"{r.v}{r.m}"
 $$;
 SELECT r2c12_js() AS js, r2c12_ts() AS ts, r2c12_rb() AS rb, r2c12_py() AS py;
 -- js: ab!ab?4  ts: ab!  rb: ab!  py: ab!4
+-- R2-C13 (PR 24 review r2 c1[3]): in plxphp "\{$x}", \{ is no escape and
+-- the { opens no {$...}: PHP keeps the backslash and the braces and
+-- interpolates $x. The same holds in a string value, in static SQL and in
+-- dynamic SQL.
+CREATE FUNCTION r2c13_php(x int) RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'sql=\{$x}' AS v");
+$d = fetch_one("SELECT 'dyn=\{$x}' || $1 AS v", '!');
+return "str=\{$x} " . $r->v . " " . $d->v;
+$$;
+SELECT r2c13_php(5) AS r;  -- PHP: str=\{5} sql=\{5} dyn=\{5}!
