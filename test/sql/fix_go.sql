@@ -973,3 +973,29 @@ var c int16 = a << n
 return fmt.Sprintf("%d", c)
 $$;
 SELECT fg_r3g30(15) AS a, fg_r3g30(16) AS b, fg_r3g30(40) AS c;  -- Go: -32768 0 0
+
+-- R4-D40 (PR 24 review r4): a loop variable that shadows an untyped
+-- constant is a new int32 variable (Go spec, For statements), not the
+-- constant. It kept the constant's untyped flag, so a << k was widened to
+-- bigint: 2147483648 for 1 << 31, where an int32 that leaves its range
+-- fails (doc/plxgo.md). An int16 loop variable drops the bits past 16.
+CREATE FUNCTION fg_r4d40(k int) RETURNS text LANGUAGE plxgo AS $$
+const a = 1
+var s int64 = 0
+for a := int32(1); a < 2; a++ {
+	s = int64(a << k)
+}
+return fmt.Sprintf("%d", s)
+$$;
+\set VERBOSITY terse
+SELECT fg_r4d40(31) AS r;  -- integer out of range (Go: -2147483648)
+\set VERBOSITY default
+CREATE FUNCTION fg_r4d40_16(k int) RETURNS text LANGUAGE plxgo AS $$
+const a = 1
+var s int64 = 0
+for a := int16(1); a < 2; a++ {
+	s = int64(a << k)
+}
+return fmt.Sprintf("%d %d", s, a << 40)
+$$;
+SELECT fg_r4d40_16(15) AS r;  -- Go: -32768 1099511627776
