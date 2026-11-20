@@ -179,10 +179,13 @@ CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
  * plxtsql converts a value whose type it cannot see to an integer type with
  * one of these: a numeric, real or double precision value is truncated toward
  * zero, as SQL Server does, and any other value takes the explicit cast.
+ * plxtsql passes the value as ROW(value), so the argument is always of
+ * type record and matches this signature exactly: an overload that a role
+ * with CREATE on this schema adds cannot capture the call.
  */
-CREATE FUNCTION plx_tsql_int2("any") RETURNS smallint
+CREATE FUNCTION plx_tsql_int2(record) RETURNS smallint
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-CREATE FUNCTION plx_tsql_int4("any") RETURNS integer
+CREATE FUNCTION plx_tsql_int4(record) RETURNS integer
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-CREATE FUNCTION plx_tsql_int8("any") RETURNS bigint
+CREATE FUNCTION plx_tsql_int8(record) RETURNS bigint
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;

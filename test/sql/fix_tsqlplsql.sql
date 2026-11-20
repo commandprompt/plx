@@ -748,3 +748,22 @@ CREATE FUNCTION fxr11_fix() RETURNS text LANGUAGE plxtsql AS $$
 $$;
 SELECT fxr11_fix() AS r;
 SELECT string_agg(msg, ',' ORDER BY msg) AS r FROM fxr11_log;  -- SQL Server: attempt,caught
+-- R2-U10 (PR 24 review r2 u1[0]): a conversion to an integer type of a value
+-- whose type plxtsql cannot see calls a helper in plx's schema. An overload
+-- of that helper in the same schema (a role that can CREATE there, such as
+-- PUBLIC in schema public on PG 13 and 14) must not capture the call.
+CREATE FUNCTION fxu10(x numeric) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONCAT(CAST(ROUND(@x, 2) AS int), ' ', CONVERT(bigint, ABS(@x)), ' ', CAST(ABS(@x) AS smallint));
+$$;
+CREATE FUNCTION public.plx_tsql_int4(numeric) RETURNS int LANGUAGE sql AS 'SELECT 999';
+CREATE FUNCTION public.plx_tsql_int8(numeric) RETURNS bigint LANGUAGE sql AS 'SELECT 999';
+CREATE FUNCTION public.plx_tsql_int2(numeric) RETURNS smallint LANGUAGE sql AS 'SELECT 999';
+CREATE FUNCTION public.plx_tsql_int4(anyelement) RETURNS int LANGUAGE sql AS 'SELECT 999';
+CREATE FUNCTION public.plx_tsql_int4(text) RETURNS int LANGUAGE sql AS 'SELECT 999';
+SELECT fxu10(-2.75) AS r;  -- SQL Server: -2 2 2
+CREATE FUNCTION fxu10_unk() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONCAT(CAST((NULL) AS int), '|', CAST(('12') AS int), '|', CAST(LOWER('7') AS int));
+$$;
+SELECT fxu10_unk() AS r;  -- SQL Server: |12|7
+DROP FUNCTION public.plx_tsql_int4(numeric), public.plx_tsql_int8(numeric),
+  public.plx_tsql_int2(numeric), public.plx_tsql_int4(anyelement), public.plx_tsql_int4(text);
