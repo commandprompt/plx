@@ -453,3 +453,25 @@ r = fetch_one("SELECT 'X' AS s")
 return r.s
 $$;
 SELECT r3c30_rb() AS r;  -- X
+
+-- R3-F30 (PR 24 review r3): in plxjs, plxts and plxphp, < binds tighter
+-- than & and ^, so i < n & 6 is (i < n) & 6 (PHP 8.5: 0 iterations for
+-- n = 6), but the loop was lowered with the bound (n & 6) (6 iterations).
+-- A bound with & or ^ outside brackets is now rejected, as | already was.
+CREATE FUNCTION r3f30_php(n int) RETURNS int LANGUAGE plxphp AS $$
+$c = 0;
+for ($i = 0; $i < $n & 6; $i++) { $c = $c + 1; }
+return $c;
+$$;
+CREATE FUNCTION r3f30_js(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < n ^ 1; i++) { c = c + 1; }
+return c;
+$$;
+-- in brackets the bound is one value
+CREATE FUNCTION r3f30_ok(n int) RETURNS int LANGUAGE plxjs AS $$
+let c = 0;
+for (let i = 0; i < (n & 6); i++) { c = c + 1; }
+return c;
+$$;
+SELECT r3f30_ok(7) AS r;  -- 6
