@@ -54,9 +54,9 @@ SELECT sum_to(5), sum_to(100);
      15 |   5050
 ```
 
-## Build a text result without `+`
+## Join many values into one text result
 
-plxgo does not translate `+` on strings (it cannot tell numeric addition from concatenation without type information). Build text by appending to a `[]string` slice and joining it. `append` maps to `array_append`, and `array_to_string` is a PostgreSQL function called directly. `string(i)` converts the integer to text with a `::text` cast.
+To join many values with a separator, append them to a `[]string` slice and join it. (To join a few strings, `+` works when plx can see that every operand is a string; see [String concatenation with `+`](../plxgo.md#string-concatenation-with).) `append` maps to `array_append`, and `array_to_string` is a PostgreSQL function called directly. `string(i)` converts the integer to text with a `::text` cast.
 
 ```go
 CREATE FUNCTION csv_range(n int) RETURNS text LANGUAGE plxgo AS $$

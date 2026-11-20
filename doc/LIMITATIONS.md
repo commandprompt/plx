@@ -95,12 +95,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   message replaces your message with plpgsql's generic `assertion failed`. Wrap
   such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
-  except plxtsql, `+` is SQL numeric addition. Use the dialect's string form:
-  interpolation (Ruby/PHP/Python/JS/TS), `fmt.Sprintf` (Go), `||` (PL/SQL), or
-  `CONCAT(...)`. In plxgo `||` is logical OR, and in plxcobol it is rejected.
-  plxtsql writes `+` as `||` only when every operand is a known string, such as
-  a `VARCHAR` variable or a string literal; see
-  [plxtsql.md](plxtsql.md#string-concatenation-with).
+  except plxtsql and plxgo, `+` is SQL numeric addition. Use the dialect's string
+  form: interpolation (Ruby/PHP/Python/JS/TS), `||` (PL/SQL), or `CONCAT(...)`.
+  In plxcobol `||` is rejected. plxtsql writes `+` as `||` only when every
+  operand is a known string, such as a `VARCHAR` variable or a string literal;
+  see [plxtsql.md](plxtsql.md#string-concatenation-with). plxgo writes `+` as
+  `||` only when every operand is a known string, such as a string literal or
+  a `string` local; see [plxgo.md](plxgo.md#string-concatenation-with). In plxgo
+  `||` is logical OR.
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type
@@ -214,8 +216,13 @@ fail when the function runs.
 - `map`, `chan`, `struct`, and `interface` types; declare data with SQL types or
   slices.
 - `switch` `fallthrough`.
-- `+` for string concatenation. `||` is logical OR in plxgo; use
-  `fmt.Sprintf("%s%s", a, b)` or build a slice and `array_to_string`.
+- `make`, which plx rejects; write a slice literal or
+  `array_fill(0, []int{n})`.
+- `+` joins strings only when plx can see that every operand is a string: a
+  string literal, a `string` local, a `text` or `varchar` parameter, or a call
+  that returns a string. With a row field, an array, `jsonb`, `char(n)` or a
+  SQL function call among the operands, `+` stays SQL `+`; write
+  `"x" + string(r.a)` or `fmt.Sprintf("x%s", r.a)`.
 - `for i := range s` over a slice; use `for _, v := range s` or a counting loop.
 - Only a subset of `fmt`/`strings`/`math`/`strconv` is mapped; other calls pass
   through and must be valid PostgreSQL functions.

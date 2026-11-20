@@ -283,6 +283,10 @@ Each entry names the dialects it affects.
   binary and `_`-separated integer literals keep their value on every
   supported PostgreSQL version (`017` was 17, `0o17` was 0, and on PostgreSQL
   13 to 15 `0x1F` was 0). A number with letters glued to it is rejected.
+- **`+` between a string and a number is rejected** at `CREATE FUNCTION`, as
+  Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
+  because SQL read the literal as a number. Convert the number with
+  `strconv.Itoa` or `fmt.Sprintf`.
 
 #### plxcobol
 
@@ -627,6 +631,24 @@ not here.
 #### plxgo
 
 - `strconv.Itoa(x)` lowered to `(x)::integer` instead of `(x)::text`.
+- `+` between strings now joins them (#18, #23). plx writes it as `||` when
+  every operand is a string literal, a `string` local, a `text` or `varchar`
+  parameter, or a call that returns a string. If any operand has a type plx
+  cannot see, such as a row field, an array, `jsonb` or a SQL function call,
+  `+` stays SQL `+` and fails when the function runs. Before,
+  `strconv.Itoa(n) + "x"` failed when the function ran, with
+  `operator does not exist: text + unknown`. A NULL operand makes the result
+  NULL. `msg := "a" + s` now declares `msg` as `text`.
+- `s += x` on a string appends. It used to become `s := s + (x)`, which
+  failed when it ran. plx now writes `s := s || (x)` when it can see that `x`
+  is a string, by the same rules as `+`. A NULL `x` makes `s` NULL. `s += 1`
+  on a string is rejected at `CREATE FUNCTION`, as in Go. When plx cannot see
+  the type of `x`, such as a row field or a SQL function call, it still writes
+  `s := s + (x)`, which fails when the function runs.
+- `make(...)` is not supported, but the error named something else: a syntax
+  error at `[`, a type that could not be inferred, or a case clash between
+  the type name and a variable. plx now rejects `make` at `CREATE FUNCTION`
+  with `make is not supported` and suggests a slice literal or `array_fill`.
 
 #### plxcobol
 

@@ -55,6 +55,7 @@ declarations are translated (see below).
 | `const pi = 3.14` | `pi CONSTANT double precision := 3.14;` |
 | `x = e` | `x := e;` |
 | `x += e` (also `-= *= /= %= <<= >>= &= \|= ^= &^=`) | `x := x + (e);` (`^=` uses `#`, `&^=` uses `& ~`) |
+| `s += e` on strings `s` and `e` | `s := s \|\| (e);` (see [String concatenation with `+`](#string-concatenation-with)) |
 | `x++` / `x--` | `x := x + 1;` / `x := x - 1;` |
 | `a, b = x, y` | `SELECT x, y INTO a, b;` (parallel, so swaps work) |
 | `a, b := 1, "x"` | declares `a` (integer) and `b` (text), then assigns; each value must have an inferable type |
@@ -70,7 +71,7 @@ PostgreSQL type name, starts as `NULL`, and so does an array whose length is a
 constant name rather than a number.
 
 `:=` infers the type from a literal (`int`/`float`/`string`/`bool`), an array
-literal, `len(...)`, or a type conversion `T(x)`. If the type cannot be inferred
+literal, `len(...)`, a type conversion `T(x)`, or a string concatenation. If the type cannot be inferred
 (for example `x := someCall()`), declare it explicitly with `var x T`.
 
 ### Control flow
@@ -149,6 +150,7 @@ $$;
 | --- | --- |
 | `==`, `!=` | `=`, `<>` |
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
+| `a + b` on strings | `(a) \|\| (b)` (see below) |
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
 | `nil` | `NULL` |
@@ -191,6 +193,54 @@ bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
 `(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
 binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
 plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
+
+### String concatenation with `+`
+
+In Go, `+` with a string operand joins strings. Go has no implicit
+conversions, so both operands are then strings. plx writes such a `+` as SQL
+`||` when it can see that every operand is a string. plx sees a string in:
+
+- a string literal, `"..."` or `` `...` ``
+- a call that returns a string: `strconv.Itoa`, `fmt.Sprintf`,
+  `strings.ToUpper`, `strings.ToLower`, `strings.TrimSpace`,
+  `strings.ReplaceAll`, and `string(x)`
+- a local of type `string` (`var s string`, `s := "..."`), or an element of a
+  `[]string` local
+- a `text` or `varchar` parameter
+
+```go
+return "n=" + strconv.Itoa(n) + "!"
+```
+```sql
+RETURN ((('n=') || ((n)::text)) || ('!'));
+```
+
+plx keeps Go's left-to-right order, and an addition inside a call stays an
+addition: `"x" + strconv.Itoa(n + 1)` adds first and then joins. A short
+declaration from a concatenation, such as `msg := "n=" + strconv.Itoa(n)`,
+declares `msg` as `text`. A NULL operand makes the whole result NULL, as it
+does in `fmt.Sprintf`.
+
+`s += x` on a `string` local or a `text` or `varchar` parameter appends:
+plx writes it as `s := s || (x);`. This needs `x` to be a string that plx can
+see, by the same rules as `+`. Otherwise plx writes `s := s + (x);`, which
+fails when the function runs; write `s += string(r.a)`. A NULL `x` makes `s`
+NULL, as `+` does. `s += 1` is rejected, as in Go.
+
+Go rejects `+` between a string and a number, and so does plx, when you run
+`CREATE FUNCTION`. `n + "1"` with an integer `n` fails with
+`invalid operation: + between a string and a number`. Convert the number with
+`strconv.Itoa` or `fmt.Sprintf`.
+
+When plx cannot see the type of an operand, `+` stays SQL `+`, even beside a
+string literal. This happens with a row field, an array or `jsonb` value, a
+`char(n)` parameter, and a SQL function call such as `length(s)`. Such a `+`
+fails when the function runs: `"x" + r.name` fails with
+`operator does not exist: unknown + text`. plx does not write `||` here,
+because in SQL `||` also appends to an array and merges `jsonb`, and it casts
+a number to text where Go would reject the program. Convert each such operand
+with `string(...)`, as in `"x" + string(r.name)`, or use
+`fmt.Sprintf("x%s", r.name)`.
 
 ### Slices and indexing
 
@@ -286,13 +336,10 @@ $$;
 - `map`, `chan`, `struct`, and `interface` types (declare data with SQL types or
   arrays instead).
 - `switch` `fallthrough`.
+- `make`. plx rejects it at `CREATE FUNCTION`. Write a slice literal such as
+  `[]int{1, 2}`, or `array_fill(0, []int{n})` for a slice of `n` zeros.
 - Transaction control. `commit()` and `rollback()` are accepted when a procedure
   is created but fail when it runs (`function commit() does not exist`).
-- String concatenation with `+`. Go overloads `+` for numeric addition and
-  string concatenation; plx cannot tell which is meant without type information,
-  so it leaves `+` as `+`. `||` is logical OR in plxgo, so use
-  `fmt.Sprintf("%s%s", a, b)` for text concatenation (a NULL operand makes the
-  result NULL).
 - The full `fmt`/`strings`/`math`/`strconv` packages; only the subset above is
   translated.
 
