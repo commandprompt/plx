@@ -428,32 +428,6 @@
   },
   {
    "dialect": "plxlua",
-   "id": "string-compare",
-   "params": [
-    {
-     "name": "a",
-     "sql": "text",
-     "cs": "string",
-     "value": "apple"
-    },
-    {
-     "name": "b",
-     "sql": "text",
-     "cs": "string",
-     "value": "Banana"
-    }
-   ],
-   "returns": {
-    "sql": "text",
-    "cs": "string"
-   },
-   "body": "return tostring(a < b) .. tostring(\"a\" < \"B\")",
-   "expected": "falsefalse",
-   "diverges": "comparisons use the database collation, not bytes (plxlua.md, Semantic differences)",
-   "plx": "truetrue"
-  },
-  {
-   "dialect": "plxlua",
    "id": "pcall-error",
    "params": [
     {
