@@ -360,7 +360,10 @@ Each entry names the dialects it affects.
   `numeric(19,4)`**, as `DECLARE` and `CONVERT` already did. Before, `CAST`
   passed the name to PostgreSQL, whose `bit` keeps only the lowest bit, so
   `CAST(2 AS bit)` gave 0 instead of 1. PostgreSQL's `money` turned into text
-  such as `$2.50`. A `boolean` turns into the text `true` or `false`.
+  such as `$2.50`. A `boolean` has its own text forms: a cast to text gives
+  `true` or `false`, and `CONCAT` gives `t` or `f`. So
+  `CONCAT('a', CAST(1 AS bit))` now gives `at`; before, and in SQL Server, it
+  gave `a1`.
 
 #### plxplsql
 

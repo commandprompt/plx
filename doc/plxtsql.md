@@ -209,8 +209,8 @@ keep SQL Server's value. `CAST(300 AS tinyint)` is an error in SQL Server but
 but 3 in `bytea`. The call fails with `type "tinyint" does not exist`. Cast to
 the PostgreSQL type you want instead, such as `smallint` or `bytea`.
 
-A `BIT` value is a PostgreSQL `boolean`, so it turns into the text `true` or
-`false`, not `1` or `0`. A `DATETIME` value keeps every digit you give it:
+A `BIT` value is a PostgreSQL `boolean`. A cast to text gives `true` or
+`false`, and `CONCAT` gives `t` or `f`. SQL Server gives `1` or `0` in both. A `DATETIME` value keeps every digit you give it:
 SQL Server rounds it to 1/300 of a second.
 
 ### Operators
