@@ -404,3 +404,19 @@ $d = fetch_one("SELECT 'dyn=\{$x}' || $1 AS v", '!');
 return "str=\{$x} " . $r->v . " " . $d->v;
 $$;
 SELECT r2c13_php(5) AS r;  -- PHP: str=\{5} sql=\{5} dyn=\{5}!
+-- R2-S10 (PR 24 review r2 s1[0]): the check that a counting-for variable is
+-- not read after the loop scanned from each loop to the end of the body, so
+-- CREATE FUNCTION took time quadratic in the number of loops (16,000 loops
+-- and a string naming every variable: about 10 s; 2.0.1: 0.06 s). It now
+-- skips the scan for a name that does not occur after the loop.
+SET statement_timeout = '3s';
+DO $d$ BEGIN EXECUTE format('CREATE FUNCTION r2s10_php() RETURNS int LANGUAGE plxphp AS %L',
+  (SELECT string_agg(format('for ($i%s = 0; $i%s < 1; $i%s++) { }', k, k, k), E'\n') FROM generate_series(1, 16000) k)
+  || E'\n$s = "' || (SELECT string_agg('i' || k, ' ') FROM generate_series(1, 16000) k) || E'";\nreturn 1;'); END $d$;
+RESET statement_timeout;
+SELECT r2s10_php() AS r;  -- 1
+-- the check still sees a read after the loop
+CREATE FUNCTION r2s10_read() RETURNS text LANGUAGE plxphp AS $$
+for ($i = 0; $i < 3; $i++) { }
+return "i=$i";
+$$;

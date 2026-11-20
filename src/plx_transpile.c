@@ -4402,6 +4402,30 @@ plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
 	return found;
 }
 
+/*
+ * Call fn(arg, s, len) for the text of each interpolation in string token tk.
+ */
+void
+plx_string_interps(Ctx *cx, Tok *tk, void (*fn) (void *arg, const char *s, int len),
+				   void *arg)
+{
+	PlxTplSeg  *segs;
+	int			n,
+				k;
+
+	if (tk->kind != T_STRING)
+		return;
+	n = tpl_split(cx, tk, false, &segs);
+	for (k = 0; k < n; k++)
+	{
+		if (segs[k].interp)
+			fn(arg, segs[k].s, segs[k].len);
+		pfree(segs[k].s);
+	}
+	if (segs)
+		pfree(segs);
+}
+
 /* ident(e) / raw(e) wrapping the whole interpolation? Sets [*is, *is + *il). */
 static PlxTplKind
 tpl_kind(const char *s, int len, const char **is, int *il)

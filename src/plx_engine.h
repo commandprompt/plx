@@ -150,6 +150,7 @@ typedef struct PlxCtx
 	bool		retset;
 	char	  **pspell;			/* per parameter: the first spelling the body
 								 * used for it (see plx_is_param) */
+	struct HTAB *last_use;		/* brace for-loops: last token naming each word */
 	struct HTAB *appended;		/* plxphp: names that are the target of a .=
 								 * somewhere in the body (see php_appended) */
 	MemoryContext mcx;			/* caller-supplied scratch context (reserved) */
@@ -200,6 +201,8 @@ void plx_emit_try(Ctx *cx, StringInfo o, int ind, char *body, int nrescue,
 PlxLocal2 *plx_local_add(Ctx *cx, const char *name, int len);
 PlxLocal2 *plx_local_find(Ctx *cx, const char *name, int len);
 void plx_local_drop(Ctx *cx, PlxLocal2 *l);
+void plx_string_interps(Ctx *cx, Tok *tk, void (*fn) (void *arg, const char *s, int len),
+						void *arg);
 void plx_check_loop_var(Ctx *cx, const char *name, int len);
 void plx_locals_reset(Ctx *cx);
 char *plx_ext_object(const char *name);
