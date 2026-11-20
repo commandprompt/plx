@@ -70,10 +70,13 @@ Each entry names the dialects it affects.
   comment or a dollar-quoted string does not open a string. A literal that
   contains a backslash is written as `E'...'` in dynamic SQL too, so the SQL
   reads the same whatever `standard_conforming_strings` the caller uses. A
-  body that
-  interpolated an identifier (`FROM #{t}`) or a SQL fragment on purpose fails
-  when re-created (`syntax error at or near "$1"`) until it uses `ident()` or
-  `raw()` (see Added). See doc/DYNAMIC-SQL.md.
+  value interpolated where SQL needs a name (`FROM #{t}`) is now an error
+  until the body uses `ident()` or `raw()` (see Added). In static SQL the
+  value is written in parentheses, `FROM (t)`, so `CREATE FUNCTION` fails with
+  a syntax error; before, it read the table named `t` whatever the variable
+  held. In dynamic SQL the statement fails when it runs, with
+  `syntax error at or near "$n"`. A value interpolated to build SQL text on
+  purpose is now bound as data. See doc/DYNAMIC-SQL.md.
 - **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
   plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
   `return` inside `try` left the function without running `finally`. The

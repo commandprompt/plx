@@ -141,8 +141,8 @@ end
 The row variable is a record. Field access is `row.col`, `row[:col]`, or
 `row['col']`. The bracket form reads a field only on a record. On a jsonb or
 hstore value it is SQL subscripting (`j['a']` needs PostgreSQL 14 or later), and
-`ARRAY['x']` is an array. Interpolated values in the SQL string are spliced as name
-references. For bind parameters or non-literal SQL, pass extra arguments:
+`ARRAY['x']` is an array. Interpolated values in the SQL string are bound as
+values (see [Interpolation in SQL](DYNAMIC-SQL.md)). For bind parameters or non-literal SQL, pass extra arguments:
 `query(sql, a, b).each`. `each_with_index do |row, i|` provides a zero-based
 index.
 

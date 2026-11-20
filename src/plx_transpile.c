@@ -4151,6 +4151,7 @@ typedef struct
 	int			dollar_len;
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
+	bool		paren;			/* static SQL: write an unquoted value as (expr) */
 } PlxTplState;
 
 /* Append a literal run, tracking quotes. next: the segment after, or NULL. */
@@ -4287,7 +4288,13 @@ tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
 {
 	if (!st->sq)
 	{
-		appendStringInfoString(buf, ref);
+		/*
+		 * In static SQL the value is a plpgsql variable, which plpgsql replaces
+		 * only where SQL takes an expression. Parenthesized, it still works
+		 * there, and where SQL needs a name (FROM #{t}) it is a syntax error
+		 * at CREATE FUNCTION instead of silently naming the table "t".
+		 */
+		appendStringInfo(buf, st->paren ? "(%s)" : "%s", ref);
 		return false;
 	}
 	/* '#{x}' exactly: the value alone */
@@ -4362,6 +4369,7 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 	PlxTplState st = {0};
 	bool		skip = false;
 
+	st.paren = true;
 	for (i = 0; i < n; i++)
 	{
 		if (!segs[i].interp)

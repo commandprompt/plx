@@ -21,7 +21,8 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 
 | Where the interpolation sits | Static SQL | Dynamic SQL |
 |---|---|---|
-| outside quotes: `id = #{n}` | `id = n` (plpgsql binds the variable) | `id = $k`, passed with `USING` |
+| outside quotes: `id = #{n}` | `id = (n)` (plpgsql binds the variable) | `id = $k`, passed with `USING` |
+| where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error | `FROM $k`: the statement fails when it runs |
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
@@ -107,9 +108,11 @@ Write the interpolation in the call, or use bind arguments
 Functions already in the catalog keep the plpgsql they were generated with.
 When a function is created or replaced under 3.0:
 
-- a value interpolated where SQL needs an identifier (`FROM #{t}`) becomes a
-  parameter and the statement fails with `syntax error at or near "$1"`; write
-  `#{ident(t)}`;
+- a value interpolated where SQL needs an identifier (`FROM #{t}`) is an
+  error; write `#{ident(t)}`. In a static call `CREATE FUNCTION` fails with
+  a syntax error at the parenthesis plx writes around the value. In a dynamic
+  call the statement fails when it runs, with `syntax error at or near "$k"`,
+  where `$k` is the value's parameter number;
 - a value interpolated to build SQL text on purpose (`ORDER BY #{col} DESC`
   where `col` holds `name`) is now bound as data; write `#{raw(col)}` (or
   `#{ident(col)}` when it is a column name);

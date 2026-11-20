@@ -213,3 +213,32 @@ CALL fs_scs_off();
 SELECT fs_t_cr() = E'C:\\\n|| 42::text; --' AS cr_ok;
 RESET standard_conforming_strings;
 SELECT fs_t_cr() = E'C:\\\n|| 42::text; --' AS cr_ok;
+-- [22]: in static SQL, a value interpolated where SQL needs a name fails
+-- when the function is created. It used to become the bare variable name,
+-- which plpgsql does not replace there, so FROM #{fs_tab} read the table
+-- named fs_tab whatever the variable held.
+CREATE TABLE fs_tab (x int);
+INSERT INTO fs_tab VALUES (1), (2), (3);
+CREATE TABLE fs_users (id int);
+INSERT INTO fs_users VALUES (1);
+SELECT fs_err($q$CREATE FUNCTION fs_i_from(fs_tab text) RETURNS bigint LANGUAGE plxruby AS $f$
+u = fetch_one("SELECT count(*) AS c FROM #{fs_tab}")
+return u.c
+$f$$q$);
+SELECT fs_err($q$CREATE FUNCTION fs_i_perform(fs_tab text) RETURNS void LANGUAGE plxjs AS $f$
+perform(`DELETE FROM ${fs_tab}`);
+$f$$q$);
+SELECT fs_err($q$CREATE FUNCTION fs_i_query(fs_tab text) RETURNS SETOF int LANGUAGE plxjs AS $f$
+return_query(`SELECT x FROM ${fs_tab}`);
+$f$$q$);
+SELECT fs_err($q$CREATE FUNCTION fs_i_alias(a text) RETURNS int LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT 1 AS ${a}`);
+return 1;
+$f$$q$);
+SELECT count(*) AS fs_tab_rows FROM fs_tab;
+-- [22]: a value where SQL takes an expression still works, after FROM too
+CREATE FUNCTION fs_i_value(n int, s text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT substring(${s} FROM ${n}) || count(*) AS v FROM fs_tab WHERE x >= ${n} LIMIT ${n}`);
+return r.v;
+$f$;
+SELECT fs_i_value(2, 'abcdef');
