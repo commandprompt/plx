@@ -384,7 +384,9 @@ Each entry names the dialects it affects.
   doc/LIMITATIONS.md. For a value whose type plx cannot see, such as a column
   or a function call, the generated code calls the new functions
   `plx_tsql_int2`, `plx_tsql_int4` and `plx_tsql_int8`, which
-  `ALTER EXTENSION plx UPDATE TO '3.0.0'` installs.
+  `ALTER EXTENSION plx UPDATE TO '3.0.0'` installs. A value of a domain over
+  `numeric`, `real` or `double precision`, such as a T-SQL alias type,
+  truncates too.
 
 #### plxplsql
 

@@ -1222,6 +1222,21 @@ SELECT fxr10b_deep(-2.7) AS r;  -- SQL Server: 2
 (1 row)
 
 RESET statement_timeout;
+-- a value of a domain type over numeric truncates too
+CREATE DOMAIN fxr10b_price AS numeric(10,2);
+CREATE TABLE fxr10b_p(p fxr10b_price);
+INSERT INTO fxr10b_p VALUES (2.70);
+CREATE FUNCTION fxr10b_dom(q fxr10b_price) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @i int;
+  SELECT @i = p FROM fxr10b_p;
+  RETURN CONCAT(@i, CAST((SELECT p FROM fxr10b_p) AS int), CONVERT(int, @q));
+$$;
+SELECT fxr10b_dom(2.70) AS r;  -- SQL Server: 222
+  r  
+-----
+ 222
+(1 row)
+
 -- R11 (PR 24 review [11]): a CATCH block undoes the writes its TRY block made
 -- before the error, because TRY becomes a plpgsql block with an EXCEPTION
 -- clause, which rolls back to a savepoint. SQL Server keeps them. plx cannot

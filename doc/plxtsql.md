@@ -295,7 +295,10 @@ such as for a column or a function call, it emits a call to `plx_tsql_int4`
 (`plx_tsql_int2` for `SMALLINT` and `TINYINT`, `plx_tsql_int8` for
 `BIGINT`). The extension installs these functions. Each one evaluates the
 value once and checks its type when the function runs: it truncates a
-`numeric`, `real` or `double precision` value and casts any other value. The
+`numeric`, `real` or `double precision` value, or a value of a domain over
+one of these, and casts any other value. A T-SQL alias type created as a
+PostgreSQL domain, such as `CREATE DOMAIN price AS numeric(10,2)`, so
+truncates too. The
 call works wherever the cast does, such as around an aggregate or a window
 function, or in a `DEFAULT` or `CHECK` of a table the function creates.
 

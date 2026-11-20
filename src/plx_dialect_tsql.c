@@ -2765,12 +2765,13 @@ plx_tsql_inline_handler(PG_FUNCTION_ARGS)
  * value whose type plxtsql cannot see when it transpiles. The SQL functions
  * plx_tsql_int2, plx_tsql_int4 and plx_tsql_int8 all call this one; the
  * declared result type picks the integer type. A numeric, real or double
- * precision value is truncated toward zero first, as SQL Server does; a
- * PostgreSQL cast would round it. Any other type takes PostgreSQL's explicit
- * cast to the integer type, so a string that is not an integer fails as
- * before, and a type with no such cast fails with "cannot cast type". The
- * argument is declared "any", so a literal of unknown type, such as NULL or
- * a quoted string in parentheses, reaches it unresolved and is read as text.
+ * precision value, or a value of a domain over one, is truncated toward zero
+ * first, as SQL Server does; a PostgreSQL cast would round it. Any other type
+ * takes PostgreSQL's explicit cast to the integer type, so a string that is
+ * not an integer fails as before, and a type with no such cast fails with
+ * "cannot cast type". The argument is declared "any", so a literal of
+ * unknown type, such as NULL or a quoted string in parentheses, reaches it
+ * unresolved and is read as text.
  */
 typedef struct TqIntCast
 {
@@ -2803,15 +2804,16 @@ plx_tsql_toint(PG_FUNCTION_ARGS)
 					 errmsg("could not determine the type of the value to convert")));
 		c = MemoryContextAllocZero(mcxt, sizeof(TqIntCast));
 		c->argtype = argtype;
-		c->src = argtype;
-		if (argtype == NUMERICOID)
+		/* a domain, such as a T-SQL alias type, converts as its base type */
+		c->src = getBaseType(argtype);
+		if (c->src == NUMERICOID)
 			c->trunc = 'n';
-		else if (argtype == FLOAT4OID)
+		else if (c->src == FLOAT4OID)
 		{
 			c->trunc = 'f';
 			c->src = FLOAT8OID;
 		}
-		else if (argtype == FLOAT8OID)
+		else if (c->src == FLOAT8OID)
 			c->trunc = 'd';
 		if (argtype == UNKNOWNOID)
 			c->path = COERCION_PATH_COERCEVIAIO;	/* a literal: read its text */
