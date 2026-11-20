@@ -582,6 +582,8 @@ tq_read_type(Tq *tq, StringInfo dest)
 				tq->pos++;
 		}
 	}
+	else if (base && strcmp(base, "numeric") == 0)
+		appendStringInfoString(dest, "(18,0)");	/* SQL Server's default */
 }
 
 /* map a type reference spanning tokens [a,b) into dest (for CONVERT) */
@@ -645,6 +647,8 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 		}
 		appendStringInfoChar(dest, ')');
 	}
+	else if (base && strcmp(base, "numeric") == 0)
+		appendStringInfoString(dest, "(18,0)");	/* SQL Server's default */
 }
 
 /*
@@ -717,14 +721,16 @@ tq_cast_as(Tq *tq, int lp, int close)
  * keep SQL Server's value is kept too, so the call fails instead of returning
  * a different value: tinyint and smallmoney have a smaller range than smallint
  * and numeric(10,4), binary(n) and varbinary(n) cut the value to n bytes,
- * smalldatetime rounds to the minute, and sysname is nvarchar(128).
+ * smalldatetime rounds to the minute, and sysname is nvarchar(128). An
+ * integer type is not mapped here: tq_emit_call truncates the value first.
  */
 static bool
 tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
 {
 	static const char *mapped[] = {
 		"nvarchar", "varchar", "ntext", "bit", "money", "datetime",
-		"datetime2", "uniqueidentifier", "image", "varbinary", NULL
+		"datetime2", "uniqueidentifier", "image", "varbinary", "decimal",
+		"numeric", "dec", NULL
 	};
 	TqTok	   *arg = NULL;
 	const char *base;
@@ -781,6 +787,12 @@ tq_cast_type(Tq *tq, int a, int b, StringInfo dest)
 	}
 	if (arg)
 		return false;
+	if (strcmp(base, "numeric") == 0)
+	{
+		/* a bare DECIMAL or NUMERIC is decimal(18,0) in SQL Server */
+		appendStringInfoString(dest, "numeric(18,0)");
+		return true;
+	}
 	appendStringInfoString(dest, base);
 	return true;
 }
@@ -1173,6 +1185,246 @@ tq_mark_concat(Tq *tq, int a, int b)
 	}
 }
 
+/*
+ * SQL Server converts a decimal or float value to an integer type by
+ * truncating toward zero; a PostgreSQL cast rounds, so CAST(2.7 AS int) gives
+ * 3 instead of 2. The helpers below put trunc() in front of every conversion
+ * to an integer type: CAST, CONVERT, and assignment to an integer variable.
+ */
+
+/* is the PostgreSQL type text one of the integer types? */
+static bool
+tq_is_int_type(const char *typ)
+{
+	return typ && (strcmp(typ, "integer") == 0 || strcmp(typ, "bigint") == 0 ||
+				   strcmp(typ, "smallint") == 0);
+}
+
+/* PostgreSQL type text of an @variable (local or parameter), or NULL */
+static const char *
+tq_var_type(Tq *tq, TqTok *tk)
+{
+	char	   *name = tq_ident(tk->s, tk->len);
+	PlxLocal2  *l = plx_local_find(tq->cx, name, tk->len);
+	const PlxFuncMeta *m = tq->cx->meta;
+	int			i;
+
+	if (l)
+		return l->is_record ? NULL : l->typ;
+	if (m == NULL || m->argnames == NULL || m->argtypes == NULL)
+		return NULL;
+	for (i = 0; i < m->nargs; i++)
+	{
+		const char *an = m->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len &&
+			pg_strncasecmp(an, tk->s, tk->len) == 0)
+		{
+			switch (m->argtypes[i])
+			{
+				case INT2OID:
+					return "smallint";
+				case INT4OID:
+					return "integer";
+				case INT8OID:
+					return "bigint";
+				case NUMERICOID:
+					return "numeric";
+				case FLOAT4OID:
+					return "real";
+				case FLOAT8OID:
+					return "double precision";
+				case TEXTOID:
+				case VARCHAROID:
+				case BPCHAROID:
+					return "text";
+				case BOOLOID:
+					return "boolean";
+				default:
+					return NULL;
+			}
+		}
+	}
+	return NULL;
+}
+
+/*
+ * kind of a type text for an integer conversion: 'i' an integer type, 'f' a
+ * decimal or float type (truncate), 's' a string or boolean (a plain cast,
+ * which rejects '2.7' as SQL Server does), 0 anything else.
+ */
+static char
+tq_type_numkind(const char *typ)
+{
+	static const char *const ik[] = {"integer", "bigint", "smallint", NULL};
+	static const char *const fk[] = {"numeric", "real", "double precision", NULL};
+	static const char *const sk[] = {"varchar", "text", "char", "boolean", NULL};
+	int			len,
+				i;
+
+	if (typ == NULL)
+		return 0;
+	len = strcspn(typ, "(");
+	for (i = 0; ik[i]; i++)
+		if ((int) strlen(ik[i]) == len && strncmp(typ, ik[i], len) == 0)
+			return 'i';
+	for (i = 0; fk[i]; i++)
+		if ((int) strlen(fk[i]) == len && strncmp(typ, fk[i], len) == 0)
+			return 'f';
+	for (i = 0; sk[i]; i++)
+		if ((int) strlen(sk[i]) == len && strncmp(typ, sk[i], len) == 0)
+			return 's';
+	return 0;
+}
+
+/*
+ * kind of the expression [a,b) for an integer conversion, from what plx can
+ * see: 'i' when it needs no trunc() (integer literals and integer variables
+ * under + - * / %, or one string or boolean operand), 'f' when trunc() takes
+ * it directly (the same with a decimal literal or a decimal or float
+ * variable), 0 when its type is known only at run time.
+ */
+static char
+tq_num_kind(Tq *tq, int a, int b)
+{
+	char		k = 'i';
+	int			i,
+				j;
+
+	if (a >= b)
+		return 0;
+	if (b - a == 1 && tq->t[a].kind == TQ_STR)
+		return 'i';
+	for (i = a; i < b; i++)
+	{
+		TqTok	   *t = &tq->t[i];
+		char		c;
+
+		switch (t->kind)
+		{
+			case TQ_LP:
+			case TQ_RP:
+				break;
+			case TQ_OP:
+				if (t->len != 1 || strchr("+-*/%", t->s[0]) == NULL)
+					return 0;
+				break;
+			case TQ_NUM:
+				for (j = 0; j < t->len; j++)
+				{
+					if (t->s[j] == '.')
+						k = 'f';
+					else if (t->s[j] < '0' || t->s[j] > '9')
+						return 0;
+				}
+				break;
+			case TQ_VAR:
+				c = tq_type_numkind(tq_var_type(tq, t));
+				if (c == 's' && b - a == 1)
+					return 'i';
+				if (c != 'i' && c != 'f')
+					return 0;
+				if (c == 'f')
+					k = 'f';
+				break;
+			default:
+				return 0;
+		}
+	}
+	return k;
+}
+
+/*
+ * may the run-time form repeat the expression [a,b)? Yes when it calls no
+ * function, so evaluating it three times gives the same value at the cost of
+ * a column or variable read. A window function must repeat too, because
+ * PostgreSQL rejects it in the VALUES list of the other form; it may not hold
+ * another CAST or CONVERT, so the text grows linearly, not exponentially.
+ */
+static bool
+tq_repeat_ok(Tq *tq, int a, int b)
+{
+	bool		call = false,
+				over = false,
+				conv = false;
+	int			i;
+
+	for (i = a; i < b; i++)
+	{
+		TqTok	   *t = &tq->t[i];
+
+		if (t->kind != TQ_WORD)
+			continue;
+		if (tq_ci(t, "OVER"))
+			over = true;
+		else if (tq_ci(t, "CAST") || tq_ci(t, "CONVERT"))
+			conv = true;
+		if (i + 1 < b && tq->t[i + 1].kind == TQ_LP)
+			call = true;
+	}
+	return !call || (over && !conv);
+}
+
+/*
+ * emit the conversion of the SQL text e to the integer type typ, truncating
+ * toward zero. kind is from tq_num_kind. With kind 0 the type of e is chosen
+ * at run time: a decimal or float value truncates (through text, which every
+ * type casts to, so the branch also compiles for a boolean or a string), and
+ * anything else casts as before. e is evaluated once in a subquery unless
+ * repeat allows the shorter form. OFFSET 0 keeps the planner from pulling the
+ * VALUES row up into the CASE, which would copy e into each of the three
+ * references and grow as 3^n for n nested conversions.
+ */
+static void
+tq_int_conv_str(const char *e, char kind, bool repeat, const char *typ,
+				StringInfo out)
+{
+	static const char *const frac =
+		"'numeric'::regtype, 'real'::regtype, 'double precision'::regtype";
+
+	if (kind == 'i' || kind == 's')
+		appendStringInfo(out, "CAST(%s AS %s)", e, typ);
+	else if (kind == 'f')
+		appendStringInfo(out, "CAST(trunc(%s) AS %s)", e, typ);
+	else if (repeat)
+		appendStringInfo(out, "CASE WHEN pg_typeof(%s) IN (%s) THEN "
+						 "CAST(trunc(CAST(CAST(%s AS text) AS numeric)) AS %s) "
+						 "ELSE CAST(%s AS %s) END", e, frac, e, typ, e, typ);
+	else
+		appendStringInfo(out, "(SELECT CASE WHEN pg_typeof(__plx_v) IN (%s) THEN "
+						 "CAST(trunc(CAST(CAST(__plx_v AS text) AS numeric)) AS %s) "
+						 "ELSE CAST(__plx_v AS %s) END "
+						 "FROM (SELECT * FROM (VALUES ((%s))) AS __plx_m "
+						 "OFFSET 0) AS __plx_n(__plx_v))",
+						 frac, typ, typ, e);
+}
+
+/* emit the expression [a,b) converted to the integer type typ */
+static void
+tq_int_conv(Tq *tq, int a, int b, const char *typ, StringInfo out)
+{
+	StringInfoData e;
+
+	initStringInfo(&e);
+	tq_emit_range(tq, a, b, &e);
+	tq_sp(out);
+	tq_int_conv_str(e.data, tq_num_kind(tq, a, b), tq_repeat_ok(tq, a, b), typ, out);
+	pfree(e.data);
+}
+
+/*
+ * emit the value [a,b) assigned to a variable of type typ: truncated when typ
+ * is an integer type and the value may have a fraction, else as written.
+ */
+static void
+tq_emit_assign_value(Tq *tq, int a, int b, const char *typ, StringInfo out)
+{
+	if (tq_is_int_type(typ) && tq_num_kind(tq, a, b) != 'i')
+		tq_int_conv(tq, a, b, typ, out);
+	else
+		tq_emit_range(tq, a, b, out);
+}
+
 /* emit a function-call rename for a WORD at index i (followed by '('), or
  * return false to fall through to the generic path. On success sets *ni. */
 static bool
@@ -1200,6 +1452,12 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 			return false;
 		initStringInfo(&ty);
 		tq_type_from_range(tq, c1, comma, &ty);
+		if (tq_is_int_type(ty.data))
+		{
+			tq_int_conv(tq, comma + 1, comma2 > 0 ? comma2 : close, ty.data, out);
+			*ni = close + 1;
+			return true;
+		}
 		tq_sp(out);
 		appendStringInfoString(out, "CAST(");
 		tq_emit_range(tq, comma + 1, comma2 > 0 ? comma2 : close, out);
@@ -1216,6 +1474,15 @@ tq_emit_call(Tq *tq, int i, int b, StringInfo out, int *ni)
 
 		if (as < 0)
 			return false;
+		if (as + 2 == close && tq->t[as + 1].kind == TQ_WORD &&
+			(tq_ci(&tq->t[as + 1], "INT") || tq_ci(&tq->t[as + 1], "INTEGER") ||
+			 tq_ci(&tq->t[as + 1], "BIGINT") || tq_ci(&tq->t[as + 1], "SMALLINT")))
+		{
+			tq_int_conv(tq, lp + 1, as,
+						tq_base_type(tq->t[as + 1].s, tq->t[as + 1].len), out);
+			*ni = close + 1;
+			return true;
+		}
 		initStringInfo(&ty);
 		if (!tq_cast_type(tq, as + 1, close, &ty))
 			return false;
@@ -1619,7 +1886,7 @@ tq_declare(Tq *tq, int ind)
 			}
 			plx_indent(&tq->cx->out, ind);
 			appendStringInfo(&tq->cx->out, "%s :=", name);
-			tq_emit_range(tq, e0, e1, &tq->cx->out);
+			tq_emit_assign_value(tq, e0, e1, l->typ, &tq->cx->out);
 			appendStringInfoString(&tq->cx->out, ";\n");
 			tq->pos = e1;
 		}
@@ -1718,6 +1985,23 @@ tq_set(Tq *tq, int ind)
 		tq_emit_range(tq, e0, e1, &tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ");\n");
 	}
+	else if (arith && tq_is_int_type(tq_var_type(tq, v)) &&
+			 tq_num_kind(tq, e0, e1) != 'i')
+	{
+		/* @i += 1.5 is @i = @i + 1.5, which truncates into an integer @i */
+		StringInfoData e;
+		char	   *sum;
+
+		initStringInfo(&e);
+		tq_emit_range(tq, e0, e1, &e);
+		sum = psprintf("%s %c (%s)", name, arith, e.data);
+		appendStringInfo(&tq->cx->out, "%s := ", name);
+		tq_int_conv_str(sum, tq_num_kind(tq, e0, e1), tq_repeat_ok(tq, e0, e1),
+						tq_var_type(tq, v), &tq->cx->out);
+		appendStringInfoString(&tq->cx->out, ";\n");
+		pfree(sum);
+		pfree(e.data);
+	}
 	else if (arith)
 	{
 		appendStringInfo(&tq->cx->out, "%s := %s %c (", name, name, arith);
@@ -1727,7 +2011,7 @@ tq_set(Tq *tq, int ind)
 	else
 	{
 		appendStringInfo(&tq->cx->out, "%s :=", name);
-		tq_emit_range(tq, e0, e1, &tq->cx->out);
+		tq_emit_assign_value(tq, e0, e1, tq_var_type(tq, v), &tq->cx->out);
 		appendStringInfoString(&tq->cx->out, ";\n");
 	}
 	tq->pos = e1;
@@ -1758,6 +2042,7 @@ tq_select(Tq *tq, int ind)
 		char	  **names = palloc(sizeof(char *) * cap);
 		int		   *estart = palloc(sizeof(int) * cap),
 				   *eend = palloc(sizeof(int) * cap);
+		const char **ttyp = palloc(sizeof(char *) * cap);
 		int			frompos = -1;
 
 		for (;;)
@@ -1780,8 +2065,10 @@ tq_select(Tq *tq, int ind)
 				names = repalloc(names, sizeof(char *) * cap);
 				estart = repalloc(estart, sizeof(int) * cap);
 				eend = repalloc(eend, sizeof(int) * cap);
+				ttyp = repalloc(ttyp, sizeof(char *) * cap);
 			}
 			names[nassign] = tq_ident(v->s, v->len);
+			ttyp[nassign] = tq_var_type(tq, v);
 			tq->pos += 2;				/* @v = */
 			e0 = tq->pos;
 			e1 = e0;
@@ -1878,8 +2165,21 @@ tq_select(Tq *tq, int ind)
 			appendStringInfoString(&tq->cx->out, " LOOP\n");
 			for (k = 0; k < nassign; k++)
 			{
+				char		kind = tq_num_kind(tq, estart[k], eend[k]);
+
 				plx_indent(&tq->cx->out, ind + 1);
-				appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
+				if (tq_is_int_type(ttyp[k]) && kind != 'i')
+				{
+					/* the column has the value's type: truncate it the same way */
+					char	   *col = psprintf("%s.c%d", rec, k + 1);
+
+					appendStringInfo(&tq->cx->out, "%s := ", names[k]);
+					tq_int_conv_str(col, kind, true, ttyp[k], &tq->cx->out);
+					appendStringInfoString(&tq->cx->out, ";\n");
+					pfree(col);
+				}
+				else
+					appendStringInfo(&tq->cx->out, "%s := %s.c%d;\n", names[k], rec, k + 1);
 			}
 			plx_indent(&tq->cx->out, ind);
 			appendStringInfoString(&tq->cx->out, "END LOOP;\n");
@@ -1893,7 +2193,7 @@ tq_select(Tq *tq, int ind)
 			{
 				plx_indent(&tq->cx->out, ind);
 				appendStringInfo(&tq->cx->out, "%s :=", names[k]);
-				tq_emit_range(tq, estart[k], eend[k], &tq->cx->out);
+				tq_emit_assign_value(tq, estart[k], eend[k], ttyp[k], &tq->cx->out);
 				appendStringInfoString(&tq->cx->out, ";\n");
 			}
 		}

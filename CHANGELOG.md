@@ -371,6 +371,17 @@ Each entry names the dialects it affects.
   `CAST('$5' AS money)` fails with `invalid input syntax for type numeric`.
   Before, it gave `$5.00`, and SQL Server gives 5.00. Remove the sign before
   the cast.
+- **A conversion to an integer type truncates, and `DECIMAL` with no
+  precision is `decimal(18,0)`**, as in SQL Server. `CAST` and `CONVERT` to
+  `INT`, `INTEGER`, `BIGINT` or `SMALLINT` (and `CONVERT` to `TINYINT`), and an
+  assignment to a variable of one of these types, now truncate a fraction
+  toward zero. Before, they rounded: `CAST(1.5 AS int)` gave 2 instead of 1,
+  `CONVERT(int, -2.5)` gave -3 instead of -2, and `DECLARE @i int = 2.7` gave 3
+  instead of 2. A bare `DECIMAL`, `NUMERIC` or `DEC` in `DECLARE`, `CAST` or
+  `CONVERT` now becomes `numeric(18,0)`. Before, it was PostgreSQL `numeric`,
+  which keeps every digit: `DECLARE @d DECIMAL = 2.7` gave 2.7 instead of 3.
+  `RETURN` and `INSERT` into an integer column still round; see
+  doc/LIMITATIONS.md.
 
 #### plxplsql
 

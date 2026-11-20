@@ -1026,3 +1026,104 @@ SELECT fxmx_nv() AS r;  -- SQL Server: 42
  42
 (1 row)
 
+-- R10 (PR 24 review [10]): a conversion to an integer type truncates toward zero, as in SQL Server,
+-- in CAST, CONVERT and assignment to an integer variable; a DECIMAL or NUMERIC with no precision is decimal(18,0)
+CREATE FUNCTION fxr10_s2(d numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @i int = 2.7;
+  DECLARE @j int;
+  SET @j = @d;
+  RETURN CONCAT(CAST(1.5 AS int), ' ', CONVERT(int, -2.5), ' ', @i, ' ', @j);
+$$;
+SELECT fxr10_s2(3.9) AS r;  -- SQL Server: 1 -2 2 3
+    r     
+----------
+ 1 -2 2 3
+(1 row)
+
+CREATE FUNCTION fxr10_v1(x numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @d DECIMAL = 2.7;
+  RETURN CONCAT(CAST(@x AS numeric), '|', @d);
+$$;
+SELECT fxr10_v1(12.345) AS r;  -- SQL Server: 12|3
+  r   
+------
+ 12|3
+(1 row)
+
+CREATE FUNCTION fxr10_more(x numeric) RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @f float = 2.9;
+  DECLARE @b bit = 1;
+  DECLARE @t tinyint = 2.9;
+  DECLARE @s smallint = -2.9;
+  DECLARE @n int = 1;
+  DECLARE @e dec = -2.5;
+  SET @n += 1.5;
+  RETURN CONCAT(CAST(@f AS int), ' ', CAST(@f * -1 AS int), ' ', CAST(@b AS int), ' ',
+                CAST('12' AS int), ' ', CONVERT(bigint, 9007199254740993.9), ' ', CONVERT(bigint, @x * -1), ' ',
+                @t, ' ', @s, ' ', @n, ' ', CONVERT(decimal, 2.5), ' ', @e, ' ', CAST(@x AS numeric(5,2)));
+$$;
+SELECT fxr10_more(12.345) AS r;  -- SQL Server: 2 -2 1 12 9007199254740993 -12 2 -2 2 3 -3 12.35
+                        r                         
+--------------------------------------------------
+ 2 -2 1 12 9007199254740993 -12 2 -2 2 3 -3 12.35
+(1 row)
+
+CREATE TABLE fxr10_t(v numeric);
+INSERT INTO fxr10_t VALUES (1.2), (2.9);
+CREATE FUNCTION fxr10_sel() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @a int;
+  DECLARE @b int;
+  SELECT @a = v FROM fxr10_t WHERE v > 2;
+  SELECT @b = -7.9;
+  RETURN CONCAT(@a, ' ', @b);
+$$;
+SELECT fxr10_sel() AS r;  -- SQL Server: 2 -7
+  r   
+------
+ 2 -7
+(1 row)
+
+CREATE FUNCTION fxr10_q() RETURNS SETOF int LANGUAGE plxtsql AS $$
+  SELECT CAST(v AS int) FROM fxr10_t ORDER BY v;
+$$;
+SELECT * FROM fxr10_q();  -- SQL Server: 1, 2
+ fxr10_q 
+---------
+       1
+       2
+(2 rows)
+
+-- a string that is not an integer still fails, as in SQL Server
+CREATE FUNCTION fxr10_str() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST('1.5' AS int);
+$$;
+SELECT ft_err($q$SELECT fxr10_str()$q$) AS r;  -- SQL Server: error, conversion failed
+                          r                          
+-----------------------------------------------------
+ 22P02: invalid input syntax for type integer: "1.5"
+(1 row)
+
+-- aggregates, a window function and GROUP BY
+CREATE FUNCTION fxr10_agg() RETURNS SETOF text LANGUAGE plxtsql AS $$
+  SELECT CONCAT(CAST(SUM(v) AS int), ' ', CAST(AVG(v) OVER () AS int), ' ', CONVERT(int, ABS(v) * -1))
+    FROM fxr10_t GROUP BY v ORDER BY v;
+$$;
+SELECT * FROM fxr10_agg();  -- SQL Server: 1 2 -1, 2 2 -2
+ fxr10_agg 
+-----------
+ 1 2 -1
+ 2 2 -2
+(2 rows)
+
+-- nested conversions evaluate each value once: the text and the plan grow linearly
+CREATE FUNCTION fxr10_nest(x numeric) RETURNS int LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(CAST(@x AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int) AS int);
+$$;
+SET statement_timeout = '60s';
+SELECT fxr10_nest(-2.7) AS r;  -- SQL Server: -2
+ r  
+----
+ -2
+(1 row)
+
+RESET statement_timeout;

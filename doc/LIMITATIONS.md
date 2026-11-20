@@ -289,6 +289,12 @@ fail when the function runs.
   `CONVERT`. plx gives 30 only to `CAST(x AS nvarchar)`. `CAST(x AS varchar)`
   and `CONVERT(nvarchar, x)` keep every character, and `CAST(x AS char)` keeps
   1, because PostgreSQL `char` means `char(1)`. Write the length.
+- Truncation in an implicit conversion to an integer type outside the function
+  body. `CAST`, `CONVERT` and assignment to an integer variable truncate as in
+  SQL Server, but `RETURN 2.7` from a function that returns `int` gives 3, and
+  so does an `INSERT` or `UPDATE` of 2.7 into an `int` column. SQL Server gives
+  2. Write `CAST(e AS int)`. See
+  [Conversion to an integer type](plxtsql.md#conversion-to-an-integer-type).
 
 ## Working around a gap
 

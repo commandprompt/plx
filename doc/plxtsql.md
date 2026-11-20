@@ -92,6 +92,12 @@ variables the same `SELECT` assigns, such as `SELECT @t = @t + v FROM t`, is
 rejected when you create the function. Use an aggregate instead, for example
 `SELECT @t = SUM(v) FROM t` or `SELECT @s = string_agg(name, ',') FROM t`.
 
+An assignment to an integer variable truncates a fraction toward zero, as in
+SQL Server: `DECLARE @i int = 2.7` gives 2, `SET @i = -2.7` gives -2, and
+`SET @i += 1.5` adds 1.5 and then truncates. This applies to `DECLARE`, `SET`
+and `SELECT @x = ...`. See
+[Conversion to an integer type](#conversion-to-an-integer-type).
+
 ### Control flow
 
 | T-SQL | plpgsql |
@@ -145,7 +151,9 @@ applied; the message argument is emitted as-is.
 | `INT`, `INTEGER` | `integer` |
 | `BIGINT`, `SMALLINT`, `TINYINT` | `bigint`, `smallint`, `smallint` |
 | `BIT` | `boolean` |
-| `DECIMAL(p,s)`, `NUMERIC`, `MONEY` | `numeric(p,s)`, `numeric`, `numeric(19,4)` |
+| `DECIMAL(p,s)`, `NUMERIC(p,s)`, `DEC(p,s)` | `numeric(p,s)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)`, as in SQL Server |
+| `MONEY` | `numeric(19,4)` |
 | `FLOAT`, `REAL` | `double precision`, `real` |
 | `VARCHAR(n)`, `NVARCHAR(n)` | `varchar(n)` |
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)` | `text` |
@@ -197,6 +205,8 @@ PostgreSQL type names work.
 | `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `NTEXT` | `text` |
 | `BIT` | `boolean` |
 | `MONEY` | `numeric(19,4)` |
+| `DECIMAL`, `NUMERIC`, `DEC` (no precision) | `numeric(18,0)` |
+| `INT`, `INTEGER`, `BIGINT`, `SMALLINT` | the same type, with the value truncated first (see below) |
 | `DATETIME`, `DATETIME2` | `timestamp` |
 | `DATETIME2(n)` | `timestamp(n)`; `DATETIME2(7)` gives `timestamp` (6 digits) |
 | `UNIQUEIDENTIFIER` | `uuid` |
@@ -228,6 +238,37 @@ A mapped type takes the PostgreSQL rules for its values, as in `DECLARE` and
   `DATALENGTH(CAST('\x41' AS varbinary(max)))` gives 1. SQL Server gives 4.
 - `CAST(N'ab' AS varbinary(max))` holds the UTF-8 bytes, so `DATALENGTH`
   gives 2. SQL Server stores UTF-16 and gives 4.
+
+### Conversion to an integer type
+
+SQL Server truncates a decimal or float value toward zero when it converts it
+to an integer type. A PostgreSQL cast rounds. plx truncates in these places:
+
+- `CAST(e AS int)`, and the same with `INTEGER`, `BIGINT` and `SMALLINT`.
+- `CONVERT(int, e)`, and the same with `INTEGER`, `BIGINT`, `SMALLINT` and
+  `TINYINT`.
+- An assignment to a variable of one of these types (`DECLARE @i int = e`,
+  `SET @i = e`, `SET @i += e`, `SELECT @i = e`).
+
+So `CAST(2.7 AS int)` gives 2 and `CONVERT(int, -2.5)` gives -2, where
+PostgreSQL gives 3 and -3. A string still converts as before:
+`CAST('1.5' AS int)` fails, as in SQL Server.
+
+When plx can see that the value is an integer, it emits a plain cast. When the
+value is a decimal or float literal or variable, it emits `trunc()`. Otherwise,
+such as for a column or a function call, it checks the type when the function
+runs, which costs a little more.
+
+A conversion to a decimal type with fewer fractional digits rounds, in plx and
+in SQL Server: `CONVERT(decimal, 2.5)` gives 3.
+
+These places still round, because the conversion happens in PostgreSQL, not in
+the function body:
+
+- `RETURN e` from a function that returns an integer type: `RETURN 2.7` gives
+  3. Write `RETURN CAST(e AS int)`.
+- `INSERT` and `UPDATE` of a decimal value into an integer column. Write
+  `CAST(e AS int)` in the statement.
 
 ### Operators
 
