@@ -213,8 +213,9 @@ Each entry names the dialects it affects.
   and in plxjs and plxts a `for (var i ...)` whose variable is read after the
   loop. A read inside a string interpolation counts, as in `${i}` or
   `"stopped at $i"`, including the SQL text of `query` and `fetch_one`. An
-  escaped interpolation such as `\$i` or `\${i}` is text, not a read. Plain
-  counting loops compile as before.
+  escaped interpolation such as `\$i` or `\${i}` is text, not a read, and
+  neither is a field of the same name, such as `${r.i}`. Plain counting loops
+  compile as before.
 - **`throw` of an expression that is not a constructor call is rejected**
   (plxjs, plxts, plxphp), for example `throw a(x) + b(y)`. Before, it silently
   raised only the first call's first argument.

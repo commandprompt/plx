@@ -4272,8 +4272,9 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
  * Does an interpolation in string token tk name the variable [name, len)? A
  * check that must see every read of a variable uses this, because "${i}",
  * "#{i}", "$i" and f"{i}" read i too. Any whole-word match in the
- * interpolated text counts, a field name included, which can only make such
- * a check stricter.
+ * interpolated text counts, except a field name after "." or "->" (r.i,
+ * $r->i). A match inside a quoted key such as $r['i'] still counts,
+ * which can only make such a check stricter.
  */
 bool
 plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
@@ -4302,7 +4303,17 @@ plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
 			if (strncmp(s + j, name, len) == 0 &&
 				(j == 0 || !plx_is_ident(s[j - 1])) &&
 				(j + len == sl || !plx_is_ident(s[j + len])))
-				found = true;
+			{
+				int			p = j - 1;
+
+				while (p >= 0 && (s[p] == ' ' || s[p] == '\t'))
+					p--;
+				/* a field follows one "." or "->"; ".." and "..." are ranges */
+				if (p < 0 ||
+					!((s[p] == '.' && (p == 0 || s[p - 1] != '.')) ||
+					  (s[p] == '>' && p > 0 && s[p - 1] == '-')))
+					found = true;
+			}
 		pfree(segs[k].s);
 	}
 	if (segs)

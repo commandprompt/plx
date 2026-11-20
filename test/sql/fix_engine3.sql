@@ -292,3 +292,27 @@ CREATE FUNCTION e3_v1_php_bs(n int) RETURNS text LANGUAGE plxphp AS $body$
 for ($i = 0; $i < $n; $i++) { }
 return "bs \\$i";
 $body$;
+
+-- V2 (review of the PR 24 fixes): a field with the loop variable's name, as
+-- in ${r.i}, is not a read of the loop variable
+CREATE FUNCTION e3_v2_js(n int) RETURNS text LANGUAGE plxjs AS $body$
+let i = 0;
+for (i = 0; i < n; i++) { }
+let r = fetch_one("SELECT 5 AS i");
+return `${r.i}`;
+$body$;
+SELECT e3_v2_js(3);
+CREATE FUNCTION e3_v2_ts(n int) RETURNS text LANGUAGE plxts AS $body$
+let i: number = 0;
+for (i = 0; i < n; i++) { }
+let r = fetch_one("SELECT 6 AS i");
+return `${r.i}`;
+$body$;
+SELECT e3_v2_ts(3);
+-- the variable itself beside the field is still a read
+CREATE FUNCTION e3_v2_js_both(n int) RETURNS text LANGUAGE plxjs AS $body$
+let i = 0;
+for (i = 0; i < n; i++) { }
+let r = fetch_one("SELECT 5 AS i");
+return `${r.i + i}`;
+$body$;
