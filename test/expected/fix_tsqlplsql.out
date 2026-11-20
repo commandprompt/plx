@@ -904,3 +904,23 @@ CREATE FUNCTION fxcv_fixcast() RETURNS text LANGUAGE plxtsql AS $$
 $$;
 SELECT fxcv_fixcast() AS r;  -- SQL Server: 'a  b'
 ERROR:  operator does not exist: character + unknown at character 33
+-- (MAX) is only for VARCHAR, NVARCHAR and VARBINARY: on another type CONVERT must still fail
+CREATE FUNCTION fxmx_num() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(numeric(MAX), '1.5');
+$$;
+SELECT fxmx_num() AS r;  -- SQL Server: error, numeric(max) is not a type
+ERROR:  invalid input syntax for type integer: "max" at character 15
+-- SQL Server: error, char(max) is not a type; plx fails at CREATE
+CREATE FUNCTION fxmx_char() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(char(MAX), 'a  ');
+$$;
+ERROR:  syntax error at or near "MAX" at character 63
+CREATE FUNCTION fxmx_nv() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CONVERT(nvarchar(MAX), 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')) + DATALENGTH(CONVERT(varbinary(MAX), 'ab'));
+$$;
+SELECT fxmx_nv() AS r;  -- SQL Server: 42
+ r  
+----
+ 42
+(1 row)
+

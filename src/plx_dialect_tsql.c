@@ -610,7 +610,9 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
 		}
 	}
 	base = tq_base_type(name, nlen);
-	if (base && a + 2 < b && tq->t[a + 1].kind == TQ_LP && tq_ci(&tq->t[a + 2], "MAX"))
+	if (base && a + 2 < b && tq->t[a + 1].kind == TQ_LP && tq_ci(&tq->t[a + 2], "MAX") &&
+		(tq_name_is(name, nlen, "varchar") || tq_name_is(name, nlen, "nvarchar") ||
+		 tq_name_is(name, nlen, "varbinary")))
 	{
 		/* VARCHAR(MAX)/NVARCHAR(MAX) -> text; VARBINARY(MAX) -> bytea */
 		appendStringInfoString(dest, strcmp(base, "bytea") == 0 ? "bytea" : "text");
