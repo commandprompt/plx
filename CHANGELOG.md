@@ -652,6 +652,12 @@ not here.
   the PostgreSQL type would not keep SQL Server's value.
 - `CONVERT(varchar(MAX), x)` and `CONVERT(nvarchar(MAX), x)` give `text`.
   Before, the function was rejected with `syntax error at or near "MAX"`.
+- `DECLARE`, `CAST` and `CONVERT` accept SQL Server's type names of several
+  words, such as `CHARACTER VARYING(n)` and `NATIONAL CHARACTER VARYING(n)`.
+  Before, `DECLARE` rejected them. A value of one of the variable-length
+  string types among them is now a known string, so `+` joins it with `||`.
+  `CHARACTER(n)` and `NATIONAL CHARACTER(n)` are fixed length, like `CHAR(n)`,
+  so `+` stays `+` for them.
 
 #### Test suite
 

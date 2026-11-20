@@ -157,6 +157,13 @@ applied; the message argument is emitted as-is.
 | `UNIQUEIDENTIFIER` | `uuid` |
 | `VARBINARY(n)`, `VARBINARY(MAX)` | `bytea` |
 
+SQL Server's names of several words mean the same as the one-word names, here
+and in `CAST` and `CONVERT`: `CHARACTER VARYING` and `CHAR VARYING` mean
+`VARCHAR`, `NATIONAL CHARACTER VARYING` and `NATIONAL CHAR VARYING` mean
+`NVARCHAR`, `CHARACTER` means `CHAR`, `NATIONAL CHARACTER` and `NATIONAL CHAR`
+mean `NCHAR`, `BINARY VARYING` means `VARBINARY`, and `DOUBLE PRECISION` means
+`FLOAT`.
+
 An unrecognized type name is passed through, so PostgreSQL type names also work.
 
 ### Functions
@@ -240,7 +247,8 @@ A chain is a run of operands joined by `+`, such as `@a + ' ' + @b`. A known
 string is one of:
 
 - a variable or parameter declared with a variable-length string type:
-  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`;
+  `VARCHAR`, `NVARCHAR`, `TEXT` or `NTEXT`, with or without a length or `MAX`
+  (`CHARACTER VARYING` and the other names for them count too);
 - a string literal, `'...'` or `N'...'`;
 - `CAST` or `CONVERT` to one of those types;
 - `UPPER`, `LOWER`, `LTRIM`, `RTRIM`, `TRIM`, `SUBSTRING`, `LEFT`, `RIGHT`,
@@ -283,7 +291,8 @@ the default `CONCAT_NULL_YIELDS_NULL ON`.
 Write `||` or `CONCAT(...)` yourself to join strings that are not all known
 strings, for example two columns, or a column and a literal.
 
-`CHAR(n)` and `NCHAR(n)` values are not known strings. This covers a variable,
+`CHAR(n)` and `NCHAR(n)` values are not known strings, and neither are
+`CHARACTER(n)` and `NATIONAL CHARACTER(n)`. This covers a variable,
 a parameter, and `CAST` or `CONVERT` to `CHAR` or `NCHAR`, with or without a
 length. SQL Server keeps their trailing spaces when it joins them, but
 PostgreSQL's `||` drops them, so `||` would return a different value without an

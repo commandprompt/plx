@@ -529,3 +529,47 @@ CREATE FUNCTION fxct_sdt() RETURNS timestamp LANGUAGE plxtsql AS $$
   RETURN CAST('2024-01-02 03:04:35' AS smalldatetime);
 $$;
 SELECT fxct_sdt() AS r;  -- SQL Server: 2024-01-02 03:05:00
+-- CHARACTER VARYING, CHAR VARYING and NATIONAL CHARACTER VARYING are SQL Server's names for VARCHAR and
+-- NVARCHAR, so a value of one of these types is a known string for +. Before, DECLARE rejected the
+-- names and + stayed + after a CAST or CONVERT to them. SQL Server's answer is in each comment.
+CREATE FUNCTION fxcv_local() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s character varying(10) = 'a', @t char varying(5) = 'c', @u national character varying(5) = 'd';
+  RETURN @s + 'b' + @t + @u;
+$$;
+SELECT fxcv_local() AS r;  -- SQL Server: abcd
+CREATE FUNCTION fxcv_nat() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @s national char varying(5) = 'a', @m character varying(MAX) = 'c';
+  RETURN @s + 'b' + @m;
+$$;
+SELECT fxcv_nat() AS r;  -- SQL Server: abc
+CREATE FUNCTION fxcv_par(p character varying, q character varying(5)) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN @p + 'b' + @q;
+$$;
+SELECT fxcv_par('a', 'c') AS r;  -- SQL Server: abc
+CREATE FUNCTION fxcv_cast() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('a' AS character varying(5)) + 'b' + CAST('c' AS national char varying(5));
+$$;
+SELECT fxcv_cast() AS r;  -- SQL Server: abc
+CREATE FUNCTION fxcv_cast30() RETURNS int LANGUAGE plxtsql AS $$
+  RETURN LEN(CAST('12345678901234567890123456789012345' AS national character varying));
+$$;
+SELECT fxcv_cast30() AS r;  -- SQL Server: 30 (CAST without a length gives 30 characters)
+CREATE FUNCTION fxcv_conv() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CONVERT(character varying(5), 'a') + 'b' + CONVERT(char varying(5), 'c');
+$$;
+SELECT fxcv_conv() AS r;  -- SQL Server: abc
+-- CHARACTER(n) and NATIONAL CHARACTER(n) are fixed length, like CHAR(n): + stays +, and the call fails
+CREATE FUNCTION fxcv_fix() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @c character(3) = 'a';
+  RETURN @c + 'b';
+$$;
+SELECT fxcv_fix() AS r;  -- SQL Server: 'a  b'
+CREATE FUNCTION fxcv_fixn() RETURNS text LANGUAGE plxtsql AS $$
+  DECLARE @c national character(3) = 'a';
+  RETURN @c + 'b';
+$$;
+SELECT fxcv_fixn() AS r;  -- SQL Server: 'a  b'
+CREATE FUNCTION fxcv_fixcast() RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST('a' AS national char(3)) + 'b';
+$$;
+SELECT fxcv_fixcast() AS r;  -- SQL Server: 'a  b'
