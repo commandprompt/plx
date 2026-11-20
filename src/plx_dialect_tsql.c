@@ -74,6 +74,7 @@ typedef struct
 	int			nsel;			/* hidden SELECT-assignment loop records */
 	int		   *match;			/* match[i]: the ')' matching '(' at i, or -1 */
 	int		   *comma1;			/* comma1[i]: first top-level ',' after '(' at i, or -1 */
+	int		   *as1;			/* as1[i]: first top-level AS after '(' at i, or -1 */
 	int		   *comma2;			/* comma2[i]: second top-level ',' after '(' at i, or -1 */
 	bool	   *cat;			/* cat[i]: the '+' at i concatenates; emit || */
 	int			emitdepth;		/* tq_emit_range nesting; 0 = a top-level range */
@@ -664,6 +665,9 @@ tq_type_from_range(Tq *tq, int a, int b, StringInfo dest)
  * records the first two top-level commas inside each '(', so CONVERT, IIF and
  * CHARINDEX need no scan of their argument list either: nested calls such as
  * IIF(IIF(IIF(...))) with no comma failed one by one and rescanned each range.
+ * It also records the first top-level AS inside each '(', for CAST(e AS type):
+ * the classifier of + operands looks at every CAST, and a scan for its AS made
+ * nested CASTs O(n^2).
  */
 static void
 tq_pair_parens(Tq *tq)
@@ -675,6 +679,7 @@ tq_pair_parens(Tq *tq)
 	tq->match = palloc(sizeof(int) * (tq->nt + 1));
 	tq->comma1 = palloc(sizeof(int) * (tq->nt + 1));
 	tq->comma2 = palloc(sizeof(int) * (tq->nt + 1));
+	tq->as1 = palloc(sizeof(int) * (tq->nt + 1));
 	tq->cat = palloc0(sizeof(bool) * (tq->nt + 1));
 	for (i = 0; i < tq->nt; i++)
 	{
@@ -682,6 +687,7 @@ tq_pair_parens(Tq *tq)
 		tq->match[i] = -1;
 		tq->comma1[i] = -1;
 		tq->comma2[i] = -1;
+		tq->as1[i] = -1;
 		if (tq->t[i].kind == TQ_LP)
 			stack[sp++] = i;
 		else if (tq->t[i].kind == TQ_RP && sp > 0)
@@ -695,6 +701,8 @@ tq_pair_parens(Tq *tq)
 			else if (tq->comma2[top] < 0)
 				tq->comma2[top] = i;
 		}
+		else if (sp > 0 && tq_ci(&tq->t[i], "AS") && tq->as1[stack[sp - 1]] < 0)
+			tq->as1[stack[sp - 1]] = i;
 	}
 	pfree(stack);
 }
@@ -703,21 +711,9 @@ tq_pair_parens(Tq *tq)
 static int
 tq_cast_as(Tq *tq, int lp, int close)
 {
-	int			i,
-				depth = 0;
+	int			as = tq->as1[lp];
 
-	for (i = lp + 1; i < close; i++)
-	{
-		TqTok	   *x = &tq->t[i];
-
-		if (x->kind == TQ_LP)
-			depth++;
-		else if (x->kind == TQ_RP)
-			depth--;
-		else if (depth == 0 && tq_ci(x, "AS"))
-			return i;
-	}
-	return -1;
+	return (as > lp && as < close) ? as : -1;
 }
 
 /*

@@ -656,8 +656,8 @@ PUBLIC has USAGE by default).
   `RAISE_APPLICATION_ERROR(` calls, took quadratic time to transpile and could
   not be interrupted, so any role could tie up a backend. So did deeply nested
   `CONVERT`, `IIF`, `CHARINDEX` or `RAISE_APPLICATION_ERROR` calls with no
-  comma. These now transpile in linear time, and `statement_timeout` can
-  cancel the transpile.
+  comma, and deeply nested `CAST(... AS type)`. These now transpile in linear
+  time, and `statement_timeout` can cancel the transpile.
 - **Quadratic, uninterruptible transpile time for nested brackets.** In
   plxjs, plxts, plxphp, plxpython3 and plxruby, the rewriter for `**` scanned
   each bracketed group to its end at every `(` or `[`, so deeply nested
