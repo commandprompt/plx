@@ -526,19 +526,19 @@ SELECT fxct_pg() AS r;
 CREATE FUNCTION fxct_tiny() RETURNS int LANGUAGE plxtsql AS $$
   RETURN CAST(300 AS tinyint);
 $$;
-SELECT fxct_tiny() AS r;  -- SQL Server: arithmetic overflow error
+SELECT ft_err($q$SELECT fxct_tiny()$q$) AS r;  -- SQL Server: arithmetic overflow error
 CREATE FUNCTION fxct_smoney() RETURNS numeric LANGUAGE plxtsql AS $$
   RETURN CAST(300000 AS smallmoney);
 $$;
-SELECT fxct_smoney() AS r;  -- SQL Server: arithmetic overflow error
+SELECT ft_err($q$SELECT fxct_smoney()$q$) AS r;  -- SQL Server: arithmetic overflow error
 CREATE FUNCTION fxct_vbin() RETURNS int LANGUAGE plxtsql AS $$
   RETURN DATALENGTH(CAST('abc' AS varbinary(1)));
 $$;
-SELECT fxct_vbin() AS r;  -- SQL Server: 1
+SELECT ft_err($q$SELECT fxct_vbin()$q$) AS r;  -- SQL Server: 1
 CREATE FUNCTION fxct_sdt() RETURNS timestamp LANGUAGE plxtsql AS $$
   RETURN CAST('2024-01-02 03:04:35' AS smalldatetime);
 $$;
-SELECT fxct_sdt() AS r;  -- SQL Server: 2024-01-02 03:05:00
+SELECT ft_err($q$SELECT fxct_sdt()$q$) AS r;  -- SQL Server: 2024-01-02 03:05:00
 -- CHARACTER VARYING, CHAR VARYING and NATIONAL CHARACTER VARYING are SQL Server's names for VARCHAR and
 -- NVARCHAR, so a value of one of these types is a known string for +. Before, DECLARE rejected the
 -- names and + stayed + after a CAST or CONVERT to them. SQL Server's answer is in each comment.
@@ -573,21 +573,21 @@ CREATE FUNCTION fxcv_fix() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @c character(3) = 'a';
   RETURN @c + 'b';
 $$;
-SELECT fxcv_fix() AS r;  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxcv_fix()$q$) AS r;  -- SQL Server: 'a  b'
 CREATE FUNCTION fxcv_fixn() RETURNS text LANGUAGE plxtsql AS $$
   DECLARE @c national character(3) = 'a';
   RETURN @c + 'b';
 $$;
-SELECT fxcv_fixn() AS r;  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxcv_fixn()$q$) AS r;  -- SQL Server: 'a  b'
 CREATE FUNCTION fxcv_fixcast() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CAST('a' AS national char(3)) + 'b';
 $$;
-SELECT fxcv_fixcast() AS r;  -- SQL Server: 'a  b'
+SELECT ft_err($q$SELECT fxcv_fixcast()$q$) AS r;  -- SQL Server: 'a  b'
 -- (MAX) is only for VARCHAR, NVARCHAR and VARBINARY: on another type CONVERT must still fail
 CREATE FUNCTION fxmx_num() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CONVERT(numeric(MAX), '1.5');
 $$;
-SELECT fxmx_num() AS r;  -- SQL Server: error, numeric(max) is not a type
+SELECT ft_err($q$SELECT fxmx_num()$q$) AS r;  -- SQL Server: error, numeric(max) is not a type
 -- SQL Server: error, char(max) is not a type; plx fails at CREATE
 CREATE FUNCTION fxmx_char() RETURNS text LANGUAGE plxtsql AS $$
   RETURN CONVERT(char(MAX), 'a  ');

@@ -538,26 +538,36 @@ $$;
 CREATE FUNCTION fgh18_unk_arr(a int[]) RETURNS int[] LANGUAGE plxgo AS $$
 	return a + "{9}"
 $$;
-SELECT fgh18_unk_arr('{1,2}') AS go_error;
+-- fg_err(q) runs q and returns 'SQLSTATE: message' if it fails. The message
+-- leaves out the error position, which differs between PostgreSQL 13
+-- (plpgsql prefixes each expression with SELECT) and later versions.
+CREATE FUNCTION fg_err(q text) RETURNS text LANGUAGE plpgsql AS $h$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END $h$;
+SELECT fg_err($q$SELECT fgh18_unk_arr('{1,2}')$q$) AS go_error;
 CREATE FUNCTION fgh18_unk_json(j jsonb) RETURNS jsonb LANGUAGE plxgo AS $$
 	return j + `{"b":2}`
 $$;
-SELECT fgh18_unk_json('{"a":1}') AS go_error;
+SELECT fg_err($q$SELECT fgh18_unk_json('{"a":1}')$q$) AS go_error;
 CREATE FUNCTION fgh18_unk_char(c char(4)) RETURNS text LANGUAGE plxgo AS $$
 	return c + "x"
 $$;
-SELECT fgh18_unk_char('ab') AS go_error;
+SELECT fg_err($q$SELECT fgh18_unk_char('ab')$q$) AS go_error;
 CREATE FUNCTION fgh18_unk_call(s text) RETURNS text LANGUAGE plxgo AS $$
 	return length(s) + "x"
 $$;
-SELECT fgh18_unk_call('abc') AS go_error;
+SELECT fg_err($q$SELECT fgh18_unk_call('abc')$q$) AS go_error;
 CREATE FUNCTION fgh18_unk_row() RETURNS text LANGUAGE plxgo AS $$
 	for _, r := range query("SELECT 2 AS a, 3 AS b") {
 		return "x" + r.a
 	}
 	return "none"
 $$;
-SELECT fgh18_unk_row() AS go_error;
+SELECT fg_err($q$SELECT fgh18_unk_row()$q$) AS go_error;
 \set VERBOSITY default
 -- such a sum is not a string, so it gives := no type
 CREATE FUNCTION fgh18_unk_decl() RETURNS text LANGUAGE plxgo AS $$
@@ -609,19 +619,19 @@ CREATE FUNCTION fgh18_accu_row() RETURNS text LANGUAGE plxgo AS $$
 	}
 	return s
 $$;
-SELECT fgh18_accu_row() AS go_error;
+SELECT fg_err($q$SELECT fgh18_accu_row()$q$) AS go_error;
 CREATE FUNCTION fgh18_accu_call(x text) RETURNS text LANGUAGE plxgo AS $$
 	s := "v"
 	s += length(x)
 	return s
 $$;
-SELECT fgh18_accu_call('abc') AS go_error;
+SELECT fg_err($q$SELECT fgh18_accu_call('abc')$q$) AS go_error;
 CREATE FUNCTION fgh18_accu_json(j jsonb) RETURNS text LANGUAGE plxgo AS $$
 	s := "v"
 	s += j
 	return s
 $$;
-SELECT fgh18_accu_json('{"a":1}') AS go_error;
+SELECT fg_err($q$SELECT fgh18_accu_json('{"a":1}')$q$) AS go_error;
 \set VERBOSITY default
 
 -- make() is not supported; plx says so at CREATE FUNCTION instead of failing
