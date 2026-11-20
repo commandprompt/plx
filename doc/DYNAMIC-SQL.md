@@ -31,7 +31,7 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | inside a dollar-quoted string: `$q$#{s}$q$` | rejected | rejected |
 | inside a prefixed literal: `U&'#{s}'`, `N'#{s}'`, `text'#{s}'` | rejected | rejected |
 | joined to a name, number or `$`: `v#{x}`, `#{x}abc` | rejected | rejected |
-| right after an unpaired backslash in an `E'...'` string: `E'a\#{x}'` | rejected | rejected |
+| right after an unpaired backslash in an `E'...'` string: `E'a\\#{x}'` in a Ruby string | rejected | rejected |
 
 plx reads the SQL string as PostgreSQL does. A quote inside a `--` or
 `/* */` comment (block comments nest) or inside a dollar-quoted string does
@@ -41,7 +41,13 @@ form fails when the function is created. In dynamic SQL, plx writes a literal
 that contains a backslash as `E'...'`, as it does for the function body, so
 the SQL reads the same whatever `standard_conforming_strings` the caller uses.
 To end the text of an `E'...'` string with a backslash right before an
-interpolation, write the backslash twice in the SQL text: `E'a\\#{x}'`.
+interpolation, write the backslash twice in the SQL text. The dialect's own
+string escapes come first: in a double-quoted string (plxruby, plxphp), a
+template string (plxjs, plxts) or an f-string (plxpython3), `\\` is one
+backslash, so the SQL text `E'a\\#{x}'` is written `"SELECT E'a\\\\#{x}'"` in plxruby. Written
+with two backslashes in the source, the SQL text has one, and plx rejects it.
+With one backslash in the source, `\#{x}` is an escaped interpolation: the
+SQL gets the text `#{x}`.
 
 A whole quoted literal, `'#{s}'`, becomes the value itself, with the value's
 type. Where SQL needs another type, cast it: with a `text` variable `since`,

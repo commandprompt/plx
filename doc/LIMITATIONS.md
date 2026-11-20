@@ -139,15 +139,21 @@ These follow from running as plpgsql and are not specific to any one dialect.
     `extension "plx" does not support SET SCHEMA`. Give the schema in
     `CREATE EXTENSION plx SCHEMA ...`.
   - A function restored into a database where plx is in another schema (from
-    a `pg_dump -n` of one schema, say) fails when it runs, with
-    `schema "..." does not exist`. Install plx in the same schema in the
-    target database, or run the function's `CREATE FUNCTION` again.
+    a `pg_dump -n` of one schema, say) fails when it runs. The error is
+    `schema "..." does not exist` when that schema is missing in the target,
+    and otherwise `type "public.plx_strbuild" does not exist` or
+    `function public.plx_tsql_int4(record) does not exist`, with the source
+    schema in place of `public`. Install plx in the same schema in the target
+    database, or run the function's `CREATE FUNCTION` again.
   - A function created before 3.0.0 keeps the unqualified names it was
     generated with. Until you run its `CREATE FUNCTION` again, it needs plx's
     schema on its `search_path`.
 
-  Functions without a string append are not affected. See
-  [Trust and security](USERGUIDE.md#trust-and-security).
+  plxtsql does the same for a conversion to an integer type (`CAST`,
+  `CONVERT` or an assignment to an integer variable) of a value whose type it
+  cannot see, such as a column or a function call: it calls `plx_tsql_int2`,
+  `plx_tsql_int4` or `plx_tsql_int8` with plx's schema. Other functions are
+  not affected. See [Trust and security](USERGUIDE.md#trust-and-security).
 - **Runtime errors point at the generated plpgsql.** plpgsql requires all
   declarations at the top, so line numbers in a runtime error refer to the
   transpiled body, not your dialect source. `plx_source()` recovers the embedded

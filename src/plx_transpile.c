@@ -4834,7 +4834,8 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		 */
 		if (st.sq && st.bs_end)
 			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
-					"in an E'...' SQL string; write a literal backslash as two backslashes");
+					"in an E'...' SQL string; write a literal backslash as two backslashes in the "
+					"SQL text (four inside a double-quoted, template or f-string)");
 		if (!st.sq)
 			tpl_check_joined(cx, tk, segs, n, i);
 		skip = tpl_put_value(&st, out,
@@ -4948,7 +4949,8 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 		 */
 		if (st.sq && st.bs_end)
 			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
-					"in an E'...' SQL string; write a literal backslash as two backslashes");
+					"in an E'...' SQL string; write a literal backslash as two backslashes in the "
+					"SQL text (four inside a double-quoted, template or f-string)");
 		if (kind == TPL_LITERAL && st.sq)
 		{
 			/* '#{x}' exactly: the quoted value replaces the literal */

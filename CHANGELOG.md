@@ -35,11 +35,17 @@ run its `CREATE FUNCTION` again (see Upgrading).
   `extension "plx" does not support SET SCHEMA`. Choose the schema at
   `CREATE EXTENSION plx SCHEMA ...` time. Existing functions keep the
   unqualified names they were generated with until their DDL is run again.
-  For the same reason, a function that uses a string append and is restored
+  For the same reason, a function that uses a string append, or a plxtsql
+  conversion to an integer type of a value whose type plx cannot see (which
+  calls `plx_tsql_int2`, `plx_tsql_int4` or `plx_tsql_int8`), and is restored
   into a database where plx is in a different schema (a `pg_dump -n` of one
-  schema, say) fails when it runs, with `schema "..." does not exist`. Install
-  plx in the same schema in the target, or run the function's DDL again after
-  restoring. Functions without a string append are not affected.
+  schema, say) fails when it runs: with
+  `schema "..." does not exist` when that schema is missing in the target,
+  and otherwise with `type "public.plx_strbuild" does not exist` or
+  `function public.plx_tsql_int4(record) does not exist` (with the source
+  schema's name in place of `public`). Install plx in the same
+  schema in the target, or run the function's DDL again after restoring.
+  Other functions are not affected.
 - **`CREATE FUNCTION` and `DO` in a plx language need USAGE on plpgsql.** A
   role without that privilege now gets `permission denied for language
   plpgsql`. See "Revoking plpgsql now revokes plx" under Security.
@@ -70,7 +76,8 @@ Each entry names the dialects it affects.
   interpolation inside a quoted identifier, a SQL comment, a dollar-quoted
   string or a prefixed literal (`U&'...'`, `N'...'`, `text'...'`) is
   rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`), and one
-  right after an unpaired backslash in an `E'...'` string (`E'a\#{x}'`), where
+  right after an unpaired backslash in an `E'...'` string (the SQL text
+  `E'a\#{x}'`, written `E'a\\#{x}'` in a dialect string), where
   PostgreSQL would read the quote plx writes next as an escaped quote. The
   lowering reads the SQL string as PostgreSQL does, so a quote inside a
   comment or a dollar-quoted string does not open a string. A literal that
@@ -509,14 +516,23 @@ the plx extension.
    anyone creates or replaces a plx function there. Until step 3 runs, a
    function that uses a string append (Ruby `<<`, PHP `.=`, or `+=` on a
    string in plxjs, plxts or plxpython3) is created without an error, but
-   every call to it fails:
+   every call to it fails. So does a plxtsql function or `DO` block that
+   converts a value whose type plx cannot see, such as a column or a
+   function call, to an integer type (`CAST`, `CONVERT`, or an assignment to
+   an `INT`, `BIGINT`, `SMALLINT` or `TINYINT` variable):
 
    ```
    ERROR:  function public.plx_sb_append_strict(plx_strbuild, text) does not exist
    ```
 
+   or, for plxtsql,
+
+   ```
+   ERROR:  function public.plx_tsql_int4(record) does not exist
+   ```
+
    The schema in the message is the one plx is installed in. The new build
-   generates a call to this function, and only step 3 creates it. After step
+   generates calls to these functions, and only step 3 creates them. After step
    3, the function works without being created again. Until step 3,
    `ALTER EXTENSION plx SET SCHEMA` is also still allowed, and it would break
    the functions the new build creates.
@@ -531,8 +547,14 @@ the plx extension.
    the collation to every type built on `plx_strbuild` (its array type,
    domains, domains over those domains, and their array types) and to
    existing columns, range types, index keys and partition keys of all of
-   these, as a fresh install does. It also adds the function that string appends call in 3.0.0. A view created before the
-   update keeps no collation in its stored query until you re-create it.
+   these, as a fresh install does. It also adds the functions that string
+   appends and plxtsql integer conversions call in 3.0.0. An expression
+   stored before the update keeps no collation until you re-create the
+   object that holds it: a view's query, a generated column, a column
+   `DEFAULT`, and the body of a SQL-standard function (`BEGIN ATOMIC`).
+   Until then, sorting or comparing a `plx_strbuild` value in it fails with
+   `could not determine which collation to use for string comparison`.
+   `CHECK` constraints and row security policies are not affected.
 
    To check the result, run
    `SELECT extversion, extrelocatable FROM pg_extension WHERE extname = 'plx';`.

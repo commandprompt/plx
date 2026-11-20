@@ -425,31 +425,31 @@ CREATE FUNCTION fs_e_lit(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
 r = fetch_one("SELECT E'a\\#{x}' AS v, #{literal(y)} AS w")
 return r.v
 $f$;
-ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes in the SQL text (four inside a double-quoted, template or f-string)
 DETAIL:  at plxruby source line 2
 CREATE FUNCTION fs_e_ident(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
 r = fetch_one("SELECT E'a\\#{x}' AS v, 1 AS #{ident(y)}")
 return r.v
 $f$;
-ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes in the SQL text (four inside a double-quoted, template or f-string)
 DETAIL:  at plxruby source line 2
 CREATE FUNCTION fs_e_js(x text, y text) RETURNS text LANGUAGE plxjs AS $f$
 let r = fetch_one(`SELECT E'a\\${x}' AS v, ${literal(y)} AS w`);
 return r.v;
 $f$;
-ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes in the SQL text (four inside a double-quoted, template or f-string)
 DETAIL:  at plxjs source line 2
 CREATE FUNCTION fs_e_bind(x text, y text) RETURNS text LANGUAGE plxjs AS $f$
 let r = fetch_one(`SELECT E'a\\${x}' AS v, $1 AS w`, y);
 return r.v;
 $f$;
-ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes in the SQL text (four inside a double-quoted, template or f-string)
 DETAIL:  at plxjs source line 2
 CREATE FUNCTION fs_e_static(x text) RETURNS text LANGUAGE plxruby AS $f$
 r = fetch_one("SELECT E'a\\#{x}' AS v")
 return r.v
 $f$;
-ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes in the SQL text (four inside a double-quoted, template or f-string)
 DETAIL:  at plxruby source line 2
 -- a doubled backslash is one literal backslash, and the value follows it
 CREATE FUNCTION fs_e_ok(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
