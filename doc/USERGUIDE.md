@@ -668,14 +668,21 @@ Who can use the languages:
   PostgreSQL grants USAGE on a trusted language to PUBLIC, as it does for
   plpgsql. Restrict this per language, for example
   `REVOKE USAGE ON LANGUAGE plxruby FROM PUBLIC`.
-- plx is a syntax layer over plpgsql, so a role with USAGE on any plx language
-  can effectively run arbitrary plpgsql: a body that already begins with the
-  `/*plx:v1:...*/` sentinel is stored without transpiling, so that dump and
-  restore work, and plxplsql accepts a body that is already close to plpgsql.
-  Revoking USAGE on plpgsql therefore does not restrict a role that keeps USAGE
-  on a plx language: after `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC`, such
-  a role can still run plpgsql through, for example, `DO LANGUAGE plxplsql`.
-  To restrict plpgsql, revoke USAGE on plpgsql and on every plx language.
+- Creating a function or running a `DO` block in a plx language also requires
+  USAGE on plpgsql. plx is a syntax layer over plpgsql, so a role with USAGE on
+  a plx language could otherwise run any plpgsql: a body that already begins
+  with the `/*plx:v1:...*/` header is stored without transpiling, so that dump
+  and restore work, and plxplsql accepts a body that is already close to
+  plpgsql. So `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC` also stops such a
+  role from using every plx language. It then gets:
+
+  ```
+  ERROR:  permission denied for language plpgsql
+  DETAIL:  Language plxplsql is executed as plpgsql, so using it requires USAGE on plpgsql.
+  ```
+
+  As with plpgsql, functions that already exist keep running, and superusers
+  are not affected.
 
 Points to keep in mind:
 
@@ -685,28 +692,47 @@ Points to keep in mind:
   pathological inputs across all dialects (see `test/fuzz.py`). Continued
   fuzzing is recommended before relying on it in a hostile multi-tenant
   deployment.
-- `execute` with interpolated values builds the SQL string by concatenation and
+- An interpolated value in the SQL argument of `query`, `fetch_one`,
+  `execute`, `perform` and the other SQL calls never becomes SQL text. plx
+  binds it as a parameter, with or without bind arguments, so data cannot
+  inject SQL:
+
+  ```ruby
+  r = fetch_one("SELECT count(*) AS c FROM ug WHERE name = '#{n}' LIMIT $1", lim)
+  ```
+
+  becomes
+
+  ```plpgsql
+  EXECUTE 'SELECT count(*) AS c FROM ug WHERE name = ($2) LIMIT $1' INTO r USING lim, n;
+  ```
+
+  To put text into the SQL itself, write `ident(e)` for an identifier (it
+  calls `quote_ident`), `literal(e)` for a quoted literal (`quote_nullable`),
+  or `raw(e)` for a SQL fragment. `raw()` inserts the text unquoted, so it
   carries the same SQL-injection responsibility as plpgsql
-  `EXECUTE ... || value`. Use bind parameters (`execute(sql, a, b)`) for
-  untrusted input. In `query`, `perform`, and `fetch_one` with no bind
-  arguments, an interpolated value is spliced as a variable reference, not as
-  text. Once such a call also passes bind arguments it becomes dynamic SQL, and
-  its interpolated values are concatenated exactly as in `execute`: do not mix
-  interpolation with binds.
-- Functions that use the string-append operators reference the extension's
-  `plx_strbuild` type and `plx_sb_append_strict` (plxcobol: `plx_sb_append`)
-  function unqualified, so both are looked up through `search_path` each time
-  the function runs. The extension's
-  schema must therefore be on the function's path, including any
-  `SET search_path` clause. It also means that a role able to create objects in
-  a schema that comes earlier on the path can put its own
-  `plx_sb_append_strict` there, and a `SECURITY DEFINER` function would run it with the owner's privileges.
-  Pin the path on every `SECURITY DEFINER` function, listing only trusted
-  schemas, the extension's schema among them, and `pg_temp` last, as the
-  PostgreSQL manual advises:
-  `ALTER FUNCTION f(...) SET search_path = app, public, pg_temp`, where
-  `public` stands for the schema plx is installed in and is not writable by
-  untrusted roles.
+  `EXECUTE ... || value`: never pass it untrusted input. A SQL string built
+  earlier and passed to `execute` in a variable is ordinary string
+  concatenation, and plx does not bind the values in it. See
+  [Interpolation in SQL](DYNAMIC-SQL.md).
+- Functions that use the string-append operators name the extension's
+  `plx_strbuild` type and its append function with the schema plx is installed
+  in. They work whatever the function's `search_path` is, and a function
+  planted earlier on the path cannot take their place. Two limits follow:
+  - Functions created before 3.0.0 keep the unqualified names they were
+    generated with. Run their `CREATE FUNCTION` again to get the qualified
+    names.
+  - A restored function with a string append needs plx in the same schema as
+    in the source database. See
+    [LIMITATIONS.md](LIMITATIONS.md#constraints-shared-by-every-dialect).
+- Pin the path on every `SECURITY DEFINER` function, as the PostgreSQL manual
+  advises, because the SQL in its body still finds your own tables and
+  functions through `search_path`. List only trusted schemas, with `pg_temp`
+  last. The schema plx is installed in does not have to be on it:
+
+  ```sql
+  ALTER FUNCTION app.note_list() SET search_path = app, pg_temp;
+  ```
 
 ## Further reading
 
