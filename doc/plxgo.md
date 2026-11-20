@@ -210,18 +210,23 @@ plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
 In Go, an integer or rune constant on the left of a shift takes the type of its
 context, such as `int64`. SQL would type it as a 32-bit integer and take the
 shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
-1099511627776, as in Go. The same holds for a constant expression, such as
-`(1) << 40` or `2 * 1 << 40`, which Go reads as `(2 * 1) << 40`. plx maps `int` to the 32-bit `integer`, so storing a
+1099511627776, as in Go. The same holds for a named constant
+(`const mask = 0xFF`, then `mask << 28`) and for a constant expression, such
+as `(1) << 40` or `2 * 1 << 40`, which Go reads as `(2 * 1) << 40`. plx maps `int` to the 32-bit `integer`, so storing a
 shift that does not fit in an `int` fails with `integer out of range`. Go's
 64-bit `int` would hold it; declare the variable `int64`.
 
 A shift count that is not a decimal literal below 32 gives Go's result for
 every count. `x << n` is 0 when `n` is at least the width of `x` (64 bits for
 `int64`), and `x >> n` is then 0 or -1. A negative count fails, as it panics in
-Go. A non-zero `int` shifted left by 32 or more fails with
-`integer out of range`, since a plx `int` has 32 bits. plx evaluates such a
-shift in a subquery, and rejects an expression with more than 64 of them nested
-in one another; split it into several statements.
+Go. plx evaluates such a shift in a subquery, and rejects an expression with
+more than 64 of them nested in one another; split it into several statements.
+
+plx maps `int` to the 32-bit `integer`, so an `int` shifted left out of that
+range fails with `integer out of range`, whatever the count: `x << 30` with
+`x` 3 fails, where Go's 64-bit `int` gives 3221225472. Declare the variable
+`int64` to get Go's value. An `int64` or `int16` shifted left drops the bits
+that leave its width, as in Go.
 
 ### String concatenation with `+`
 

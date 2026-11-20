@@ -894,3 +894,33 @@ CREATE FUNCTION fg_r2d11(p text) RETURNS text LANGUAGE plxgo AS $$
 	return s
 $$;
 SELECT fg_r2d11('!') AS r;  -- Go: ABCCC-!
+-- R2-C20 (PR 24 review r2 c2[0]): a named integer constant on the left of a
+-- shift is an untyped constant in Go, like a literal, so it shifts as a
+-- 64-bit value (review [9] covered literals only).
+CREATE FUNCTION fg_r2c20() RETURNS text LANGUAGE plxgo AS $$
+	const mask = 0xFF
+	const one = 1
+	var m int64 = mask << 28
+	var n int64 = one << 40
+	return fmt.Sprintf("%d %d", m, n)
+$$;
+SELECT fg_r2c20() AS r;  -- Go: 68451041280 1099511627776
+-- R2-C21 (PR 24 review r2 c2[1]): plx maps Go's int to a 32-bit integer, so
+-- an int shifted left out of that range fails with "integer out of range",
+-- for every count, as plxgo.md says. Counts below 32 wrapped silently.
+CREATE FUNCTION fg_r2c21(x int, k int) RETURNS bigint LANGUAGE plxgo AS $$
+	var r int64 = int64(x << k)
+	return r
+$$;
+SELECT fg_r2c21(3, 29) AS r;  -- 1610612736
+SELECT fg_err($q$SELECT fg_r2c21(3, 30)$q$) AS r;  -- 22003: integer out of range
+SELECT fg_err($q$SELECT fg_r2c21(1, 31)$q$) AS r;  -- 22003: integer out of range
+SELECT fg_r2c21(-1, 31) AS r;  -- -2147483648 fits
+CREATE FUNCTION fg_r2c21_lit(x int) RETURNS int LANGUAGE plxgo AS $$
+	return x << 31
+$$;
+SELECT fg_err($q$SELECT fg_r2c21_lit(1)$q$) AS r;  -- 22003: integer out of range
+CREATE FUNCTION fg_r2c21_big(x bigint, k int) RETURNS bigint LANGUAGE plxgo AS $$
+	return x << k
+$$;
+SELECT fg_r2c21_big(3, 30) AS r;  -- 3221225472
