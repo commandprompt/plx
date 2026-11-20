@@ -681,6 +681,52 @@ go_emit_str(Go *g, GoTok *tk, StringInfo out)
 	appendStringInfoChar(out, '\'');
 }
 
+/* true for a rune literal token ('x'), as opposed to a string literal */
+static bool
+go_is_rune(const GoTok *tk)
+{
+	return tk->kind == GO_STR && tk->s[0] == '\'';
+}
+
+/*
+ * The value of a rune literal: its Unicode code point, as in Go, where a rune
+ * is an int32. The literal is decoded as go_emit_str decodes it, and must
+ * hold exactly one character.
+ */
+static int32
+go_rune_value(Go *g, GoTok *tk)
+{
+	StringInfoData raw;
+	char	   *c;
+	int			n = 0,
+				i;
+	int32		cp;
+
+	initStringInfo(&raw);
+	go_emit_str(g, tk, &raw);	/* a quoted SQL literal, escapes decoded */
+	c = palloc(raw.len);
+	for (i = 1; i + 1 < raw.len; i++)	/* drop the quotes, undouble '' */
+	{
+		c[n++] = raw.data[i];
+		if (raw.data[i] == '\'')
+			i++;
+	}
+	c[n] = '\0';
+	if (n == 0 || pg_mbstrlen_with_len(c, n) != 1)
+		plx_err(g->cx, tk->line, "a rune literal must hold exactly one character");
+	if ((unsigned char) c[0] < 0x80)
+		cp = (unsigned char) c[0];
+	else
+	{
+		unsigned char *u = (unsigned char *) pg_server_to_any(c, n, PG_UTF8);
+
+		cp = (int32) utf8_to_unicode(u);
+	}
+	pfree(raw.data);
+	pfree(c);
+	return cp;
+}
+
 /*
  * Reject a format string that uses an explicit argument index (%[n]d). No
  * lowering models it: each would consume '[' as the verb, or take the
@@ -783,6 +829,13 @@ go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 			continue;
 		}
 
+		/*
+		 * format() renders every operand as text, which would print a rune's
+		 * number for %c, not its character.
+		 */
+		if (raw.data[j] == 'c')
+			plx_err(g->cx, tk->line,
+					"fmt.Sprintf with %%c needs exactly one argument for each directive, and at most 16");
 		appendStringInfoChar(out, '%');
 		if (dash)
 			appendStringInfoChar(out, '-');
@@ -822,6 +875,23 @@ go_sprintf_verb(StringInfo raw, int pct)
 		  (raw->data[j] >= 'A' && raw->data[j] <= 'Z')))
 		return -1;
 	return j;
+}
+
+/*
+ * Emit the argument [a,b) of a fmt directive. For %c, Go prints the character
+ * whose code point the integer argument holds (a rune), so wrap it in chr().
+ */
+static void
+go_emit_verb_arg(Go *g, int a, int b, bool isc, StringInfo out)
+{
+	if (!isc)
+	{
+		go_emit_range(g, a, b, out);
+		return;
+	}
+	appendStringInfoString(out, "chr((");
+	go_emit_range(g, a, b, out);
+	appendStringInfoString(out, ")::integer)");
 }
 
 /* fmt.Sprintf with a literal format string, lowered to a || chain.
@@ -925,7 +995,8 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	for (i = 1; i + 1 < raw.len; i++)
 	{
 		char		c = raw.data[i];
-		bool		dash = false;
+		bool		dash = false,
+					isc;
 		int			j,
 					wstart,
 					wlen;
@@ -979,10 +1050,11 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			appendStringInfoString(out, " || ");
 		if (diag)
 			appendStringInfoString(out, "COALESCE(");
+		isc = (raw.data[j] == 'c');
 		if (wlen == 0)
 		{
 			appendStringInfoChar(out, '(');
-			go_emit_range(g, as[ai], ae[ai], out);
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
 			appendStringInfoString(out, ")::text");
 		}
 		else if (ae[ai] - as[ai] == 1 && g->t[as[ai]].kind != GO_LP)
@@ -993,11 +1065,11 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			 * A single-token operand can safely be written twice.
 			 */
 			appendStringInfoString(out, dash ? "rpad((" : "lpad((");
-			go_emit_range(g, as[ai], ae[ai], out);
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
 			appendStringInfoString(out, ")::text, greatest(");
 			appendBinaryStringInfo(out, raw.data + wstart, wlen);
 			appendStringInfoString(out, ", length((");
-			go_emit_range(g, as[ai], ae[ai], out);
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
 			appendStringInfoString(out, ")::text)))");
 		}
 		else
@@ -1007,7 +1079,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 								   : "(SELECT lpad(__plx_v, greatest(");
 			appendBinaryStringInfo(out, raw.data + wstart, wlen);
 			appendStringInfoString(out, ", length(__plx_v))) FROM (VALUES ((");
-			go_emit_range(g, as[ai], ae[ai], out);
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
 			appendStringInfoString(out, ")::text)) AS __plx_w(__plx_v))");
 		}
 		if (diag)
@@ -1131,7 +1203,7 @@ go_infer_type(Go *g, int a, int b)
 		if (tk->kind == GO_NUM)
 			return go_num_is_float(tk) ? "double precision" : "integer";
 		if (tk->kind == GO_STR)
-			return "text";
+			return go_is_rune(tk) ? "integer" : "text";
 		if (go_ci(tk, "true") || go_ci(tk, "false"))
 			return "boolean";
 		return NULL;
@@ -1210,6 +1282,8 @@ go_operand_kind(Go *g, int a, int b)
 		return 0;
 	if (tk->kind == GO_NUM)
 		return go_num_is_float(tk) ? 'f' : 'i';
+	if (go_is_rune(tk))
+		return 'i';
 	if (tk->kind != GO_WORD)
 		return 0;
 	l = plx_local_find(g->cx, tk->s, tk->len);
@@ -1374,6 +1448,22 @@ go_emit_call(Go *g, int i, int b, StringInfo out, int *ni)
 	 * through trunc() first.
 	 */
 	conv = go_base_type(tk->s, tk->len);
+	/*
+	 * string(x) of an integer (such as a rune) is the character with that
+	 * code point in Go, not its decimal digits. Go accepts no other number
+	 * here, so an operand plx can see is a number is an integer.
+	 */
+	if (conv && strcmp(conv, "text") == 0 &&
+		(go_operand_kind(g, lp + 1, close) == 'i' ||
+		 go_expr_kind(g, lp + 1, close) == 'n'))
+	{
+		go_sp(out);
+		appendStringInfoString(out, "chr((");
+		go_emit_range(g, lp + 1, close, out);
+		appendStringInfoString(out, ")::integer)");
+		*ni = close + 1;
+		return true;
+	}
 	if (conv)
 	{
 		char		kind = 'i';
@@ -1835,7 +1925,10 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 		if (tk->kind == GO_STR)
 		{
 			go_sp(out);
-			go_emit_str(g, tk, out);
+			if (go_is_rune(tk))		/* a rune is an integer, its code point */
+				appendStringInfo(out, "%d", (int) go_rune_value(g, tk));
+			else
+				go_emit_str(g, tk, out);
 			i++;
 			continue;
 		}

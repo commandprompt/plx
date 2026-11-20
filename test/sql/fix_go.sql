@@ -385,11 +385,11 @@ $$;
 CREATE FUNCTION fg33_esc() RETURNS text LANGUAGE plxgo AS $$ return "\u00e9|\U0001F600|\x41|\101|\b|\a\f\v|\x27\047\u0027" $$;
 SELECT fg33_esc() = E'\u00e9|\U0001F600|A|A|\b|\007\f\013|''''''' AS go_true,
        length(fg33_esc()) AS go_len_17;
-CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return '\x41' $$;
+CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return string('\x41') $$;
 SELECT fg33_rune() AS go_a;
 -- in a rune literal, \x and octal escapes are code points, not bytes
 CREATE FUNCTION fg33_rune2() RETURNS text LANGUAGE plxgo AS $$
- return fmt.Sprintf("%s|%s|%s", '\xe9', '\351', "\xc3\xa9")
+ return fmt.Sprintf("%c|%c|%s", '\xe9', '\351', "\xc3\xa9")
 $$;
 SELECT fg33_rune2() = E'\u00e9|\u00e9|\u00e9' AS go_true;
 CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
@@ -501,7 +501,8 @@ CREATE FUNCTION fgh18_ctx(s text) RETURNS text LANGUAGE plxgo AS $$
 	return "no"
 $$;
 SELECT fgh18_ctx('a') AS go_AB_ac_dae, fgh18_ctx('z') AS go_no;
--- calls that return a string, and string(x)
+-- calls that return a string, and string(x). string(n) of an integer is the
+-- character with that code point, as in Go (PR 24 review [12])
 CREATE FUNCTION fgh18_calls(n int) RETURNS text LANGUAGE plxgo AS $$
 	return strings.TrimSpace("  z ") + strings.ToLower("Q") + string(n) + fmt.Sprintf("%d", n)
 $$;
@@ -721,3 +722,38 @@ CREATE FUNCTION fgsh_int(n int) RETURNS int LANGUAGE plxgo AS $$
 $$;
 SELECT fgsh_int(4) AS go_16;
 SELECT fg_err('SELECT fgsh_int(31)') AS go_out_of_range;
+-- PR 24 review [12]: a rune literal is an integer, its code point, as in Go.
+-- plx emitted it as a SQL string, so '7' became the number 7 and 'a' failed.
+CREATE FUNCTION fgrn_arith(s text) RETURNS int LANGUAGE plxgo AS $$
+ var d rune = '7'
+ var n int = '7' + 1
+ return d * 100 + n
+$$;
+SELECT fgrn_arith('x') AS go_5556;
+CREATE FUNCTION fgrn_var() RETURNS int LANGUAGE plxgo AS $$
+ var r rune = 'a'
+ return r
+$$;
+SELECT fgrn_var() AS go_97;
+CREATE FUNCTION fgrn_infer() RETURNS text LANGUAGE plxgo AS $$
+ c := 'a'
+ var d rune = c + 1
+ return fmt.Sprintf("%v %v", c, d)
+$$;
+SELECT fgrn_infer() AS go_97_98;
+CREATE FUNCTION fgrn_digit(s text) RETURNS int LANGUAGE plxgo AS $$
+ return '7' - '0'
+$$;
+SELECT fgrn_digit('x') AS go_7;
+-- string(r) and %c turn a rune back into its character
+CREATE FUNCTION fgrn_char() RETURNS text LANGUAGE plxgo AS $$
+ var r rune = 'a' + 1
+ return fmt.Sprintf("%s|%c|%d", string(r), 'z', 'é')
+$$;
+SELECT fgrn_char() AS go_b_z_233;
+-- a rune literal holds exactly one character
+CREATE FUNCTION fgrn_two() RETURNS int LANGUAGE plxgo AS $$ return 'ab' $$;
+CREATE FUNCTION fgrn_empty() RETURNS int LANGUAGE plxgo AS $$ return '' $$;
+-- %c where the directives and arguments do not line up is rejected, since the
+-- format() lowering would print the number
+CREATE FUNCTION fgrn_cfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%c %d", 'a') $$;

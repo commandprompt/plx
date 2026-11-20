@@ -283,12 +283,20 @@ Each entry names the dialects it affects.
   the wrong order.
 - **Literals keep their value.** String and rune literals decode every Go
   escape (`\x`, octal, `\u`, `\U`, `\a` `\b` `\f` `\v`). A rune literal such
-  as `'\xe9'` or `'\351'` gives the character U+00E9, as in Go. An unknown
+  as `'\xe9'` or `'\351'` is the code point 233 (see the next entry). An unknown
   escape (such as `"\d"`), a NUL, or bytes that are not valid text are
   rejected at `CREATE FUNCTION`. Hexadecimal, octal (`0o` and leading `0`),
   binary and `_`-separated integer literals keep their value on every
   supported PostgreSQL version (`017` was 17, `0o17` was 0, and on PostgreSQL
   13 to 15 `0x1F` was 0). A number with letters glued to it is rejected.
+- **A rune literal is an integer, its code point**, as in Go. plx emitted it
+  as a SQL string, so `var d rune = '7'` stored 7 instead of 55,
+  `var r rune = 'a'` failed with `invalid input syntax for type integer`, and
+  `'7' - '0'` failed with `operator is not unique`. `c := 'a'` now declares an
+  `integer`. A rune literal must hold exactly one character. `string(x)` of an
+  integer is now the character with that code point, as in Go, instead of the
+  number's digits: `string(65)` is `"A"`, not `"65"`. Use `strconv.Itoa` for
+  the digits. `%c` in `fmt.Sprintf` prints the character.
 - **`+` between a string and a number is rejected** at `CREATE FUNCTION`, as
   Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
   because SQL read the literal as a number. Convert the number with

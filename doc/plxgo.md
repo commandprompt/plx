@@ -154,19 +154,20 @@ $$;
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
 | `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence; an integer constant on the left of `<<` or `>>` becomes `(1)::bigint` (see below) |
 | `nil` | `NULL` |
-| `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
+| `"..."`, `` `...` `` | SQL string literal (escapes decoded, see below) |
+| `'x'` (a rune) | its code point as an integer: `'a'` is `97` |
 | `0x1F`, `0o17`, `017`, `0b101`, `1_000` | the decimal value (`31`, `15`, `15`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text` (see below) |
+| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text`, or `chr((x)::integer)` for an integer `x` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
 
 plx decodes every escape Go defines in an interpreted string or rune literal:
 `\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each in a
-string, and a Unicode character in a rune, so `'\xe9'` is `é`, as in Go), and
+string, and a Unicode code point in a rune, so `'\xe9'` is 233, as in Go), and
 `\uHHHH` and `\UHHHHHHHH` (a Unicode character, stored in the database
 encoding). As in Go, any other escape is an error. A literal that would contain
 a NUL character, or whose `\x` or octal bytes do not form valid text in the
@@ -176,6 +177,13 @@ Integer literals in hexadecimal, octal and binary, and literals with `_`
 separators, become plain decimal numbers, so they mean the same on every
 supported PostgreSQL version. A number with letters Go does not allow (such as
 `12abc`), a hexadecimal float and an imaginary literal are rejected.
+
+A rune literal is an integer, as in Go: `'7'` is 55, so `c - '0'` gives a
+digit's value. A rune literal must hold exactly one character. `string(x)` of
+an integer is the character with that code point (`string('a' + 1)` is `"b"`),
+and `%c` in `fmt.Sprintf` prints that character too. plx sees an integer in a
+rune or integer literal, a local or parameter of an integer type, and a `+` of
+these. `string(x)` of any other operand, such as a row field, is its text.
 
 A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
 3 and `int(-2.7)` is -2. A SQL cast would round instead. plx casts an integer
@@ -288,7 +296,9 @@ and its precision field are dropped, so `%.2f` prints the operand's full text
 rather than rounding it to two decimal places. Verbs that change an operand's
 representation rather than its padding are affected the same way: `%x`, `%o`,
 `%b`, `%e` and `%q` all render the operand's text, so `fmt.Sprintf("%x", 255)`
-yields `255` and not `ff`.
+yields `255` and not `ff`. `%c` prints the character whose code point its
+integer operand holds, as in Go; it needs exactly one argument for each
+directive, and at most 16, or plx rejects the function.
 A doubled `%%` stays a literal `%`. A `%` that starts no directive is also
 rendered as a literal percent, but it makes plx fall back to `format()`, where
 a NULL operand renders as empty instead of propagating; write `%%` instead.
