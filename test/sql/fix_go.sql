@@ -799,3 +799,11 @@ CREATE FUNCTION fgstr_int(n int) RETURNS text LANGUAGE plxgo AS $$
  return string(n) + string(r + 1) + string(int(66.9))
 $$;
 SELECT fgstr_int(65) AS go_abb;
+-- Review of the PR 24 fixes, problem 4: string(x) of any integer expression
+-- is its character, not only of a + of integers. string(n * 2) gave "66".
+CREATE FUNCTION fgstr_expr(n int) RETURNS text LANGUAGE plxgo AS $$
+ return string(n * 2) + string(n - 1) + string((n + 1) * 2) + string(n << 1) + string(n / 1)
+$$;
+SELECT fgstr_expr(33) AS go_chars;
+-- a float in the expression makes it a float, which Go rejects here
+CREATE FUNCTION fgstr_fexpr(n int, f float8) RETURNS text LANGUAGE plxgo AS $$ return string(n * f) $$;

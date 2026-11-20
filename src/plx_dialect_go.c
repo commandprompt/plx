@@ -1472,7 +1472,8 @@ go_int_operand_class(Go *g, int a, int b)
  * Whether [a,b) is an integer, which string(x) needs to know: 'i' when plx can
  * see it is an integer, 'x' when it can see it is a float, a numeric or a
  * bool, and 0 when it cannot tell (a row field, an unmapped call). Operands
- * joined by + are an integer when all of them are.
+ * joined by arithmetic or bitwise operators are an integer when all of them
+ * are, and a float, numeric or bool when any of them is.
  */
 static char
 go_int_class(Go *g, int a, int b)
@@ -1482,8 +1483,9 @@ go_int_class(Go *g, int a, int b)
 				k;
 	char		r = 'i';
 
-	/* unary signs keep the class */
-	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
+	/* unary signs and ^ keep the class */
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+") ||
+					 go_op_is(&g->t[a], "^")))
 		a++;
 	if (b <= a)
 		return 0;
@@ -1494,14 +1496,10 @@ go_int_class(Go *g, int a, int b)
 		return go_int_operand_class(g, a, b);
 	ops = palloc(sizeof(int) * n);
 	go_split_binops(g, a, b, ops);
-	for (k = 0; k < n && r; k++)
-	{
+	for (k = 0; k < n; k++)
 		if (go_binop_prec(&g->t[ops[k]]) <= 3)
 			r = 'x';			/* a comparison, && or ||: a bool */
-		else if (!go_op_is(&g->t[ops[k]], "+"))
-			r = 0;
-	}
-	for (k = 0; k <= n && r == 'i'; k++)
+	for (k = 0; k <= n && r != 'x'; k++)
 	{
 		char		c = go_int_class(g, k == 0 ? a : ops[k - 1] + 1,
 									 k == n ? b : ops[k]);

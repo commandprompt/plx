@@ -1347,3 +1347,18 @@ SELECT fgstr_int(65) AS go_abb;
  AbB
 (1 row)
 
+-- Review of the PR 24 fixes, problem 4: string(x) of any integer expression
+-- is its character, not only of a + of integers. string(n * 2) gave "66".
+CREATE FUNCTION fgstr_expr(n int) RETURNS text LANGUAGE plxgo AS $$
+ return string(n * 2) + string(n - 1) + string((n + 1) * 2) + string(n << 1) + string(n / 1)
+$$;
+SELECT fgstr_expr(33) AS go_chars;
+ go_chars 
+----------
+ B DB!
+(1 row)
+
+-- a float in the expression makes it a float, which Go rejects here
+CREATE FUNCTION fgstr_fexpr(n int, f float8) RETURNS text LANGUAGE plxgo AS $$ return string(n * f) $$;
+ERROR:  plxgo: string(x) of a float, numeric or bool value does not compile in Go; format it with fmt.Sprintf
+DETAIL:  at plxgo source line 1

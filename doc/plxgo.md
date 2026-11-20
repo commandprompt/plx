@@ -182,8 +182,9 @@ A rune literal is an integer, as in Go: `'7'` is 55, so `c - '0'` gives a
 digit's value. A rune literal must hold exactly one character. `string(x)` of
 an integer is the character with that code point (`string('a' + 1)` is `"b"`),
 and `%c` in `fmt.Sprintf` prints that character too. plx sees an integer in a
-rune or integer literal, a local or parameter of an integer type, and a `+` of
-these. Go rejects `string(x)` of a float or a bool, and plx rejects `string(x)`
+rune or integer literal, a local or parameter of an integer type, an integer
+conversion such as `int(x)`, `len(x)`, and arithmetic or bitwise operators
+joining these, such as `n * 2`. Go rejects `string(x)` of a float or a bool, and plx rejects `string(x)`
 of a float, `numeric` or bool value at `CREATE FUNCTION`; format such a value
 with `fmt.Sprintf`. `string(x)` of any other operand, such as a row field, is
 its text.
