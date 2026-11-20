@@ -819,6 +819,15 @@ go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 			while (j < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
 				j++;
 		}
+
+		/*
+		 * A * width or precision takes its value from an argument, which
+		 * format() cannot model: every later directive would take the wrong
+		 * argument.
+		 */
+		if (j < raw.len && raw.data[j] == '*')
+			plx_err(g->cx, tk->line,
+					"fmt.Sprintf with a * width or precision needs exactly one argument for each directive and each *, and at most 16");
 		if (j >= raw.len ||
 			!((raw.data[j] >= 'a' && raw.data[j] <= 'z') ||
 			  (raw.data[j] >= 'A' && raw.data[j] <= 'Z')))
@@ -849,8 +858,9 @@ go_emit_format_str(Go *g, GoTok *tk, StringInfo out)
 
 /*
  * Index of the verb of the fmt directive whose '%' is at raw->data[pct], after
- * skipping flags, width and precision; -1 when that character is not an ASCII
- * letter (or the directive runs into the closing quote).
+ * skipping flags, width and precision (each may be a '*' that takes its value
+ * from an argument); -1 when that character is not an ASCII letter (or the
+ * directive runs into the closing quote).
  */
 static int
 go_sprintf_verb(StringInfo raw, int pct)
@@ -861,13 +871,19 @@ go_sprintf_verb(StringInfo raw, int pct)
 								raw->data[j] == ' ' || raw->data[j] == '#' ||
 								raw->data[j] == '0'))
 		j++;
-	while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
-		j++;
+	if (j + 1 < raw->len && raw->data[j] == '*')
+		j++;					/* the width comes from an argument */
+	else
+		while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+			j++;
 	if (j + 1 < raw->len && raw->data[j] == '.')
 	{
 		j++;
-		while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
-			j++;
+		if (j + 1 < raw->len && raw->data[j] == '*')
+			j++;				/* the precision comes from an argument */
+		else
+			while (j + 1 < raw->len && raw->data[j] >= '0' && raw->data[j] <= '9')
+				j++;
 	}
 	if (j + 1 >= raw->len)
 		return -1;
@@ -918,6 +934,7 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 				ai = 0,
 				i,
 				d,
+				v,
 				seg;
 	bool		first = true;
 	bool		diag = g->cx->diag_msg;
@@ -976,12 +993,15 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 		 * and leave half of a '' pair unescaped in the output; fall back to
 		 * the format() path, which validates verbs, instead.
 		 */
-		if (go_sprintf_verb(&raw, i) < 0)
+		if ((v = go_sprintf_verb(&raw, i)) < 0)
 		{
 			pfree(raw.data);
 			return false;
 		}
 		ndir++;
+		for (d = i + 1; d < v; d++)	/* a * width or precision takes one */
+			if (raw.data[d] == '*')
+				ndir++;
 	}
 	if (ndir != nargs)
 	{
@@ -996,10 +1016,12 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 	{
 		char		c = raw.data[i];
 		bool		dash = false,
-					isc;
+					isc,
+					starw = false;
 		int			j,
 					wstart,
-					wlen;
+					wlen,
+					wa = -1;
 
 		if (c != '%')
 		{
@@ -1024,14 +1046,28 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 			j++;
 		}
 		wstart = j;
-		while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+		if (j + 1 < raw.len && raw.data[j] == '*')
+		{
+			starw = true;
+			wa = ai++;			/* the width is the next argument */
 			j++;
+		}
+		else
+			while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+				j++;
 		wlen = j - wstart;
 		if (j + 1 < raw.len && raw.data[j] == '.')
 		{
 			j++;
-			while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+			if (j + 1 < raw.len && raw.data[j] == '*')
+			{
+				/* precision is dropped (see above), but it takes an argument */
+				ai++;
 				j++;
+			}
+			else
+				while (j + 1 < raw.len && raw.data[j] >= '0' && raw.data[j] <= '9')
+					j++;
 		}
 
 		/* flush the literal run before the value */
@@ -1051,7 +1087,24 @@ go_emit_sprintf_concat(Go *g, int lp, int close, StringInfo out)
 		if (diag)
 			appendStringInfoString(out, "COALESCE(");
 		isc = (raw.data[j] == 'c');
-		if (wlen == 0)
+		if (starw)
+		{
+			/*
+			 * A width from an argument: as in Go, a negative width pads on
+			 * the right, like the '-' flag. Value and width are evaluated
+			 * once, in a subquery.
+			 */
+			appendStringInfoString(out, "(SELECT CASE WHEN __plx_n < 0 THEN "
+								   "rpad(__plx_v, greatest(-__plx_n, length(__plx_v))) ELSE ");
+			appendStringInfoString(out, dash ? "rpad" : "lpad");
+			appendStringInfoString(out, "(__plx_v, greatest(__plx_n, length(__plx_v))) END "
+								   "FROM (VALUES ((");
+			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);
+			appendStringInfoString(out, ")::text, (");
+			go_emit_range(g, as[wa], ae[wa], out);
+			appendStringInfoString(out, ")::integer)) AS __plx_w(__plx_v, __plx_n))");
+		}
+		else if (wlen == 0)
 		{
 			appendStringInfoChar(out, '(');
 			go_emit_verb_arg(g, as[ai], ae[ai], isc, out);

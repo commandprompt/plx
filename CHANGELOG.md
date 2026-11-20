@@ -276,6 +276,12 @@ Each entry names the dialects it affects.
   (`int(3.7)` is now 3). `int(x)` and `int64(x)` of a row field or an
   expression stay exact for integers beyond 2^53, and `int(r.n)` of a text
   field works.
+- **A `*` width or precision in `fmt.Sprintf` takes the next argument**, as in
+  Go. plx printed `%*d` as text and gave every later verb the wrong argument,
+  so `fmt.Sprintf("[%*d|%s]", 5, 42, "x")` gave `[%*d|5]`; it now gives
+  `[   42|x]`. A `*` precision takes its argument and is then dropped, like a
+  written precision. Where the directives and arguments do not line up, a `*`
+  is rejected at `CREATE FUNCTION`.
 - **A `fmt.Sprintf` width pads but never truncates.** `%3d` of 12345 gave
   `"123"`; it now gives the full value. An explicit argument index such as
   `%[1]d` is rejected at `CREATE FUNCTION`, in `fmt.Sprintf` and

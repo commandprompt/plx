@@ -757,3 +757,21 @@ CREATE FUNCTION fgrn_empty() RETURNS int LANGUAGE plxgo AS $$ return '' $$;
 -- %c where the directives and arguments do not line up is rejected, since the
 -- format() lowering would print the number
 CREATE FUNCTION fgrn_cfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%c %d", 'a') $$;
+-- PR 24 review [14]: a * width or precision in fmt.Sprintf takes its value
+-- from the next argument, as in Go. plx printed the directive as text and
+-- gave every later verb the wrong argument.
+CREATE FUNCTION fgsp_star() RETURNS text LANGUAGE plxgo AS $$
+ n := 6
+ return fmt.Sprintf("[%*d|%s]", 5, 42, "x") + fmt.Sprintf("[%-*s|%d]", 4, "ab", 7) +
+   fmt.Sprintf("[%*d]", -4, 7) + fmt.Sprintf("[%*s]", n, "ab") + fmt.Sprintf("[%*d]", 1, 123)
+$$;
+SELECT fgsp_star() AS go_star;
+-- a * precision takes its argument too; the precision itself is dropped, as
+-- for a written precision, so 3.5 prints in full
+CREATE FUNCTION fgsp_prec() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("[%.*f|%d]", 2, 3.5, 9)
+$$;
+SELECT fgsp_prec() AS go_prec;
+-- where the directives and arguments do not line up, * is rejected, since the
+-- format() lowering cannot take a width from an argument
+CREATE FUNCTION fgsp_starfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%*d %d", 5, 42) $$;

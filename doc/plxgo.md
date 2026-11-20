@@ -289,7 +289,11 @@ as empty. A message built for `panic` is the exception and keeps each operand's
 empty-string fallback, so one NULL cannot swallow the message.
 
 Every verb renders its operand as text. A `-` flag and a width are kept and
-become `rpad`/`lpad`, so `%-8d` still pads to eight columns. As in Go, the width
+become `rpad`/`lpad`, so `%-8d` still pads to eight columns. A `*` width
+takes its value from the next argument, as in Go, so `fmt.Sprintf("%*d", 5, 42)`
+is `"   42"`, and a negative width pads on the right. A `*` precision takes an
+argument too, and is then dropped like a written precision. Where the
+directives and arguments do not line up, plx rejects a `*`. As in Go, the width
 is a minimum: an operand longer than the width prints in full. An explicit
 argument index such as `%[1]d` is not supported, and plx rejects the function. Go's other flags
 and its precision field are dropped, so `%.2f` prints the operand's full text
