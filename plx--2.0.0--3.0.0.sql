@@ -115,12 +115,18 @@ BEGIN
 		       i.indcollation::pg_catalog.oid[] AS colls,
 		       pg_catalog.pg_get_expr(i.indexprs, i.indrelid) AS exprs
 		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+		-- another session's temporary table cannot be read, and goes away
+		-- with that session
+		WHERE NOT pg_catalog.pg_is_other_temp_schema(c.relnamespace)
 		UNION ALL
 		SELECT 'p', p.partrelid, p.partrelid,
 		       p.partnatts, p.partattrs::pg_catalog.int2[],
 		       p.partcollation::pg_catalog.oid[],
 		       pg_catalog.pg_get_expr(p.partexprs, p.partrelid)
 		FROM pg_catalog.pg_partitioned_table p
+		JOIN pg_catalog.pg_class c ON c.oid = p.partrelid
+		WHERE NOT pg_catalog.pg_is_other_temp_schema(c.relnamespace)
 	LOOP
 		colls := r.colls;
 		changed := false;
@@ -179,10 +185,13 @@ CREATE FUNCTION plx_sb_append_strict(plx_strbuild, text) RETURNS plx_strbuild
  * plxtsql converts a value whose type it cannot see to an integer type with
  * one of these: a numeric, real or double precision value is truncated toward
  * zero, as SQL Server does, and any other value takes the explicit cast.
+ * plxtsql passes the value as ROW(value), so the argument is always of
+ * type record and matches this signature exactly: an overload that a role
+ * with CREATE on this schema adds cannot capture the call.
  */
-CREATE FUNCTION plx_tsql_int2("any") RETURNS smallint
+CREATE FUNCTION plx_tsql_int2(record) RETURNS smallint
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-CREATE FUNCTION plx_tsql_int4("any") RETURNS integer
+CREATE FUNCTION plx_tsql_int4(record) RETURNS integer
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
-CREATE FUNCTION plx_tsql_int8("any") RETURNS bigint
+CREATE FUNCTION plx_tsql_int8(record) RETURNS bigint
 	AS '$libdir/plx', 'plx_tsql_toint' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;

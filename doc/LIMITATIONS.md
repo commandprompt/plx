@@ -33,6 +33,14 @@ These follow from running as plpgsql and are not specific to any one dialect.
   are parsed by PostgreSQL before plx sees the body, so they must be PostgreSQL
   type names (`integer`, `numeric`, `text`, `timestamp`, ...). Dialect type names
   (`NUMBER`, `int64`, `let x: number`) apply only inside the body.
+- **A value interpolated as an `UPDATE ... SET` target names a column.** In a
+  static SQL call, a value interpolated where SQL needs a name is written in
+  parentheses, so `FROM #{t}` fails at `CREATE FUNCTION`. `UPDATE t SET #{c} = v`
+  becomes `SET (c) = v`, which PostgreSQL reads as a one-column list. With a
+  plain value `v` the statement fails when it runs, with `source for a
+  multiple-column UPDATE item must be a sub-SELECT or ROW() expression`. With
+  a sub-`SELECT` or `ROW()` it updates the column named `c`, whatever the
+  variable `c` holds. To choose the column at run time, write `#{ident(c)}`. See [Dynamic SQL](DYNAMIC-SQL.md).
 - **Function-scoped locals.** plx hoists every local declaration into a single
   plpgsql `DECLARE` block, so locals are visible for the whole function. There is
   no per-block (per-`{}`, per-`if`) scope, and a name cannot be redeclared with a
@@ -131,15 +139,21 @@ These follow from running as plpgsql and are not specific to any one dialect.
     `extension "plx" does not support SET SCHEMA`. Give the schema in
     `CREATE EXTENSION plx SCHEMA ...`.
   - A function restored into a database where plx is in another schema (from
-    a `pg_dump -n` of one schema, say) fails when it runs, with
-    `schema "..." does not exist`. Install plx in the same schema in the
-    target database, or run the function's `CREATE FUNCTION` again.
+    a `pg_dump -n` of one schema, say) fails when it runs. The error is
+    `schema "..." does not exist` when that schema is missing in the target,
+    and otherwise `type "public.plx_strbuild" does not exist` or
+    `function public.plx_tsql_int4(record) does not exist`, with the source
+    schema in place of `public`. Install plx in the same schema in the target
+    database, or run the function's `CREATE FUNCTION` again.
   - A function created before 3.0.0 keeps the unqualified names it was
     generated with. Until you run its `CREATE FUNCTION` again, it needs plx's
     schema on its `search_path`.
 
-  Functions without a string append are not affected. See
-  [Trust and security](USERGUIDE.md#trust-and-security).
+  plxtsql does the same for a conversion to an integer type (`CAST`,
+  `CONVERT` or an assignment to an integer variable) of a value whose type it
+  cannot see, such as a column or a function call: it calls `plx_tsql_int2`,
+  `plx_tsql_int4` or `plx_tsql_int8` with plx's schema. Other functions are
+  not affected. See [Trust and security](USERGUIDE.md#trust-and-security).
 - **Runtime errors point at the generated plpgsql.** plpgsql requires all
   declarations at the top, so line numbers in a runtime error refer to the
   transpiled body, not your dialect source. `plx_source()` recovers the embedded
@@ -223,6 +237,19 @@ fail when the function runs.
 ### plxgo ([chapter](plxgo.md))
 
 - Goroutines and channels (`go`, `chan`, `select`, `<-`), `defer`, `goto`.
+- Labelled statements (`outer:` before a loop, `break outer`, `continue outer`).
+  `CREATE FUNCTION` fails, with a syntax error that does not name the label.
+  Use a flag variable and an unlabelled `break`.
+- Wrap-around of integer types narrower than 64 bits, and unsigned types.
+  `int8`, `int16`, `uint8` and `byte` are `smallint`, `int32` and `int` are
+  `integer`, and the unsigned types are signed SQL types. A conversion keeps
+  the value and arithmetic does not wrap: `uint8(300)` is 300 (Go: 44),
+  `uint32(-1)` is -1 (Go: 4294967295), and a `byte` holding 255 incremented
+  is 256 (Go: 0). A value that leaves the SQL type's range fails with
+  `smallint out of range` or `integer out of range`.
+- `len(s)` of a string counts characters, as SQL `length()` does, where Go
+  counts UTF-8 bytes: `len("héllo")` is 5 (Go: 6). Use `octet_length(s)` for
+  the byte count.
 - Nested functions and closures (`func`).
 - `map`, `chan`, `struct`, and `interface` types; declare data with SQL types or
   slices.
@@ -258,6 +285,10 @@ fail when the function runs.
   intrinsic function library is not translated (a `FUNCTION name(...)` call
   passes through and fails when the function runs); use SQL functions in
   expressions.
+- Truncation in `MOVE` to an alphanumeric item. A `PIC X(n)` item is
+  `varchar(n)`, so `MOVE` of a longer string fails when it runs with
+  `value too long for type character varying(n)`, where COBOL truncates on
+  the right. Write `MOVE LEFT(s, n) TO item`.
 - The `||` operator and `::` casts inside `COMPUTE` and conditions; use
   `CONCAT(...)` and `CAST(x AS type)`. `||`, like any character COBOL does not
   use (`!`, `$`, `@`, and others), is rejected at `CREATE FUNCTION` time
@@ -290,6 +321,11 @@ fail when the function runs.
 - Transaction control (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`).
 - Calling a stored procedure by name; only `EXEC('<sql>')` dynamic SQL.
 - `+` for string concatenation (use `||` or `CONCAT(...)`).
+- The range of `TINYINT`. plx stores a `TINYINT` as `smallint`, so a
+  `TINYINT` variable and `CONVERT(TINYINT, x)` hold values outside 0 to 255:
+  `CONVERT(TINYINT, 300)` is 300 and `CONVERT(TINYINT, -1)` is -1, where SQL
+  Server raises an arithmetic overflow error. Check the range yourself where
+  it matters.
 - T-SQL precedence for `^`, `&` and `|` followed by `+` or `-`: PostgreSQL
   binds them more loosely, so `1 ^ 2 + 3` gives 4, not 6. Write
   `(1 ^ 2) + 3`.

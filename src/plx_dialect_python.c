@@ -306,17 +306,17 @@ parse_py_for(Ctx *cx, int ind)
 		{
 			/* range(a, b, -k) is a, a - k, ... while > b */
 			if (ctr)
-				appendStringInfo(o, "FOR %s IN REVERSE %s..(%s + 1) BY %s LOOP\n",
+				appendStringInfo(o, "FOR %s IN REVERSE %s..((%s) + 1) BY %s LOOP\n",
 								 ctr, lo, hi, down);
 			else
-				appendStringInfo(o, "FOR %.*s IN REVERSE %s..(%s + 1) BY %s LOOP\n",
+				appendStringInfo(o, "FOR %.*s IN REVERSE %s..((%s) + 1) BY %s LOOP\n",
 								 cx->t[var].len, cx->t[var].s, lo, hi, down);
 		}
 		else if (ctr)
-			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n",
+			appendStringInfo(o, "FOR %s IN %s..((%s) - 1)%s%s LOOP\n",
 							 ctr, lo, hi, step ? " BY " : "", step ? step : "");
 		else
-			appendStringInfo(o, "FOR %.*s IN %s..(%s - 1)%s%s LOOP\n",
+			appendStringInfo(o, "FOR %.*s IN %s..((%s) - 1)%s%s LOOP\n",
 							 cx->t[var].len, cx->t[var].s, lo, hi,
 							 step ? " BY " : "", step ? step : "");
 		if (ctr)

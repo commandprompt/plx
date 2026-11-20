@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
@@ -18,6 +19,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/typcache.h"
 
 #include "plx.h"
 #include "plx_int.h"
@@ -1342,7 +1344,9 @@ tq_num_kind(Tq *tq, int a, int b)
  * emit the conversion of the SQL text e to the integer type typ, truncating
  * toward zero. kind is from tq_num_kind. With kind 0 the type of e is known
  * only at run time, so e goes to plx_tsql_int2, plx_tsql_int4 or
- * plx_tsql_int8 (see plx_tsql_toint). A function call evaluates e once, keeps
+ * plx_tsql_int8 (see plx_tsql_toint) as ROW(e). A record argument matches
+ * the helper's signature exactly, so no overload in plx's schema can capture
+ * the call (an argument of its own type could). A function call evaluates e once, keeps
  * an aggregate or window function in e at the query level it was written at,
  * is allowed in a DEFAULT or CHECK, and plans in time linear in its size.
  */
@@ -1354,7 +1358,7 @@ tq_int_conv_str(const char *e, char kind, const char *typ, StringInfo out)
 	else if (kind == 'f')
 		appendStringInfo(out, "CAST(trunc(%s) AS %s)", e, typ);
 	else
-		appendStringInfo(out, "%s((%s))",
+		appendStringInfo(out, "%s(ROW(%s))",
 						 plx_ext_object(strcmp(typ, "bigint") == 0 ? "plx_tsql_int8" :
 										strcmp(typ, "smallint") == 0 ? "plx_tsql_int2" :
 										"plx_tsql_int4"), e);
@@ -2769,9 +2773,10 @@ plx_tsql_inline_handler(PG_FUNCTION_ARGS)
  * first, as SQL Server does; a PostgreSQL cast would round it. Any other type
  * takes PostgreSQL's explicit cast to the integer type, so a string that is
  * not an integer fails as before, and a type with no such cast fails with
- * "cannot cast type". The argument is declared "any", so a literal of
- * unknown type, such as NULL or a quoted string in parentheses, reaches it
- * unresolved and is read as text.
+ * "cannot cast type". The argument is a record of one column holding the
+ * value (plxtsql writes ROW(value)); the column's type is the value's type. A
+ * literal of unknown type, such as NULL or a quoted string in parentheses,
+ * arrives as text.
  */
 typedef struct TqIntCast
 {
@@ -2789,8 +2794,31 @@ Datum
 plx_tsql_toint(PG_FUNCTION_ARGS)
 {
 	TqIntCast  *c = (TqIntCast *) fcinfo->flinfo->fn_extra;
-	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
-	Datum		v = PG_GETARG_DATUM(0);
+	HeapTupleHeader rec = PG_GETARG_HEAPTUPLEHEADER(0);
+	TupleDesc	td;
+	HeapTupleData tuple;
+	Oid			argtype;
+	bool		isnull;
+	Datum		v;
+
+	td = lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId(rec),
+								HeapTupleHeaderGetTypMod(rec));
+	if (td->natts != 1)
+	{
+		ReleaseTupleDesc(td);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("the value to convert must be a record of one column")));
+	}
+	argtype = TupleDescAttr(td, 0)->atttypid;
+	tuple.t_len = HeapTupleHeaderGetDatumLength(rec);
+	ItemPointerSetInvalid(&tuple.t_self);
+	tuple.t_tableOid = InvalidOid;
+	tuple.t_data = rec;
+	v = heap_getattr(&tuple, 1, td, &isnull);
+	ReleaseTupleDesc(td);
+	if (isnull)
+		PG_RETURN_NULL();
 
 	if (c == NULL || c->argtype != argtype)
 	{

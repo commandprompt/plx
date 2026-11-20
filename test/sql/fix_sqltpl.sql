@@ -293,3 +293,63 @@ r = fetch_one(f"SELECT {a or b} AND false AS v")
 return r.v
 $f$;
 SELECT fs_p_py(true, false);
+-- R2-C11 (PR 24 review r2 c1[1]): a typed literal with an interpolation,
+-- TYPE '...#{x}...', becomes CAST(('...' || x || '...') AS TYPE). Writing
+-- TYPE ('...' || x) would be a syntax error (interval (...) is a typmod).
+SET datestyle = 'ISO, MDY';
+SET intervalstyle = postgres;
+CREATE FUNCTION fs_r2c11_js(d int, k int) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT (interval '${d} days')::text AS v LIMIT $1`, k);
+return r.v;
+$$;
+SELECT fs_r2c11_js(5, 1) AS r;  -- 5 days
+CREATE FUNCTION fs_r2c11_py(d int) RETURNS text LANGUAGE plxpython3 AS $$
+r = fetch_one(f"SELECT (INTERVAL '{d} days')::text || ' ' || date '2020-01-{d}' || ' ' || (double precision '1.{d}' * 2) || ' ' || (timestamp with time zone '2020-01-0{d} 00:00 UTC' AT TIME ZONE 'UTC') AS v")
+return r.v
+$$;
+SELECT fs_r2c11_py(5) AS r;  -- 5 days 2020-01-05 3 2020-01-05 00:00:00
+RESET datestyle;
+RESET intervalstyle;
+-- a word that is not a type name leaves the literal as it was
+CREATE FUNCTION fs_r2c11_like(p text) RETURNS boolean LANGUAGE plxruby AS $$
+r = fetch_one("SELECT 'abc' LIKE 'a#{p}%' AS v")
+return r.v
+$$;
+SELECT fs_r2c11_like('b') AS r;  -- t
+-- a whole quoted literal has the type of the value: compare a text value with
+-- a date through an explicit cast
+CREATE TABLE fs_r2c11_t (id int, ts date);
+INSERT INTO fs_r2c11_t VALUES (1, '2020-01-05'), (2, '2021-01-01');
+CREATE FUNCTION fs_r2c11_cast(since text, k int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("SELECT count(*) AS c FROM fs_r2c11_t WHERE ts > '#{since}'::date LIMIT $1", k)
+return "#{r.c}"
+$$;
+SELECT fs_r2c11_cast('2020-06-01', 1) AS r;  -- 1
+CREATE FUNCTION fs_r2c11_nocast(since text, k int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("SELECT count(*) AS c FROM fs_r2c11_t WHERE ts > '#{since}' LIMIT $1", k)
+return "#{r.c}"
+$$;
+SELECT fs_err($q$SELECT fs_r2c11_nocast('2020-06-01', 1)$q$) AS r;  -- 42883: operator does not exist: date > text
+-- R2-T10 (PR 24 review r2 t1[0]): one name position is not caught at CREATE
+-- FUNCTION. In static SQL, UPDATE ... SET #{x} = v becomes SET (x) = v,
+-- which PostgreSQL reads as a one-column list. With a plain value the
+-- statement fails when it runs; with a sub-SELECT or ROW() it updates the
+-- column named x whatever the variable holds. doc/LIMITATIONS.md and
+-- DYNAMIC-SQL.md say so; the cases pin the behaviour so that a change is
+-- noticed. ident() is the fix.
+CREATE TABLE fs_r2t10 (id int, balance int, x int);
+INSERT INTO fs_r2t10 VALUES (1, 100, 7);
+CREATE FUNCTION fs_r2t10_val(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = 0 WHERE id = 1`);
+$$;
+SELECT fs_err($q$SELECT fs_r2t10_val('balance')$q$) AS r;
+CREATE FUNCTION fs_r2t10_sub(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${x} = (SELECT 1) WHERE id = 1`);
+$$;
+SELECT fs_r2t10_sub('balance');
+SELECT balance, x FROM fs_r2t10;  -- pinned: column x changes to 1, balance stays 100
+CREATE FUNCTION fs_r2t10_ident(x text) RETURNS void LANGUAGE plxjs AS $$
+perform(`UPDATE fs_r2t10 SET ${ident(x)} = 0 WHERE id = 1`);
+$$;
+SELECT fs_r2t10_ident('balance');
+SELECT balance, x FROM fs_r2t10;  -- 0 1

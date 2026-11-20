@@ -15,6 +15,8 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "parser/scansup.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 
 #include "plx.h"
@@ -508,6 +510,113 @@ range_assigns(Ctx *cx, int a, int b, Tok *name)
 }
 
 /*
+ * The index of the last token that names v, as an identifier or as a word
+ * inside an interpolation in a string, or -1. Names are
+ * compared case-folded, which can only find more. The table is built by one
+ * scan of the tokens, on first use, so the check below is linear in the body
+ * for names that are not read again.
+ */
+typedef struct
+{
+	char		key[NAMEDATALEN];
+	int			last;
+} PlxLastUse;
+
+static void
+last_use_key(const char *s, int len, char *key)
+{
+	char	   *k = downcase_truncate_identifier(s, len, false);
+
+	memset(key, 0, NAMEDATALEN);
+	strlcpy(key, k, NAMEDATALEN);
+	pfree(k);
+}
+
+static void
+last_use_note(HTAB *h, const char *s, int len, int i)
+{
+	char		key[NAMEDATALEN];
+	PlxLastUse *e;
+
+	last_use_key(s, len, key);
+	e = hash_search(h, key, HASH_ENTER, NULL);
+	e->last = i;
+}
+
+typedef struct
+{
+	HTAB	   *h;
+	int			i;
+} PlxLastUseArg;
+
+/* note each word of an interpolation's text */
+static void
+last_use_interp(void *arg, const char *s, int len)
+{
+	PlxLastUseArg *a = (PlxLastUseArg *) arg;
+	int			p = 0;
+
+	while (p < len)
+	{
+		int			q;
+
+		if (!plx_is_ident(s[p]))
+		{
+			p++;
+			continue;
+		}
+		for (q = p; q < len && plx_is_ident(s[q]); q++)
+			;
+		last_use_note(a->h, s + p, q - p, a->i);
+		p = q;
+	}
+}
+
+static int
+last_use(Ctx *cx, Tok *v)
+{
+	char		key[NAMEDATALEN];
+	PlxLastUse *e;
+
+	if (!cx->last_use)
+	{
+		HASHCTL		ctl;
+		int			i;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = sizeof(PlxLastUse);
+		ctl.hcxt = CurrentMemoryContext;
+#if PG_VERSION_NUM >= 140000
+		cx->last_use = hash_create("plx last use", 256, &ctl,
+								   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+#else
+		cx->last_use = hash_create("plx last use", 256, &ctl,
+								   HASH_ELEM | HASH_CONTEXT);
+#endif
+		for (i = 0; cx->t[i].kind != T_EOF; i++)
+		{
+			Tok		   *t = &cx->t[i];
+
+			CHECK_FOR_INTERRUPTS();
+			if (t->kind == T_IDENT)
+				last_use_note(cx->last_use, t->s, t->len, i);
+			else if (t->kind == T_STRING)
+			{
+				PlxLastUseArg a;
+
+				a.h = cx->last_use;
+				a.i = i;
+				plx_string_interps(cx, t, last_use_interp, &a);
+			}
+		}
+	}
+	last_use_key(v->s, v->len, key);
+	e = hash_search(cx->last_use, key, HASH_FIND, NULL);
+	return e ? e->last : -1;
+}
+
+/*
  * Is the variable read after the loop that ends before token from? A read
  * counts unless an assignment at the loop's own block level (a plain
  * "v = ..", a later "for (v = ..", or "as v") comes first. Conservative: a
@@ -518,6 +627,8 @@ read_after_loop(Ctx *cx, int from, Tok *v)
 {
 	int			i, depth = 0;
 
+	if (last_use(cx, v) < from)
+		return false;			/* the name does not occur after the loop */
 	for (i = from; cx->t[i].kind != T_EOF; i++)
 	{
 		Tok		   *t = &cx->t[i];
@@ -772,7 +883,7 @@ parse_for_brace(Ctx *cx, int ind)
 		start = o->len;
 		plx_indent(o, ind);
 		if (lt)
-			appendStringInfo(o, "FOR %s IN %s..(%s - 1)%s%s LOOP\n", var, lo, hi,
+			appendStringInfo(o, "FOR %s IN %s..((%s) - 1)%s%s LOOP\n", var, lo, hi,
 							 step ? " BY " : "", step ? step : "");
 		else
 			appendStringInfo(o, "FOR %s IN %s..%s%s%s LOOP\n", var, lo, hi,

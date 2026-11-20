@@ -45,6 +45,12 @@ corpuscheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/run_corpus.py
 
+# Upgrade check: ALTER EXTENSION plx UPDATE in situations that need more
+# than one session. Needs the extension installed and a running server.
+.PHONY: upgradecheck
+upgradecheck:
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" bash test/upgrade_check.sh
+
 # Check META.json against the PGXN Meta Spec. PGXN validates at upload time,
 # which is after a release is tagged and published, so check it before then.
 # Needs no server.

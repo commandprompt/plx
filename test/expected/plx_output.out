@@ -53,18 +53,18 @@ end
 return t
 $$;
 SELECT _src('o_rb_for');
-            _src            
-----------------------------
- /*plx:v1:plxruby*/        +
- DECLARE                   +
-   t integer := 0;         +
- BEGIN                     +
-   FOR i IN 1..(n - 1) LOOP+
-     CONTINUE WHEN i  =  2;+
-     t := t + i;           +
-   END LOOP;               +
-   RETURN t;               +
- END;                      +
+             _src             
+------------------------------
+ /*plx:v1:plxruby*/          +
+ DECLARE                     +
+   t integer := 0;           +
+ BEGIN                       +
+   FOR i IN 1..((n) - 1) LOOP+
+     CONTINUE WHEN i  =  2;  +
+     t := t + i;             +
+   END LOOP;                 +
+   RETURN t;                 +
+ END;                        +
  
 (1 row)
 
@@ -175,17 +175,17 @@ for ($i = 1; $i < $n; $i++) { $t = $t + $i; }
 return $t;
 $$;
 SELECT _src('o_php_for');
-            _src            
-----------------------------
- /*plx:v1:plxphp*/         +
- DECLARE                   +
-   t integer := 0;         +
- BEGIN                     +
-   FOR i IN 1..(n - 1) LOOP+
-     t := t + i;           +
-   END LOOP;               +
-   RETURN t;               +
- END;                      +
+             _src             
+------------------------------
+ /*plx:v1:plxphp*/           +
+ DECLARE                     +
+   t integer := 0;           +
+ BEGIN                       +
+   FOR i IN 1..((n) - 1) LOOP+
+     t := t + i;             +
+   END LOOP;                 +
+   RETURN t;                 +
+ END;                        +
  
 (1 row)
 
@@ -233,7 +233,7 @@ SELECT _src('o_py');
  DECLARE                      +
    t integer := 0;            +
  BEGIN                        +
-   FOR i IN 0..(n - 1) LOOP   +
+   FOR i IN 0..((n) - 1) LOOP +
      t := t + i;              +
    END LOOP;                  +
    IF t  =  0 THEN            +

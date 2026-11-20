@@ -1505,3 +1505,92 @@ SELECT fgsq_star(2) AS go_star, fgsq_width('a') AS go_width, fgsq_int(2) AS go_1
   a      |   A      |    11
 (1 row)
 
+-- R2-D11 (PR 24 review r2 d1[1]): the variable of a three-clause for loop is
+-- an integer while plx emits the loop body, so string(j) is a character, as
+-- in Go (review [12] covered locals and parameters only). The name is
+-- typed for the body only: after the loop a new j can hold a string.
+CREATE FUNCTION fg_r2d11(p text) RETURNS text LANGUAGE plxgo AS $$
+	i := 65
+	var s string = string(i)
+	for j := 66; j < 67; j++ {
+		s = s + string(j)
+	}
+	for k := 67; k < 68; k++ {
+		var kk int = k
+		s = s + string(kk) + string(k + 0) + string(int(k))
+	}
+	j := "-"
+	s = s + j + p
+	return s
+$$;
+SELECT fg_r2d11('!') AS r;  -- Go: ABCCC-!
+    r    
+---------
+ ABCCC-!
+(1 row)
+
+-- R2-C20 (PR 24 review r2 c2[0]): a named integer constant on the left of a
+-- shift is an untyped constant in Go, like a literal, so it shifts as a
+-- 64-bit value (review [9] covered literals only).
+CREATE FUNCTION fg_r2c20() RETURNS text LANGUAGE plxgo AS $$
+	const mask = 0xFF
+	const one = 1
+	var m int64 = mask << 28
+	var n int64 = one << 40
+	return fmt.Sprintf("%d %d", m, n)
+$$;
+SELECT fg_r2c20() AS r;  -- Go: 68451041280 1099511627776
+             r             
+---------------------------
+ 68451041280 1099511627776
+(1 row)
+
+-- R2-C21 (PR 24 review r2 c2[1]): plx maps Go's int to a 32-bit integer, so
+-- an int shifted left out of that range fails with "integer out of range",
+-- for every count, as plxgo.md says. Counts below 32 wrapped silently.
+CREATE FUNCTION fg_r2c21(x int, k int) RETURNS bigint LANGUAGE plxgo AS $$
+	var r int64 = int64(x << k)
+	return r
+$$;
+SELECT fg_r2c21(3, 29) AS r;  -- 1610612736
+     r      
+------------
+ 1610612736
+(1 row)
+
+SELECT fg_err($q$SELECT fg_r2c21(3, 30)$q$) AS r;  -- 22003: integer out of range
+              r              
+-----------------------------
+ 22003: integer out of range
+(1 row)
+
+SELECT fg_err($q$SELECT fg_r2c21(1, 31)$q$) AS r;  -- 22003: integer out of range
+              r              
+-----------------------------
+ 22003: integer out of range
+(1 row)
+
+SELECT fg_r2c21(-1, 31) AS r;  -- -2147483648 fits
+      r      
+-------------
+ -2147483648
+(1 row)
+
+CREATE FUNCTION fg_r2c21_lit(x int) RETURNS int LANGUAGE plxgo AS $$
+	return x << 31
+$$;
+SELECT fg_err($q$SELECT fg_r2c21_lit(1)$q$) AS r;  -- 22003: integer out of range
+              r              
+-----------------------------
+ 22003: integer out of range
+(1 row)
+
+CREATE FUNCTION fg_r2c21_big(x bigint, k int) RETURNS bigint LANGUAGE plxgo AS $$
+	return x << k
+$$;
+SELECT fg_r2c21_big(3, 30) AS r;  -- 3221225472
+     r      
+------------
+ 3221225472
+(1 row)
+

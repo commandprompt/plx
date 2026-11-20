@@ -1298,12 +1298,14 @@ php_value_ref(const char *s, int len, int i, int j)
 }
 
 /*
- * plxphp: is name the target of a .= anywhere in the body? Such a local is
- * declared as the string builder (see the append lowering in the statement
- * emitter), and PostgreSQL cannot choose a || for a builder beside an
- * untyped literal, so the rewriter reads it as text. The source order does
- * not matter: a read before the first .= sees the same declared type. The set
- * is built by one scan of the tokens, on first use.
+ * Is name the target of an append anywhere in the body: .= in plxphp, += or
+ * << in the other dialects? An append to a string local declares it as the
+ * string builder (see the append lowering in the statement emitter), and
+ * PostgreSQL cannot choose a || for a builder beside an untyped literal, so
+ * the rewriter reads it as text. The source order does not matter: a read
+ * before the first append sees the same declared type. The set is built by
+ * one scan of the tokens, on first use. Outside plxphp, += and << also apply
+ * to numbers, so the caller checks builder_local too.
  */
 static bool
 php_appended(Ctx *cx, const char *name, int len)
@@ -1329,8 +1331,10 @@ php_appended(Ctx *cx, const char *name, int len)
 		for (k = 0; cx->t[k].kind != T_EOF; k++)
 		{
 			CHECK_FOR_INTERRUPTS();
-			if (cx->t[k].kind == T_IDENT && cx->t[k + 1].kind == T_DOT &&
-				plx_tok_is(&cx->t[k + 2], "="))
+			if (cx->t[k].kind == T_IDENT &&
+				(cx->surf->concat_op ?
+				 (cx->t[k + 1].kind == T_DOT && plx_tok_is(&cx->t[k + 2], "=")) :
+				 (plx_tok_is(&cx->t[k + 1], "+=") || plx_tok_is(&cx->t[k + 1], "<<"))))
 			{
 				plx_local_key(cx->t[k].s, cx->t[k].len, key);
 				(void) hash_search(cx->appended, key, HASH_ENTER, NULL);
@@ -1339,6 +1343,18 @@ php_appended(Ctx *cx, const char *name, int len)
 	}
 	plx_local_key(name, len, key);
 	return hash_search(cx->appended, key, HASH_FIND, NULL) != NULL;
+}
+
+/*
+ * Outside plxphp: is name a local whose append makes it the string builder,
+ * that is, a local of a type the builder stands in for?
+ */
+static bool
+builder_local(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l = plx_local_find(cx, name, len);
+
+	return l && l->typ && is_builder_type(l->typ);
 }
 
 void
@@ -1452,6 +1468,48 @@ plx_local_add(Ctx *cx, const char *name, int len)
 	else if (!names_fold_case(cx) && !same_spelling(e->l->name, name, len))
 		name_clash(cx, e->l->name, name, len);
 	return l;
+}
+
+/*
+ * Remove a local that plx_local_add returned, for a name that is in scope for
+ * one block only (a loop variable that plx declares in its own DECLARE).
+ */
+void
+plx_local_drop(Ctx *cx, PlxLocal2 *l)
+{
+	PlxLocal2  *p = NULL,
+			   *q;
+	char		key[NAMEDATALEN];
+	PlxLocalEnt *e;
+
+	for (q = cx->locals; q && q != l; q = q->next)
+		p = q;
+	if (!q)
+		return;
+	if (p)
+		p->next = l->next;
+	else
+		cx->locals = l->next;
+	if (cx->ltail == l)
+		cx->ltail = p;
+	plx_local_key(l->name, (int) strlen(l->name), key);
+	e = hash_search(cx->lhash, key, HASH_FIND, NULL);
+	if (e && e->l == l)
+	{
+		/* another declaration of the name, if any, takes over */
+		for (q = cx->locals; q; q = q->next)
+		{
+			char		k2[NAMEDATALEN];
+
+			plx_local_key(q->name, (int) strlen(q->name), k2);
+			if (strcmp(k2, key) == 0)
+				break;
+		}
+		if (q)
+			e->l = q;
+		else
+			(void) hash_search(cx->lhash, key, HASH_REMOVE, NULL);
+	}
 }
 
 /* ---------------------------------------------------------------- string decode */
@@ -1992,6 +2050,18 @@ emit_string_value(Ctx *cx, Tok *tk, StringInfo out)
 					appendStringInfoChar(&lit, c);
 					break;
 			}
+			continue;
+		}
+		/*
+		 * plxphp "\{$x}": \{ is no escape, and the { opens no {$...}. PHP
+		 * keeps the backslash and the brace, and $x interpolates as $x.
+		 */
+		if (!raw && can_interp && cx->surf->concat_op && s[0] == '\\' &&
+			s + 2 < e && s[1] == '{' && s[2] == '$')
+		{
+			appendStringInfoString(&lit, "\\\\{");
+			need_e = true;
+			s += 2;
 			continue;
 		}
 		if (!raw && s[0] == '\\' && s + 1 < e)
@@ -2965,8 +3035,10 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "OR");
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
-			else if (surf->concat_op && php_value_ref(s, len, i, j) &&
-					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl))
+			else if (php_value_ref(s, len, i, j) &&
+					 (surf->concat_op || !(j < len && s[j] == '.')) &&
+					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
+					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{
 				/* a .= target is a string builder: read it as text */
 				note_name_ref(cx, s, len, i, j);
@@ -4220,6 +4292,15 @@ tpl_split(Ctx *cx, Tok *tk, bool full, PlxTplSeg **segs_out)
 		{
 			char		c = s[1];
 
+			/* plxphp "\{$x}": a backslash and a brace, then $x (see emit_string_value) */
+			if (can_interp && !raw && cx->surf->concat_op && c == '{' &&
+				s + 2 < e && s[2] == '$')
+			{
+				appendStringInfoChar(&lit, '\\');
+				appendStringInfoChar(&lit, '{');
+				s += 2;
+				continue;
+			}
 			if (!full)
 			{
 				/*
@@ -4321,6 +4402,30 @@ plx_string_reads(Ctx *cx, Tok *tk, const char *name, int len)
 	return found;
 }
 
+/*
+ * Call fn(arg, s, len) for the text of each interpolation in string token tk.
+ */
+void
+plx_string_interps(Ctx *cx, Tok *tk, void (*fn) (void *arg, const char *s, int len),
+				   void *arg)
+{
+	PlxTplSeg  *segs;
+	int			n,
+				k;
+
+	if (tk->kind != T_STRING)
+		return;
+	n = tpl_split(cx, tk, false, &segs);
+	for (k = 0; k < n; k++)
+	{
+		if (segs[k].interp)
+			fn(arg, segs[k].s, segs[k].len);
+		pfree(segs[k].s);
+	}
+	if (segs)
+		pfree(segs);
+}
+
 /* ident(e) / raw(e) wrapping the whole interpolation? Sets [*is, *is + *il). */
 static PlxTplKind
 tpl_kind(const char *s, int len, const char **is, int *il)
@@ -4388,6 +4493,7 @@ typedef struct
 	int			dollar_len;
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
+	char	   *cast_to;		/* wrapped typed literal: the type to CAST to */
 	bool		paren;			/* static SQL: write an unquoted value as (expr) */
 } PlxTplState;
 
@@ -4429,7 +4535,10 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 				if (st->wrapped)
 				{
 					appendStringInfoChar(buf, ')');
+					if (st->cast_to)
+						appendStringInfo(buf, " AS %s)", st->cast_to);
 					st->wrapped = false;
+					st->cast_to = NULL;
 				}
 				continue;
 			}
@@ -4522,6 +4631,87 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 }
 
 /*
+ * Read the SQL word that ends right before buf offset end, skipping spaces.
+ * Returns its length (0 if none) and sets *start.
+ */
+static int
+tpl_word_before(StringInfo buf, int end, int *start)
+{
+	int			e = end,
+				b;
+
+	while (e > 0 && (buf->data[e - 1] == ' ' || buf->data[e - 1] == '\t' ||
+					 buf->data[e - 1] == '\n' || buf->data[e - 1] == '\r'))
+		e--;
+	b = e;
+	while (b > 0 && sql_ident_char(buf->data[b - 1]) && buf->data[b - 1] != '$')
+		b--;
+	/* a quoted name, a qualified name or a parameter is not a type keyword */
+	if (b == e || (b > 0 && (buf->data[b - 1] == '"' || buf->data[b - 1] == '.' ||
+							 buf->data[b - 1] == '$')) ||
+		(buf->data[b] >= '0' && buf->data[b] <= '9'))
+		return 0;
+	*start = b;
+	return e - b;
+}
+
+static bool
+tpl_word_is(StringInfo buf, int at, int len, const char *w)
+{
+	return len == (int) strlen(w) && pg_strncasecmp(buf->data + at, w, len) == 0;
+}
+
+/*
+ * Is the quoted literal opening at buf offset at a typed literal, TYPE '...'?
+ * Returns the offset where the type name starts, or -1. Only built-in type
+ * names count: another word before a literal, such as an option name in
+ * OPTIONS (host '...'), leaves the literal alone.
+ */
+static int
+tpl_typed_literal(StringInfo buf, int at)
+{
+	static const char *const types[] = {
+		"interval", "date", "time", "timestamp", "timestamptz", "timetz",
+		"numeric", "decimal", "int", "int2", "int4", "int8", "integer",
+		"bigint", "smallint", "real", "float", "float4", "float8", "boolean",
+		"bool", "text", "varchar", "char", "character", "json", "jsonb",
+		"uuid", "bytea", "inet", "cidr", "macaddr", "money", "xml", "oid",
+		"regclass", "regtype", "regproc", "tsquery", "tsvector", "point", NULL
+	};
+	int			b,
+				l = tpl_word_before(buf, at, &b),
+				b2,
+				l2,
+				i;
+
+	if (l == 0)
+		return -1;
+	if (tpl_word_is(buf, b, l, "precision") || tpl_word_is(buf, b, l, "varying"))
+	{
+		l2 = tpl_word_before(buf, b, &b2);
+		if (l2 > 0 && (tpl_word_is(buf, b2, l2, "double") ? tpl_word_is(buf, b, l, "precision")
+					   : tpl_word_is(buf, b2, l2, "character")))
+			return b2;
+		return -1;
+	}
+	if (tpl_word_is(buf, b, l, "zone"))
+	{
+		/* time zone, after with or without, after time or timestamp */
+		if ((l2 = tpl_word_before(buf, b, &b2)) == 0 || !tpl_word_is(buf, b2, l2, "time") ||
+			(l2 = tpl_word_before(buf, b2, &b2)) == 0 ||
+			!(tpl_word_is(buf, b2, l2, "with") || tpl_word_is(buf, b2, l2, "without")) ||
+			(l2 = tpl_word_before(buf, b2, &b2)) == 0 ||
+			!(tpl_word_is(buf, b2, l2, "time") || tpl_word_is(buf, b2, l2, "timestamp")))
+			return -1;
+		return b2;
+	}
+	for (i = 0; types[i]; i++)
+		if (tpl_word_is(buf, b, l, types[i]))
+			return b;
+	return -1;
+}
+
+/*
  * Emit one value interpolation. ref is the text that stands for the value: the
  * rewritten expression (static) or "$n" (dynamic). Returns true when the
  * closing quote of a '#{x}' was consumed and must be skipped in the next run.
@@ -4558,11 +4748,36 @@ tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
 	{
 		/* before the quote, or before the E of an E'...' */
 		int			at = st->estr ? st->sq_open - 1 : st->sq_open;
+		int			ty = tpl_typed_literal(buf, at);
 
-		appendStringInfoChar(buf, ' ');		/* room for the '(' */
-		memmove(buf->data + at + 1, buf->data + at, buf->len - at - 1);
-		buf->data[at] = '(';
-		st->sq_open++;
+		if (ty >= 0)
+		{
+			/*
+			 * TYPE '...' -> CAST(('...' || v || '...') AS TYPE): TYPE (...)
+			 * would be a syntax error, or a type modifier
+			 */
+			int			tl = at;
+			char	   *rest;
+
+			while (tl > ty && (buf->data[tl - 1] == ' ' || buf->data[tl - 1] == '\t' ||
+							   buf->data[tl - 1] == '\n' || buf->data[tl - 1] == '\r'))
+				tl--;
+			st->cast_to = pnstrdup(buf->data + ty, tl - ty);
+			rest = pstrdup(buf->data + at);
+			buf->len = ty;
+			buf->data[buf->len] = '\0';
+			appendStringInfoString(buf, "CAST((");
+			st->sq_open = buf->len + (st->estr ? 1 : 0);
+			appendStringInfoString(buf, rest);
+			pfree(rest);
+		}
+		else
+		{
+			appendStringInfoChar(buf, ' ');		/* room for the '(' */
+			memmove(buf->data + at + 1, buf->data + at, buf->len - at - 1);
+			buf->data[at] = '(';
+			st->sq_open++;
+		}
 		st->wrapped = true;
 	}
 	appendStringInfo(buf, "' || (%s)::text || %s'", ref, st->estr ? "E" : "");
@@ -4643,7 +4858,8 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		 */
 		if (st.sq && st.bs_end)
 			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
-					"in an E'...' SQL string; write a literal backslash as two backslashes");
+					"in an E'...' SQL string; write a literal backslash as two backslashes in the "
+					"SQL text (four inside a double-quoted, template or f-string)");
 		if (!st.sq)
 			tpl_check_joined(cx, tk, segs, n, i);
 		skip = tpl_put_value(&st, out,
@@ -4757,7 +4973,8 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 		 */
 		if (st.sq && st.bs_end)
 			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
-					"in an E'...' SQL string; write a literal backslash as two backslashes");
+					"in an E'...' SQL string; write a literal backslash as two backslashes in the "
+					"SQL text (four inside a double-quoted, template or f-string)");
 		if (kind == TPL_LITERAL && st.sq)
 		{
 			/* '#{x}' exactly: the quoted value replaces the literal */

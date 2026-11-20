@@ -723,7 +723,9 @@ Points to keep in mind:
     generated with. Run their `CREATE FUNCTION` again to get the qualified
     names.
   - A restored function with a string append needs plx in the same schema as
-    in the source database. See
+    in the source database. So does a plxtsql function with a conversion to
+    an integer type of a value whose type plx cannot see, which calls
+    `plx_tsql_int4` (or `plx_tsql_int2`, `plx_tsql_int8`) the same way. See
     [LIMITATIONS.md](LIMITATIONS.md#constraints-shared-by-every-dialect).
 - Pin the path on every `SECURITY DEFINER` function, as the PostgreSQL manual
   advises, because the SQL in its body still finds your own tables and

@@ -316,3 +316,107 @@ for (i = 0; i < n; i++) { }
 let r = fetch_one("SELECT 5 AS i");
 return `${r.i + i}`;
 $body$;
+-- R2-C10 (PR 24 review r2 c1[0]): an exclusive loop bound becomes (HI) - 1 or
+-- (HI) + 1. The bound is parenthesized, because SQL binds + and - tighter than
+-- << >> & | #, so n >> 1 - 1 would be n >> 0.
+CREATE FUNCTION r2c10_js(n int) RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+for (let i = 0; i < n >> 1; i++) { s += `${i} `; }
+for (let i = 0; i < n << 1; i += 3) { s += `${i};`; }
+return s;
+$$;
+CREATE FUNCTION r2c10_ts(n int) RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+for (let i = 0; i < n >> 1; i++) { s += `${i} `; }
+return s;
+$$;
+CREATE FUNCTION r2c10_php(n int) RETURNS text LANGUAGE plxphp AS $$
+$s = "";
+for ($i = 0; $i < $n >> 1; $i++) { $s .= "$i "; }
+return $s;
+$$;
+CREATE FUNCTION r2c10_py(n int) RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+for i in range(n >> 1):
+    s += f"{i} "
+for i in range(n, n >> 1, -1):
+    s += f"{i},"
+for i in range(10, n | 1, -2):
+    s += f"{i};"
+return s
+$$;
+CREATE FUNCTION r2c10_rb(n int) RETURNS text LANGUAGE plxruby AS $$
+s = ''
+for i in 0...n >> 1
+  s << "#{i} "
+end
+(0...n & 6).each do |j|
+  s << "#{j},"
+end
+return s
+$$;
+SELECT r2c10_js(6) AS js, r2c10_ts(6) AS ts, r2c10_php(6) AS php, r2c10_py(6) AS py, r2c10_rb(6) AS rb;
+-- js: 0 1 2 0;3;6;9;  ts: 0 1 2  php: 0 1 2  py: 0 1 2 6,5,4,10;8;  rb: 0 1 2 0,1,2,3,4,5,
+-- R2-C12 (PR 24 review r2 c1[2]): a string local that an append turns into
+-- the string builder is read as text in every dialect, so || and an
+-- interpolation into SQL work on it (review [7] fixed plxphp only).
+-- A numeric += local is still read as a number.
+CREATE FUNCTION r2c12_js() RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+s += 'a';
+s += 'b';
+let n = 1;
+n += 2;
+let r = fetch_one(`SELECT ${s} || '?' AS v`);
+return `${s || '!'}${r.v}${n + 1}`;
+$$;
+CREATE FUNCTION r2c12_ts() RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+s += 'a';
+s += 'b';
+let r = fetch_one(`SELECT ${s} || '!' AS v`);
+return r.v;
+$$;
+CREATE FUNCTION r2c12_rb() RETURNS text LANGUAGE plxruby AS $$
+s = ''
+s << 'a'
+s << 'b'
+return s || '!'
+$$;
+CREATE FUNCTION r2c12_py() RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+s += 'a'
+s += 'b'
+n = 1
+n += 2
+r = fetch_one(f"SELECT {s} || '!' AS v, {n} + 1 AS m")
+return f"{r.v}{r.m}"
+$$;
+SELECT r2c12_js() AS js, r2c12_ts() AS ts, r2c12_rb() AS rb, r2c12_py() AS py;
+-- js: ab!ab?4  ts: ab!  rb: ab!  py: ab!4
+-- R2-C13 (PR 24 review r2 c1[3]): in plxphp "\{$x}", \{ is no escape and
+-- the { opens no {$...}: PHP keeps the backslash and the braces and
+-- interpolates $x. The same holds in a string value, in static SQL and in
+-- dynamic SQL.
+CREATE FUNCTION r2c13_php(x int) RETURNS text LANGUAGE plxphp AS $$
+$r = fetch_one("SELECT 'sql=\{$x}' AS v");
+$d = fetch_one("SELECT 'dyn=\{$x}' || $1 AS v", '!');
+return "str=\{$x} " . $r->v . " " . $d->v;
+$$;
+SELECT r2c13_php(5) AS r;  -- PHP: str=\{5} sql=\{5} dyn=\{5}!
+-- R2-S10 (PR 24 review r2 s1[0]): the check that a counting-for variable is
+-- not read after the loop scanned from each loop to the end of the body, so
+-- CREATE FUNCTION took time quadratic in the number of loops (16,000 loops
+-- and a string naming every variable: about 10 s; 2.0.1: 0.06 s). It now
+-- skips the scan for a name that does not occur after the loop.
+SET statement_timeout = '3s';
+DO $d$ BEGIN EXECUTE format('CREATE FUNCTION r2s10_php() RETURNS int LANGUAGE plxphp AS %L',
+  (SELECT string_agg(format('for ($i%s = 0; $i%s < 1; $i%s++) { }', k, k, k), E'\n') FROM generate_series(1, 16000) k)
+  || E'\n$s = "' || (SELECT string_agg('i' || k, ' ') FROM generate_series(1, 16000) k) || E'";\nreturn 1;'); END $d$;
+RESET statement_timeout;
+SELECT r2s10_php() AS r;  -- 1
+-- the check still sees a read after the loop
+CREATE FUNCTION r2s10_read() RETURNS text LANGUAGE plxphp AS $$
+for ($i = 0; $i < 3; $i++) { }
+return "i=$i";
+$$;

@@ -1832,9 +1832,10 @@ go_sql_class(const GoTok *tk)
 }
 
 /*
- * [a,b) is an integer constant expression: integer and rune literals joined by
- * arithmetic and bitwise operators, with unary signs and brackets. It holds no
- * name, call or float, so Go types it by its context.
+ * [a,b) is an integer constant expression: integer and rune literals and
+ * named integer constants joined by arithmetic and bitwise operators, with
+ * unary signs and brackets. It holds no variable, call or float, so Go types
+ * it by its context.
  */
 static bool
 go_int_const(Go *g, int a, int b)
@@ -1856,6 +1857,17 @@ go_int_const(Go *g, int a, int b)
 			lit = true;
 			continue;
 		}
+		/* a named integer constant (const mask = 0xFF) is untyped too */
+		if (tk->kind == GO_WORD)
+		{
+			PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
+
+			if (l && l->is_const && go_typ_int_class(l->typ) == 'i')
+			{
+				lit = true;
+				continue;
+			}
+		}
 		if (tk->kind == GO_LP || tk->kind == GO_RP)
 			continue;
 		for (k = 0; ops[k]; k++)
@@ -1873,9 +1885,10 @@ go_int_const(Go *g, int a, int b)
  * Go's result for every count. SQL takes the count mod 64 for a bigint and
  * mod 32 for a smallint or integer, so 1 << 64 would be 1; Go gives 0 for <<,
  * and 0 or -1 for >>. A negative count panics in Go, and fails here. plx maps
- * Go's 64-bit int to a 32-bit integer, so a non-zero integer shifted left by
- * 32 or more fails with "integer out of range", as any shift that leaves the
- * range of an int does. Neither error arm can be folded into an error while
+ * Go's 64-bit int to a 32-bit integer, so an integer is shifted as a bigint
+ * and cast back: a shift that leaves the range of an int fails with "integer
+ * out of range" for every count. A bigint or smallint shift drops the bits
+ * that leave its width, as Go's int64 and int16 do. Neither error arm can be folded into an error while
  * the planner simplifies the CASE, even with a constant value and count, as
  * custom plans have: each one depends on || or pg_typeof(), which are stable.
  * GO_SHIFT_WIDTH is the width of the value in bits. OFFSET 0 keeps the
@@ -1888,7 +1901,8 @@ go_int_const(Go *g, int a, int b)
 static const char GO_SHL_OPEN[] =
 "(SELECT CASE WHEN __plx_c IS NULL THEN NULL"
 " WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
-" WHEN __plx_c < " GO_SHIFT_WIDTH " THEN __plx_a << __plx_c::integer"
+" WHEN __plx_c < " GO_SHIFT_WIDTH " THEN CASE WHEN pg_typeof(__plx_a) = 'integer'::regtype"
+" THEN (__plx_a::bigint << __plx_c::integer)::integer ELSE __plx_a << __plx_c::integer END"
 " WHEN __plx_a = 0 OR pg_typeof(__plx_a) = 'bigint'::regtype THEN __plx_a & 0"
 " ELSE (__plx_a::bigint << " GO_SHIFT_WIDTH ")::integer"
 " END FROM (SELECT (";
@@ -1899,6 +1913,36 @@ static const char GO_SHR_OPEN[] =
 " END FROM (SELECT (";
 static const char GO_SHIFT_MID[] = ") AS __plx_a, (";
 static const char GO_SHIFT_CLOSE[] = ") AS __plx_c OFFSET 0) AS __plx_s)";
+
+/*
+ * The PostgreSQL type of the operand [a,b) when it is one name: a local or a
+ * parameter of an integer type. NULL otherwise.
+ */
+static const char *
+go_operand_sqltype(Go *g, int a, int b)
+{
+	GoTok	   *tk = &g->t[a];
+	PlxLocal2  *l;
+	int			i;
+
+	if (b - a != 1 || tk->kind != GO_WORD)
+		return NULL;
+	l = plx_local_find(g->cx, tk->s, tk->len);
+	if (l)
+		return go_typ_int_class(l->typ) == 'i' ? l->typ : NULL;
+	if (!g->cx->meta || !g->cx->meta->argnames)
+		return NULL;
+	for (i = 0; i < g->cx->meta->nargs; i++)
+	{
+		const char *an = g->cx->meta->argnames[i];
+
+		if (an && (int) strlen(an) == tk->len && strncmp(an, tk->s, tk->len) == 0)
+			return g->cx->meta->argtypes[i] == INT2OID ? "smallint" :
+				g->cx->meta->argtypes[i] == INT4OID ? "integer" :
+				g->cx->meta->argtypes[i] == INT8OID ? "bigint" : NULL;
+	}
+	return NULL;
+}
 
 /*
  * [a,b) is a decimal literal below 32, a shift count that SQL takes as Go
@@ -1938,6 +1982,7 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 	bool	   *brk;
 	char	   *guard;			/* '<' or '>' for a guarded shift, else 0 */
 	int			nguard = 0;
+	bool		widen = false;	/* the first operator is an int << small count */
 
 	if (lo == hi)
 	{
@@ -1967,6 +2012,29 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 		{
 			guard[j] = o->s[0];
 			nguard++;
+		}
+		else if (go_op_is(o, "<<"))
+		{
+			/*
+			 * A small literal count needs no guard, but an integer shifted
+			 * left can leave the range of an int: shift a bigint and cast
+			 * back, so that fails. A value plx cannot type takes the guard.
+			 */
+			const char *lt = (j == 0 && sp[0] == lo) ?
+				go_operand_sqltype(g, os[lo], oe[lo]) : NULL;
+
+			if (j == 0 && sp[0] == lo && go_int_const(g, os[lo], oe[lo]))
+				;				/* shifted as a bigint below */
+			else if (lt && strcmp(lt, "integer") == 0)
+				widen = true;
+			else if (!lt || strcmp(lt, "bigint") != 0)
+			{
+				if (!(lt && strcmp(lt, "smallint") == 0))
+				{
+					guard[j] = '<';
+					nguard++;
+				}
+			}
 		}
 	}
 	/* each guard nests a subquery around the shifts before it */
@@ -1999,10 +2067,10 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 	for (j = 0; j < m; j++)
 		if (go_op_is(&g->t[op[sp[j]]], "<<") || go_op_is(&g->t[op[sp[j]]], ">>"))
 			break;
-	if (j < m && lo == sp[0] && go_int_const(g, os[lo], oe[sp[j]]))
+	if (widen || (j < m && lo == sp[0] && go_int_const(g, os[lo], oe[sp[j]])))
 	{
 		go_sp(out);
-		appendStringInfoChar(out, '(');
+		appendStringInfoString(out, widen ? "((" : "(");
 		go_emit_range(g, os[lo], oe[lo], out);
 		appendStringInfoString(out, ")::bigint");
 	}
@@ -2038,6 +2106,8 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 		else
 			appendBinaryStringInfo(out, o->s, o->len);
 		go_emit_binary(g, os, oe, op, sp[j] + 1, j + 1 < m ? sp[j + 1] : hi, out);
+		if (j == 0 && widen)
+			appendStringInfoString(out, ")::integer");
 		if (andnot)
 			appendStringInfoChar(out, ')');
 	}
@@ -3801,6 +3871,9 @@ go_for(Go *g, int ind)
 		const char *save_brk = g->brk_label;
 		char	   *label = NULL;
 		char	   *lvar = NULL;
+		PlxLocal2  *lv = NULL;		/* the loop variable while the body is emitted */
+		char	   *lv_saved = NULL;
+		bool		lv_added = false;
 		int			bodyend = go_match(g, hb, g->nt);
 		int			bind = ind;
 		int			j;
@@ -3836,6 +3909,24 @@ go_for(Go *g, int ind)
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "BEGIN\n");
 			bind = ind + 1;
+
+			/*
+			 * Type the name as the loop variable for the body, so string(j) and
+			 * the operand typing see an integer, and restore it after the loop.
+			 * A parameter of the same name is left alone.
+			 */
+			if (!plx_is_param(g->cx, g->t[h0].s, g->t[h0].len))
+			{
+				lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
+				if (lv)
+					lv_saved = lv->typ;
+				else
+				{
+					lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
+					lv_added = true;
+				}
+				lv->typ = ltyp;
+			}
 		}
 		else if (semi1 > h0)				/* any other init statement */
 			go_simple(g, bind, semi1);
@@ -3893,6 +3984,10 @@ go_for(Go *g, int ind)
 			plx_indent(&g->cx->out, ind);
 			appendStringInfoString(&g->cx->out, "END;\n");
 		}
+		if (lv_added)
+			plx_local_drop(g->cx, lv);
+		else if (lv)
+			lv->typ = lv_saved;
 		go_eat_semi(g);
 		return;
 	}
