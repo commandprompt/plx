@@ -4145,6 +4145,7 @@ typedef struct
 				dq,				/* inside "..." */
 				estr,			/* the '...' is an E'...' */
 				prefixed,		/* the '...' is U&'..', B'..', N'..', type'..' */
+				bs_end,			/* the E'...' run so far ends in an unpaired backslash */
 				line_cmt;		/* inside a -- comment */
 	int			block_cmt;		/* depth of nested slash-star comments */
 	const char *dollar;			/* inside $tag$...$tag$: the tag, else NULL */
@@ -4158,18 +4159,25 @@ typedef struct
 static void
 tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 {
-	int			i;
+	int			i = 0;
 
-	for (i = 0; i < len; i++)
+	/* a backslash that ended the previous run escapes the first character */
+	if (st->bs_end && len > 0)
+		appendStringInfoChar(buf, s[i++]);
+	st->bs_end = false;
+	for (; i < len; i++)
 	{
 		char		c = s[i];
 
 		if (st->sq)
 		{
-			if (st->estr && c == '\\' && i + 1 < len)
+			if (st->estr && c == '\\')
 			{
 				appendStringInfoChar(buf, c);
-				appendStringInfoChar(buf, s[++i]);
+				if (i + 1 < len)
+					appendStringInfoChar(buf, s[++i]);
+				else
+					st->bs_end = true;
 				continue;
 			}
 			if (c == '\'')
@@ -4393,6 +4401,13 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");
+		/*
+		 * PostgreSQL would read the quote written after the backslash as an
+		 * escaped quote, and the string would not end where plx thinks it does.
+		 */
+		if (st.sq && st.bs_end)
+			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
+					"in an E'...' SQL string; write a literal backslash as two backslashes");
 		if (!st.sq)
 			tpl_check_joined(cx, tk, segs, n, i);
 		skip = tpl_put_value(&st, out,
@@ -4500,6 +4515,13 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");
+		/*
+		 * PostgreSQL would read the quote written after the backslash as an
+		 * escaped quote, and the string would not end where plx thinks it does.
+		 */
+		if (st.sq && st.bs_end)
+			plx_err(cx, tk->line, "an interpolation cannot follow an unpaired backslash "
+					"in an E'...' SQL string; write a literal backslash as two backslashes");
 		if (kind == TPL_LITERAL && st.sq)
 		{
 			/* '#{x}' exactly: the quoted value replaces the literal */

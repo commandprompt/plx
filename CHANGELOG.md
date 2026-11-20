@@ -65,7 +65,9 @@ Each entry names the dialects it affects.
   an interpolation inside a longer literal concatenates the value. An
   interpolation inside a quoted identifier, a SQL comment, a dollar-quoted
   string or a prefixed literal (`U&'...'`, `N'...'`, `text'...'`) is
-  rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`). The
+  rejected, and so is one joined to a SQL name or `$` sign (`v#{x}`), and one
+  right after an unpaired backslash in an `E'...'` string (`E'a\#{x}'`), where
+  PostgreSQL would read the quote plx writes next as an escaped quote. The
   lowering reads the SQL string as PostgreSQL does, so a quote inside a
   comment or a dollar-quoted string does not open a string. A literal that
   contains a backslash is written as `E'...'` in dynamic SQL too, so the SQL

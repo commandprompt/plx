@@ -414,3 +414,61 @@ SELECT fs_i_value(2, 'abcdef');
  bcdef2
 (1 row)
 
+-- [review of PR 24 fixes]: an E'...' string whose text ends in an unpaired
+-- backslash right before an interpolation is rejected. PostgreSQL would read
+-- the quote plx writes after the backslash as an escaped quote, so plx and
+-- PostgreSQL would disagree about where the string ends, and a later
+-- literal() or ident() value could run as SQL.
+CREATE TABLE fs_secret (s text);
+INSERT INTO fs_secret VALUES ('TOPSECRET');
+CREATE FUNCTION fs_e_lit(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'a\\#{x}' AS v, #{literal(y)} AS w")
+return r.v
+$f$;
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+DETAIL:  at plxruby source line 2
+CREATE FUNCTION fs_e_ident(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'a\\#{x}' AS v, 1 AS #{ident(y)}")
+return r.v
+$f$;
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+DETAIL:  at plxruby source line 2
+CREATE FUNCTION fs_e_js(x text, y text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT E'a\\${x}' AS v, ${literal(y)} AS w`);
+return r.v;
+$f$;
+ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+DETAIL:  at plxjs source line 2
+CREATE FUNCTION fs_e_bind(x text, y text) RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT E'a\\${x}' AS v, $1 AS w`, y);
+return r.v;
+$f$;
+ERROR:  plxjs: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+DETAIL:  at plxjs source line 2
+CREATE FUNCTION fs_e_static(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'a\\#{x}' AS v")
+return r.v
+$f$;
+ERROR:  plxruby: an interpolation cannot follow an unpaired backslash in an E'...' SQL string; write a literal backslash as two backslashes
+DETAIL:  at plxruby source line 2
+-- a doubled backslash is one literal backslash, and the value follows it
+CREATE FUNCTION fs_e_ok(x text, y text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'a\\\\#{x}' || #{literal(y)} AS v")
+return r.v
+$f$;
+SELECT fs_e_ok('b', ') || (SELECT s FROM fs_secret) || (');
+                fs_e_ok                 
+----------------------------------------
+ a\b) || (SELECT s FROM fs_secret) || (
+(1 row)
+
+CREATE FUNCTION fs_e_ok_static(x text) RETURNS text LANGUAGE plxruby AS $f$
+r = fetch_one("SELECT E'a\\\\#{x}' AS v")
+return r.v
+$f$;
+SELECT fs_e_ok_static('b');
+ fs_e_ok_static 
+----------------
+ a\b
+(1 row)
+
