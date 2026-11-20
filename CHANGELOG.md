@@ -513,6 +513,19 @@ PUBLIC has USAGE by default).
   `CONVERT`, `IIF`, `CHARINDEX` or `RAISE_APPLICATION_ERROR` calls with no
   comma. These now transpile in linear time, and `statement_timeout` can
   cancel the transpile.
+- **Quadratic, uninterruptible transpile time and a crash in plxgo string
+  `+`.** To decide whether a `+` joins strings, plxgo typed each bracketed
+  operand again at every level of nesting. A body of nested `("x" + (...))`
+  therefore took quadratic time and memory: 6,400 levels took about 40
+  seconds, and 40,000 levels used 12 GB and ignored both `pg_cancel_backend`
+  and `pg_terminate_backend`. A string `+` inside the arguments of nested
+  calls, such as `strings.ReplaceAll(x, "a", "a" + strings.ReplaceAll(...))`,
+  was emitted twice per level, so the time doubled with each level. A chain of
+  200,000 unary signs (`- - - 1`) overflowed the stack and crashed the
+  backend. plxgo now types each bracketed expression once, stops at the
+  nesting limit before it does the deeper work, types unary signs without
+  recursion, and checks for interrupts while it lexes, types and emits, so
+  `statement_timeout` can cancel the transpile.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.

@@ -656,3 +656,43 @@ CREATE FUNCTION fgmake_fill(n int) RETURNS int[] LANGUAGE plxgo AS $$
 	return s
 $$;
 SELECT fgmake_fill(3) AS go_0_7_0;
+
+-- PR 24 review [0]: typing nested string concatenation takes linear time,
+-- stops at the nesting limit, and does not crash. fg_timed(q, lim) runs q
+-- through fg_err and says whether it finished within lim. Before the fix, the
+-- 6400-level input took about 40 s and ignored statement_timeout and
+-- pg_cancel_backend, and a chain of 200000 unary signs crashed the backend.
+CREATE FUNCTION fg_timed(q text, lim interval) RETURNS text LANGUAGE plpgsql AS $h$
+DECLARE
+  t0 timestamptz := clock_timestamp();
+  r text;
+BEGIN
+  r := fg_err(q);
+  RETURN CASE WHEN clock_timestamp() - t0 < lim THEN 'in time' ELSE 'too slow' END
+    || ' / ' || r;
+END $h$;
+SET statement_timeout = '60s';
+-- a long flat run inside nesting below the limit compiles, quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_wide() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 200) || repeat('"x" + ', 3000)
+  || '"a"' || repeat(')', 200) || ')'), '5s') AS go_wide;
+SELECT fgdos_wide() AS go_3201;
+-- the reviewer's input is rejected at the nesting limit, quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_nest() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 6400) || '"a"'
+  || repeat(')', 6400) || ')'), '5s') AS go_nest_6400;
+-- a body of about 360 KB nested 40000 deep is rejected just as quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_nest() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 40000) || '"a"'
+  || repeat(')', 40000) || ')'), '5s') AS go_nest_40000;
+-- a long chain of unary signs is typed without recursion
+SELECT fg_timed('CREATE FUNCTION fgdos_unary() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('x := 1 + ' || repeat('- ', 200000) || '1' || chr(10)
+  || 'return x'), '5s') AS go_unary;
+-- a string + inside the arguments of a nested call is emitted once, not
+-- twice per level (24 levels took about 16 s before the fix)
+SELECT fg_timed('CREATE FUNCTION fgdos_args(x text) RETURNS text LANGUAGE plxgo AS '
+  || quote_literal('return ' || repeat('strings.ReplaceAll(x, "a", "a" + ', 24) || 'x'
+  || repeat(')', 24)), '5s') AS go_args;
+SELECT fgdos_args('b') AS go_b;
+RESET statement_timeout;

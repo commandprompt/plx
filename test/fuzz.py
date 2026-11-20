@@ -113,6 +113,7 @@ SEEDS = {
   "a := []int{1, 2, 3}\nreturn a[0] + a[2]",
   "fmt.Println(\"hi\", 1)\npanic(\"bad\")",
   "a, b := 1, 2\na, b = b, a\nreturn a",
+  "s := \"a\" + (\"b\" + \"c\")\ns += strconv.Itoa(3)\nreturn len(s + fmt.Sprintf(\"%d\", 1))",
  ],
 }
 SPECIALS = [b'"', b"'", b"`", b"#{", b"${", b"{$", b"*/", b"/*", b"\\", b"(", b")",
@@ -220,6 +221,11 @@ def pathological():
      ("plxgo", "switch {\n" + "case 1==1:\n\tx := 1\n" * 3000 + "}"),
      ("plxgo", "s := []int{" + "1, " * 50000 + "2}"),
      ("plxgo", "for i := 0; i < 3; " + "i++" * 3000 + " {}"),
+     # nested string + must type in linear time (PR 24 review [0])
+     ("plxgo", "return len(" + '("x" + ' * 40000 + '"a"' + ")" * 40000 + ")"),
+     ("plxgo", "x := 1 + " + "- " * 200000 + "1\nreturn x"),
+     ("plxgo", "return " + 'strings.ReplaceAll(x, "a", "a" + ' * 40 + "x" +
+      ")" * 40),
      # crash regressions (all must error cleanly, never crash the backend)
      ("plxjs", "return call(`p`, " + ", ".join(str(i) for i in range(50)) + ");"),
      ("plxphp", "execute($s, " + ", ".join("$b" for _ in range(40)) + ");"),

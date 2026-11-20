@@ -76,6 +76,23 @@ typedef struct
 	 * decimal number), or -1 for a slice or any other type.
 	 */
 	int			arrlen;
+	/*
+	 * mt[i] is the index of the bracket that closes the opener at i, or -1.
+	 * go_lex builds it once, so go_match takes constant time.
+	 */
+	int		   *mt;
+	/*
+	 * The operand typing pass stores the kind of each bracketed expression in
+	 * kmemo[], keyed by the index of its '('. An entry counts only while
+	 * kgen[] equals gen. gen moves on at each new top-level expression,
+	 * because the kind of a name can change between statements. edepth
+	 * counts the levels of expression emission and typing, so 0 means a
+	 * top-level expression.
+	 */
+	char	   *kmemo;
+	int		   *kgen;
+	int			gen;
+	int			edepth;
 } Go;
 
 static void go_stmt(Go *g, int ind);
@@ -268,6 +285,7 @@ go_lex(Go *g, const char *body)
 
 	while (p < end)
 	{
+		CHECK_FOR_INTERRUPTS();
 		if (*p == '\n')
 		{
 			if (n > 0 && go_asi_kind(&t[n - 1]))		/* ASI */
@@ -493,6 +511,29 @@ go_lex(Go *g, const char *body)
 	g->t = t;
 	g->nt = n;
 	g->pos = 0;
+
+	/* the bracket match table: one pass with a stack of open brackets */
+	{
+		int		   *stack = palloc(sizeof(int) * n);
+		int			sp = 0,
+					i;
+
+		g->mt = palloc(sizeof(int) * n);
+		for (i = 0; i < n; i++)
+		{
+			GoKind		k = t[i].kind;
+
+			g->mt[i] = -1;
+			if (k == GO_LP || k == GO_LBRACE || k == GO_LBRACK)
+				stack[sp++] = i;
+			else if ((k == GO_RP || k == GO_RBRACE || k == GO_RBRACK) && sp > 0)
+				g->mt[stack[--sp]] = i;
+		}
+		pfree(stack);
+		g->kmemo = palloc0(n);
+		g->kgen = palloc0(sizeof(int) * n);
+		g->gen = 1;
+	}
 #undef GOPUSH
 #undef GOALPHA
 #undef GODIGIT
@@ -1121,13 +1162,23 @@ go_infer_type(Go *g, int a, int b)
 	return NULL;
 }
 
-/* index of the ')' / '}' / ']' matching the opener at idx, within [.,limit) */
+/*
+ * index of the ')' / '}' / ']' matching the opener at idx, within [.,limit).
+ * Brackets of any kind count alike. For an opener, the table go_lex built
+ * gives the same answer as the scan below, in constant time.
+ */
 static int
 go_match(Go *g, int idx, int limit)
 {
 	int			depth = 0,
 				i;
+	GoKind		k0;
 
+	if (idx >= limit)
+		return -1;
+	k0 = g->t[idx].kind;
+	if (k0 == GO_LP || k0 == GO_LBRACE || k0 == GO_LBRACK)
+		return (g->mt[idx] >= 0 && g->mt[idx] < limit) ? g->mt[idx] : -1;
 	for (i = idx; i < limit; i++)
 	{
 		GoKind		k = g->t[i].kind;
@@ -1707,6 +1758,7 @@ go_emit_tokens(Go *g, int a, int b, StringInfo out)
 		GoTok	   *tk = &g->t[i];
 		int			ni;
 
+		CHECK_FOR_INTERRUPTS();
 		/* []T{ ... } array literal -> ARRAY[ ... ] */
 		if (tk->kind == GO_LBRACK && i + 1 < b && g->t[i + 1].kind == GO_RBRACK &&
 			i + 2 < b && g->t[i + 2].kind == GO_WORD &&
@@ -1968,6 +2020,28 @@ go_name_kind(Go *g, const GoTok *tk)
 }
 
 /*
+ * Guard for each level of recursion in the operand typing pass. It shares the
+ * emitter's depth count, so typing stops at the same nesting limit as
+ * emission, before it does the work for the deeper levels.
+ */
+static void
+go_kind_enter(Go *g)
+{
+	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
+	if (++g->cx->depth > PLX_MAX_DEPTH)
+		go_err(g, "expression nested too deeply");
+	g->edepth++;
+}
+
+static void
+go_kind_leave(Go *g)
+{
+	g->edepth--;
+	g->cx->depth--;
+}
+
+/*
  * The kind of a single operand [a,b): 's' when plx can see it is a string, 'n'
  * when it can see it is a number or a bool, and 0 when it cannot tell (a row
  * field, an unmapped call, an expression).
@@ -1976,12 +2050,20 @@ static char
 go_operand_type(Go *g, int a, int b)
 {
 	GoTok	   *tk;
+	bool		signed_op = false;
 
+	/* unary signs: a signed operand is a number or nothing plx can type */
+	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
+	{
+		CHECK_FOR_INTERRUPTS();
+		signed_op = true;
+		a++;
+	}
+	if (signed_op)
+		return go_operand_type(g, a, b) == 'n' ? 'n' : 0;
 	if (b <= a)
 		return 0;
 	tk = &g->t[a];
-	if (go_op_is(tk, "-") || go_op_is(tk, "+"))		/* unary sign */
-		return go_operand_type(g, a + 1, b) == 'n' ? 'n' : 0;
 	if (b - a == 1)
 	{
 		if (tk->kind == GO_STR)				/* a rune literal is a number */
@@ -1992,9 +2074,18 @@ go_operand_type(Go *g, int a, int b)
 			return go_name_kind(g, tk);
 		return 0;
 	}
-	/* a bracketed expression */
+	/* a bracketed expression, typed once per top-level expression */
 	if (tk->kind == GO_LP && go_match(g, a, b) == b - 1)
-		return go_expr_kind(g, a + 1, b - 1);
+	{
+		if (g->kgen[a] != g->gen)
+		{
+			go_kind_enter(g);
+			g->kmemo[a] = go_expr_kind(g, a + 1, b - 1);
+			g->kgen[a] = g->gen;
+			go_kind_leave(g);
+		}
+		return g->kmemo[a];
+	}
 	/* an element s[i] of a slice local */
 	if (tk->kind == GO_WORD && g->t[a + 1].kind == GO_LBRACK &&
 		go_match(g, a + 1, b) == b - 1)
@@ -2043,8 +2134,11 @@ go_operand_type(Go *g, int a, int b)
 
 /*
  * Split [a,b) at its top-level binary operators: ops[] receives their token
- * indexes. Returns the count, or -1 when the range holds a top-level comma or
- * an operator that is not a Go binary operator (such as : in a slice).
+ * indexes, or with ops NULL they are only counted. Returns the count, or -1
+ * when the range holds a top-level comma or an operator that is not a Go
+ * binary operator (such as : in a slice). A bracketed group that closes
+ * inside the range is skipped in one step, so the cost is the number of
+ * top-level tokens, not the length of the range.
  */
 static int
 go_split_binops(Go *g, int a, int b, int *ops)
@@ -2057,7 +2151,11 @@ go_split_binops(Go *g, int a, int b, int *ops)
 	{
 		GoKind		k = g->t[i].kind;
 
-		if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
+		CHECK_FOR_INTERRUPTS();
+		if (depth == 0 && (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE) &&
+			g->mt[i] >= 0 && g->mt[i] < b)
+			i = g->mt[i];		/* the closer leaves depth at 0 */
+		else if (k == GO_LP || k == GO_LBRACK || k == GO_LBRACE)
 			depth++;
 		else if (k == GO_RP || k == GO_RBRACK || k == GO_RBRACE)
 			depth--;
@@ -2067,7 +2165,9 @@ go_split_binops(Go *g, int a, int b, int *ops)
 		{
 			if (go_binop_prec(&g->t[i]) == 0)
 				return -1;
-			ops[n++] = i;
+			if (ops)
+				ops[n] = i;
+			n++;
 		}
 	}
 	return n;
@@ -2125,18 +2225,19 @@ go_expr_kind(Go *g, int a, int b)
 
 	if (b <= a)
 		return 0;
-	ops = palloc(sizeof(int) * (b - a));
+	/* a new top-level expression starts a new generation of Go.kmemo */
+	if (g->edepth == 0)
+		g->gen++;
+	n = go_split_binops(g, a, b, NULL);
+	if (n <= 0)
+		return n == 0 ? go_operand_type(g, a, b) : 0;
+	ops = palloc(sizeof(int) * n);
 	n = go_split_binops(g, a, b, ops);
-	if (n == 0)
-		r = go_operand_type(g, a, b);
-	else if (n > 0)
-	{
-		for (k = 0; k < n; k++)
-			if (!go_op_is(&g->t[ops[k]], "+"))
-				break;
-		if (k == n)
-			r = go_plus_run_kind(g, a, b, ops, 0, n);
-	}
+	for (k = 0; k < n; k++)
+		if (!go_op_is(&g->t[ops[k]], "+"))
+			break;
+	if (k == n)
+		r = go_plus_run_kind(g, a, b, ops, 0, n);
 	pfree(ops);
 	return r;
 }
@@ -2149,7 +2250,10 @@ go_expr_kind(Go *g, int a, int b)
  * ((x) || (y)) || (z), left to right as Go evaluates it; every other piece is
  * emitted in brackets as before. A top-level comma list is handled element by
  * element. Returns false, emitting nothing, when no run is all strings, so
- * the caller emits the range as it always did.
+ * the caller emits the range as it always did. With out NULL it only says
+ * whether it would emit anything, and emits nothing: that costs typing only,
+ * so a probe of each element of a nested comma list does not emit the
+ * element twice per level.
  */
 static bool
 go_emit_strcat(Go *g, int a, int b, StringInfo out)
@@ -2165,8 +2269,7 @@ go_emit_strcat(Go *g, int a, int b, StringInfo out)
 
 	if (b <= a)
 		return false;
-	ops = palloc(sizeof(int) * (b - a));
-	n = go_split_binops(g, a, b, ops);
+	n = go_split_binops(g, a, b, NULL);
 	if (n < 0)
 	{
 		/* a comma list: lower its elements one by one, if any needs it */
@@ -2174,15 +2277,39 @@ go_emit_strcat(Go *g, int a, int b, StringInfo out)
 					s = a,
 					i,
 					ne = 0;
-		int		   *es = palloc(sizeof(int) * (b - a + 1)),
-				   *ee = palloc(sizeof(int) * (b - a + 1));
+		int		   *es,
+				   *ee;
 
-		pfree(ops);
+		/* count the top-level commas first, to size es[] and ee[] */
+		for (i = a; i < b; i++)
+		{
+			GoKind		kk = g->t[i].kind;
+
+			CHECK_FOR_INTERRUPTS();
+			if (depth == 0 && (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE) &&
+				g->mt[i] >= 0 && g->mt[i] < b)
+				i = g->mt[i];	/* skip a closed group in one step */
+			else if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+				depth++;
+			else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
+				depth--;
+			else if (depth == 0 && kk == GO_COMMA)
+				ne++;
+		}
+		es = palloc(sizeof(int) * (ne + 1));
+		ee = palloc(sizeof(int) * (ne + 1));
+		ne = 0;
+		depth = 0;
 		for (i = a; i <= b; i++)
 		{
 			GoKind		kk = (i < b) ? g->t[i].kind : GO_COMMA;
 
-			if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
+			CHECK_FOR_INTERRUPTS();
+			if (depth == 0 && i < b &&
+				(kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE) &&
+				g->mt[i] >= 0 && g->mt[i] < b)
+				i = g->mt[i];	/* skip a closed group in one step */
+			else if (kk == GO_LP || kk == GO_LBRACK || kk == GO_LBRACE)
 				depth++;
 			else if (kk == GO_RP || kk == GO_RBRACK || kk == GO_RBRACE)
 				depth--;
@@ -2197,15 +2324,9 @@ go_emit_strcat(Go *g, int a, int b, StringInfo out)
 		if (ne < 2)
 			return false;			/* no comma: an operator plx does not model */
 		for (k = 0; k < ne && !any; k++)
-		{
-			StringInfoData probe;
-
-			initStringInfo(&probe);
-			any = go_emit_strcat(g, es[k], ee[k], &probe);
-			pfree(probe.data);
-		}
-		if (!any)
-			return false;
+			any = go_emit_strcat(g, es[k], ee[k], NULL);
+		if (!any || out == NULL)
+			return any;
 		for (k = 0; k < ne; k++)
 		{
 			if (k > 0)
@@ -2215,10 +2336,9 @@ go_emit_strcat(Go *g, int a, int b, StringInfo out)
 		return true;
 	}
 	if (n == 0)
-	{
-		pfree(ops);
 		return false;
-	}
+	ops = palloc(sizeof(int) * n);
+	n = go_split_binops(g, a, b, ops);
 
 	/* cut at the operators looser than + */
 	cut = palloc(sizeof(int) * (n + 2));
@@ -2247,12 +2367,12 @@ go_emit_strcat(Go *g, int a, int b, StringInfo out)
 		if (j == oh && go_plus_run_kind(g, s, e, ops, ol, oh) == 's')
 			isstr[k] = any = true;
 	}
-	if (!any)
+	if (!any || out == NULL)
 	{
 		pfree(ops);
 		pfree(cut);
 		pfree(isstr);
-		return false;
+		return any;
 	}
 
 	for (k = 0; k < ncut; k++)
@@ -2326,9 +2446,14 @@ static void
 go_emit_range(Go *g, int a, int b, StringInfo out)
 {
 	check_stack_depth();
+	CHECK_FOR_INTERRUPTS();
+	if (g->edepth == 0)
+		g->gen++;				/* a new top-level expression: see Go.kmemo */
 	if (++g->cx->depth > PLX_MAX_DEPTH)
 		go_err(g, "expression nested too deeply");
+	g->edepth++;
 	go_emit_range_inner(g, a, b, out);
+	g->edepth--;
 	g->cx->depth--;
 }
 
