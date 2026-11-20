@@ -363,7 +363,10 @@ Each entry names the dialects it affects.
   such as `$2.50`. A `boolean` has its own text forms: a cast to text gives
   `true` or `false`, and `CONCAT` gives `t` or `f`. So
   `CONCAT('a', CAST(1 AS bit))` now gives `at`; before, and in SQL Server, it
-  gave `a1`.
+  gave `a1`. `CAST` to `MONEY` now rejects a string with a currency sign:
+  `CAST('$5' AS money)` fails with `invalid input syntax for type numeric`.
+  Before, it gave `$5.00`, and SQL Server gives 5.00. Remove the sign before
+  the cast.
 
 #### plxplsql
 
