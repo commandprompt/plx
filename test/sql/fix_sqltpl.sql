@@ -280,3 +280,16 @@ r = fetch_one("SELECT E'a\\\\#{x}' AS v")
 return r.v
 $f$;
 SELECT fs_e_ok_static('b');
+-- [review of PR 24 fixes]: in static SQL an interpolated expression is one
+-- value, as it is in dynamic SQL. 2.0.1 wrote it without parentheses, so
+-- the SQL around it could split it (a + b * 10).
+CREATE FUNCTION fs_p_js(a int, b int) RETURNS int LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT ${a + b} * 10 AS v`);
+return r.v;
+$f$;
+SELECT fs_p_js(1, 2);
+CREATE FUNCTION fs_p_py(a boolean, b boolean) RETURNS boolean LANGUAGE plxpython3 AS $f$
+r = fetch_one(f"SELECT {a or b} AND false AS v")
+return r.v
+$f$;
+SELECT fs_p_py(true, false);

@@ -79,6 +79,14 @@ Each entry names the dialects it affects.
   held. In dynamic SQL the statement fails when it runs, with
   `syntax error at or near "$n"`. A value interpolated to build SQL text on
   purpose is now bound as data. See doc/DYNAMIC-SQL.md.
+- **An expression interpolated in static SQL is one value** (plxruby,
+  plxphp, plxjs, plxts, plxpython3). In a static call, an expression interpolated outside quotes is now written in
+  parentheses, so the SQL around it cannot split it, as in dynamic SQL, which
+  binds the whole value. 2.0.1 wrote it bare: `SELECT ${a + b} * 10` (plxjs,
+  and `#{a + b} * 10` in plxruby) ran as `SELECT a + b * 10` and gave 21 for
+  `a = 1, b = 2`. It now runs as `SELECT (a + b) * 10` and gives 30. In the
+  same way, plxpython3 `f"SELECT {a or b} AND false"` gave true for
+  `a = true, b = false` and now gives false.
 - **`finally`/`ensure` now runs on `return`, `break` and `continue`** (plxjs,
   plxts, plxphp, plxruby, plxpython3), as in the source languages. Before, a
   `return` inside `try` left the function without running `finally`. The

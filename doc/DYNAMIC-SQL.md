@@ -119,4 +119,8 @@ When a function is created or replaced under 3.0:
 - a value interpolated to build SQL text on purpose (`ORDER BY #{col} DESC`
   where `col` holds `name`) is now bound as data; write `#{raw(col)}` (or
   `#{ident(col)}` when it is a column name);
-- `'#{x}'` now compares against the value of `x`, not the string `'x'`.
+- `'#{x}'` now compares against the value of `x`, not the string `'x'`;
+- an expression interpolated outside quotes in a static call is one value:
+  `SELECT #{a + b} * 10` runs as `SELECT (a + b) * 10`. 2.x wrote
+  `SELECT a + b * 10`, so a function that relied on the SQL splitting the
+  expression computes a different result once re-created.
