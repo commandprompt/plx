@@ -715,6 +715,11 @@ not here.
   swapped values, mispaired rows and reversed results passed. A value of `-`
   or `+`, spaces inside a value or message, and the position of an empty row
   now count too. This affects the plxruby and plxcobol corpus cases.
+- CI now runs the Ruby corpus on every PostgreSQL version it tests, with the
+  new `make corpuscheck`. Before, nothing ran the corpus automatically, so a
+  change that broke a corpus case could merge unnoticed. `test/run_corpus.py`
+  now stops with a clear message when it cannot find psql, instead of a
+  Python traceback.
 
 ### Changed
 
