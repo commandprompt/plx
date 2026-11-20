@@ -159,3 +159,57 @@ d = fetch_one("SELECT obj_description('fs_victim'::regclass) AS d")
 return d.d
 $f$;
 SELECT fs_c_cr('after a carriage return');
+
+-- [3]: typed literals (text'...') and N'...' literals are ordinary strings to
+-- PostgreSQL, so they too are written as E'...' when they hold a backslash.
+-- With standard_conforming_strings off, the backslash must not swallow the
+-- closing quote and run the text after it as SQL.
+CREATE FUNCTION fs_t_typed() RETURNS text LANGUAGE plxplsql AS $f$
+BEGIN
+  RETURN text'C:\' || '
+|| 42::text; --';
+END;
+$f$;
+CREATE FUNCTION fs_t_nchar() RETURNS text LANGUAGE plxplsql AS $f$
+BEGIN
+  RETURN N'C:\' || '
+|| 42::text; --';
+END;
+$f$;
+CREATE FUNCTION fs_t_varchar() RETURNS text LANGUAGE plxplsql AS $f$
+BEGIN
+  RETURN varchar'C:\' || '
+|| 42::text; --';
+END;
+$f$;
+CREATE FUNCTION fs_t_static() RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT text'C:\\' || '
+|| 42::text; --' AS v`);
+return r.v;
+$f$;
+CREATE FUNCTION fs_t_dyn() RETURNS text LANGUAGE plxjs AS $f$
+let r = fetch_one(`SELECT text'C:\\' || $1 AS v`, '!');
+return r.v;
+$f$;
+-- plpgsql prepares a statement at its first run, so the first calls are
+-- the ones made with the setting off
+CALL fs_scs_off();
+SELECT fs_t_typed() = E'C:\\\n|| 42::text; --' AS typed_ok,
+       fs_t_nchar() = E'C:\\\n|| 42::text; --' AS nchar_ok,
+       fs_t_varchar() = E'C:\\\n|| 42::text; --' AS varchar_ok,
+       fs_t_static() = E'C:\\\n|| 42::text; --' AS static_ok;
+SELECT fs_t_dyn();
+RESET standard_conforming_strings;
+SELECT fs_t_typed() = E'C:\\\n|| 42::text; --' AS typed_ok,
+       fs_t_nchar() = E'C:\\\n|| 42::text; --' AS nchar_ok,
+       fs_t_varchar() = E'C:\\\n|| 42::text; --' AS varchar_ok,
+       fs_t_static() = E'C:\\\n|| 42::text; --' AS static_ok;
+SELECT fs_t_dyn();
+-- [3]: a -- comment ends at a carriage return, so a literal after one is
+-- rewritten too
+CREATE FUNCTION fs_t_cr() RETURNS text LANGUAGE plxplsql
+AS E'BEGIN\n  -- note\r  RETURN ''C:\\'' || ''\n|| 42::text; --'';\nEND;\n';
+CALL fs_scs_off();
+SELECT fs_t_cr() = E'C:\\\n|| 42::text; --' AS cr_ok;
+RESET standard_conforming_strings;
+SELECT fs_t_cr() = E'C:\\\n|| 42::text; --' AS cr_ok;

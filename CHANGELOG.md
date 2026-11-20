@@ -503,6 +503,10 @@ PUBLIC has USAGE by default).
   containing a backslash is an `E'...'` literal with the backslash doubled,
   which reads the same under either setting and, with it on, has the value the
   original had. This covers every dialect, and SQL passed through verbatim.
+  A typed literal (`text'C:\'`) becomes `text E'C:\\'`, and an `N'...'`
+  literal becomes `NCHAR E'...'`, the form PostgreSQL reads `N'...'` as. A
+  `--` comment ends at a carriage return as well as at a newline, as in
+  PostgreSQL, so a literal after one is rewritten too.
 - **Quadratic, uninterruptible transpile time.** Local-variable lookup was a
   linear scan, so a body with 40,000 distinct variables took 47 seconds; the
   plxpython3 lexer rescanned every run of blank lines from each newline, so

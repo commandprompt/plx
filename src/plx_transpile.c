@@ -5818,8 +5818,11 @@ sql_ident_char(char c)
  * covers every dialect's literal emitters, and SQL the author passed through.
  *
  * A small SQL lexer: skips comments (nested block comments too), quoted
- * identifiers, dollar-quoted strings, E'' strings (already safe) and U&''
- * strings (where a backslash introduces a Unicode escape).
+ * identifiers, dollar-quoted strings, E'' strings (already safe), U&''
+ * strings (where a backslash introduces a Unicode escape) and B''/X'' bit
+ * strings (where a backslash is no escape). A typed literal (text'..') and an
+ * N'..' literal are ordinary strings to PostgreSQL: they become text E'..'
+ * and NCHAR E'..' (the scanner reads N'..' as the keyword NCHAR and a string).
  */
 static char *
 escape_backslash_literals(const char *s)
@@ -5836,8 +5839,10 @@ escape_backslash_literals(const char *s)
 
 		if (p[0] == '-' && p[1] == '-')
 		{
-			q = strchr(p, '\n');
-			q = q ? q + 1 : p + strlen(p);
+			/* as in PostgreSQL, a carriage return also ends the comment */
+			q = p + strcspn(p, "\n\r");
+			if (*q)
+				q++;
 			appendBinaryStringInfo(&o, p, q - p);
 			p = q;
 			continue;
@@ -5906,9 +5911,15 @@ escape_backslash_literals(const char *s)
 			bool		ustr = p - 1 > s && p[-1] == '&' &&
 				(p[-2] == 'U' || p[-2] == 'u') &&
 				(p - 2 == s || !sql_ident_char(p[-3]));
-			/* B'..', X'..', N'..' and the like: leave other prefixes alone */
-			bool		prefixed = !estr && !ustr && p > s && sql_ident_char(p[-1]);
+			const char *w = p;		/* the name just before the quote, if any */
+			bool		bits,
+						nchar;
 			bool		has_bs = false;
+
+			while (w > s && sql_ident_char(w[-1]))
+				w--;
+			bits = p - w == 1 && strchr("bBxX", w[0]) != NULL;
+			nchar = p - w == 1 && (w[0] == 'n' || w[0] == 'N');
 
 			q = p + 1;
 			while (*q)
@@ -5926,10 +5937,17 @@ escape_backslash_literals(const char *s)
 					q++;
 				}
 			}
-			if (has_bs && !estr && !ustr && !prefixed)
+			if (has_bs && !estr && !ustr && !bits)
 			{
 				const char *c;
 
+				if (nchar)
+				{
+					o.len--;	/* the N already copied */
+					appendStringInfoString(&o, "NCHAR ");
+				}
+				else if (p > w)
+					appendStringInfoChar(&o, ' ');	/* text'..' -> text E'..' */
 				appendStringInfoString(&o, "E'");
 				for (c = p + 1; c < q; c++)
 				{
