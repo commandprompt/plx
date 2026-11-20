@@ -353,3 +353,42 @@ perform(`UPDATE fs_r2t10 SET ${ident(x)} = 0 WHERE id = 1`);
 $$;
 SELECT fs_r2t10_ident('balance');
 SELECT balance, x FROM fs_r2t10;  -- 0 1
+
+-- R3-T20 (PR 24 review r3): the CAST lowering of a typed literal missed
+-- three forms. A literal that is only the interpolation, TYPE '#{x}',
+-- became TYPE (x), a syntax error for interval, int or timestamp. It is now
+-- CAST((x)::text AS TYPE). char '...' became CAST(... AS char), which is
+-- char(1) and cut the value to one character; a char literal is unbounded
+-- bpchar. An interval field after the literal, interval '#{n}' hour, has no
+-- CAST equivalent (PostgreSQL applies the field only to a bare literal's
+-- input), so it is rejected.
+SET datestyle = 'ISO, MDY';
+SET intervalstyle = postgres;
+CREATE FUNCTION fs_r3t20_rb(d text, a int, ts text) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("SELECT (interval '#{d}')::text || ' ' || (int '#{a}' + 1) || ' ' || timestamp '#{ts}' || ' ' || char 'ab#{a}' || '|' || character 'x#{a}yz' || '|' || char '#{a}' AS v")
+return r.v
+$$;
+SELECT fs_r3t20_rb('5 days', 41, '2020-01-02 03:04:05') AS r;
+-- 5 days 42 2020-01-02 03:04:05 ab41|x41yz|41
+CREATE FUNCTION fs_r3t20_js(d text, a int, ts text, k int) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT (interval '${d}')::text || ' ' || (int '${a}' + 1) || ' ' || timestamp '${ts}' || ' ' || char 'ab${a}' || '|' || char '${a}' AS v LIMIT $1`, k);
+return r.v;
+$$;
+SELECT fs_r3t20_js('5 days', 41, '2020-01-02 03:04:05', 1) AS r;
+-- 5 days 42 2020-01-02 03:04:05 ab41|41
+CREATE FUNCTION fs_r3t20_field(a int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("SELECT (interval '#{a}' hour)::text AS v")
+return r.v
+$$;
+CREATE FUNCTION fs_r3t20_field2(a int, k int) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT (interval '${a} days' DAY)::text AS v LIMIT $1`, k);
+return r.v;
+$$;
+-- the unit inside the literal works
+CREATE FUNCTION fs_r3t20_unit(a int) RETURNS text LANGUAGE plxruby AS $$
+r = fetch_one("SELECT (interval '#{a} hours')::text AS v")
+return r.v
+$$;
+SELECT fs_r3t20_unit(41) AS r;  -- 41:00:00
+RESET datestyle;
+RESET intervalstyle;

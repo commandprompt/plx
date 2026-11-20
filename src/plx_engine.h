@@ -71,6 +71,7 @@ typedef struct PlxLocal2
 	char	   *typ;			/* plpgsql type text, or NULL if RECORD */
 	bool		is_record;
 	bool		is_const;		/* CONSTANT declaration */
+	bool		untyped;		/* plxgo: a constant declared without a type */
 	char	   *init;			/* folded initializer text, or NULL */
 	struct PlxLocal2 *next;
 } PlxLocal2;

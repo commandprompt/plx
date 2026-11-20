@@ -98,6 +98,7 @@ DECLARE
 	e int;
 	typ pg_catalog.oid;
 	changed boolean;
+	probe pg_catalog.oid;
 BEGIN
 	WITH RECURSIVE plx_sb_types(oid) AS (
 		SELECT 'plx_strbuild'::pg_catalog.regtype::pg_catalog.oid
@@ -130,6 +131,7 @@ BEGIN
 	LOOP
 		colls := r.colls;
 		changed := false;
+		probe := NULL;
 		e := 0;
 		FOR k IN 0 .. r.n - 1 LOOP
 			IF r.keys[k] = 0 THEN
@@ -140,22 +142,34 @@ BEGIN
 				SELECT a.atttypid INTO typ FROM pg_catalog.pg_attribute a
 				WHERE a.attrelid = r.tbl AND a.attnum = r.keys[k];
 			ELSE
-				EXECUTE pg_catalog.format(
-					'SELECT pg_catalog.pg_typeof((SELECT x.e%s FROM'
-					' (SELECT %s FROM %s WHERE false) AS x(%s)))',
-					e, r.exprs, r.tbl::pg_catalog.regclass,
-					(SELECT pg_catalog.string_agg('e' || j, ', ')
-					 FROM pg_catalog.generate_series(1,
-					      (SELECT pg_catalog.count(*)::int
-					       FROM pg_catalog.unnest(r.keys) u
-					       WHERE u = 0)) j))
-				INTO typ;
+				-- The type of an expression key comes from a temporary view
+				-- over the key expressions. CREATE VIEW parses them but
+				-- neither plans nor runs them. A query would be planned, and
+				-- the planner runs an IMMUTABLE function with constant
+				-- arguments, so a table owner's function would run as the
+				-- superuser who runs this update.
+				IF probe IS NULL THEN
+					EXECUTE pg_catalog.format(
+						'CREATE TEMPORARY VIEW plx_key_probe (%s) AS SELECT %s FROM %s',
+						(SELECT pg_catalog.string_agg('e' || j, ', ')
+						 FROM pg_catalog.generate_series(1,
+						      (SELECT pg_catalog.count(*)::int
+						       FROM pg_catalog.unnest(r.keys) u
+						       WHERE u = 0)) j),
+						r.exprs, r.tbl::pg_catalog.regclass);
+					probe := 'pg_temp.plx_key_probe'::pg_catalog.regclass;
+				END IF;
+				SELECT a.atttypid INTO typ FROM pg_catalog.pg_attribute a
+				WHERE a.attrelid = probe AND a.attnum = e;
 			END IF;
 			IF typ = ANY (sb) THEN
 				colls[k] := 100;
 				changed := true;
 			END IF;
 		END LOOP;
+		IF probe IS NOT NULL THEN
+			DROP VIEW pg_temp.plx_key_probe;
+		END IF;
 		CONTINUE WHEN NOT changed;
 		IF r.kind = 'i' THEN
 			UPDATE pg_catalog.pg_index

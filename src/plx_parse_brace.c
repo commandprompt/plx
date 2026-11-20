@@ -482,6 +482,30 @@ range_not_single_value(Ctx *cx, int a, int b)
 }
 
 /*
+ * Does the loop bound [a, b) hold & or ^ outside brackets? In plxjs, plxts
+ * and plxphp, < binds tighter than & and ^, so i < n & 6 is (i < n) & 6,
+ * not a test against the bound n & 6. (| is rejected as T_PIPE above.)
+ */
+static bool
+bound_has_bitop(Ctx *cx, int a, int b)
+{
+	int			i, depth = 0;
+
+	for (i = a; i < b; i++)
+	{
+		Tok		   *t = &cx->t[i];
+
+		if (t->kind == T_LPAREN || t->kind == T_LBRACKET)
+			depth++;
+		else if (t->kind == T_RPAREN || t->kind == T_RBRACKET)
+			depth--;
+		else if (depth == 0 && (plx_tok_is(t, "&") || plx_tok_is(t, "^")))
+			return true;
+	}
+	return false;
+}
+
+/*
  * Does [a, b) assign the variable named by tok i? Counted: name = ..,
  * name op= .., name++, ++name, and PHP's append name[] = ... An element
  * assignment name[k] = .. does not change the variable's length or bound.
@@ -853,7 +877,7 @@ parse_for_brace(Ctx *cx, int ind)
 				plx_err(cx, line, "for-loop step must change the loop variable \"%s\"", var);
 			if (step ? range_not_single_value(cx, xa + 2, xb) : xb != xa + 2)
 				plx_err(cx, line, "for-loop step must be 'v++' or 'v += K'");
-			if (range_not_single_value(cx, cca + 2, ccb))
+			if (range_not_single_value(cx, cca + 2, ccb) || bound_has_bitop(cx, cca + 2, ccb))
 				plx_err(cx, line, "for-loop bound must be a single value, not a condition; use a while loop");
 			if (range_not_single_value(cx, ia + 2, ib))
 				plx_err(cx, line, "for-loop init must be 'v = LO'");

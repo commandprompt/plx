@@ -3037,6 +3037,8 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "NOT ");
 			else if (php_value_ref(s, len, i, j) &&
 					 (surf->concat_op || !(j < len && s[j] == '.')) &&
+					 /* outside plxphp, r.s names a field, not the local s */
+					 (surf->concat_op || !(i > 0 && s[i - 1] == '.')) &&
 					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
 					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{
@@ -4494,8 +4496,48 @@ typedef struct
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
 	char	   *cast_to;		/* wrapped typed literal: the type to CAST to */
+	char	   *cast_after;		/* a CAST to close at the start of the next run */
 	bool		paren;			/* static SQL: write an unquoted value as (expr) */
 } PlxTplState;
+
+/*
+ * Close CAST((...) of a typed literal: append " AS type)". s[i..] is the SQL
+ * text after the literal's closing quote. An interval literal may be
+ * followed by its fields (interval '1' hour). PostgreSQL passes them to the
+ * input of a bare literal only: CAST(text AS interval hour) reads '1' as one
+ * second and then truncates it to 00:00:00. No CAST gives the literal's
+ * meaning, so the form is rejected.
+ */
+static void
+tpl_close_cast(StringInfo buf, const char *type, const char *s, int len, int i)
+{
+	static const char *const fields[] = {
+		"year", "month", "day", "hour", "minute", "second", NULL
+	};
+
+	if (pg_strcasecmp(type, "interval") == 0)
+	{
+		int			q = i,
+					w,
+					f;
+
+		while (q < len && (s[q] == ' ' || s[q] == '\t' || s[q] == '\n' || s[q] == '\r'))
+			q++;
+		w = q;
+		while (w < len && sql_ident_char(s[w]) && s[w] != '$')
+			w++;
+		for (f = 0; fields[f]; f++)
+			if (w - q == (int) strlen(fields[f]) &&
+				pg_strncasecmp(s + q, fields[f], w - q) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("an interval field after an interpolated literal, "
+								"interval '...' %s, is not supported", fields[f]),
+						 errhint("Put the unit inside the literal, after the "
+								 "interpolated value, or call make_interval().")));
+	}
+	appendStringInfo(buf, " AS %s)", type);
+}
 
 /* Append a literal run, tracking quotes. next: the segment after, or NULL. */
 static void
@@ -4507,6 +4549,12 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 	if (st->bs_end && len > 0)
 		appendStringInfoChar(buf, s[i++]);
 	st->bs_end = false;
+	if (st->cast_after)
+	{
+		/* a typed literal that was only the value: TYPE '#{x}' */
+		tpl_close_cast(buf, st->cast_after, s, len, i);
+		st->cast_after = NULL;
+	}
 	for (; i < len; i++)
 	{
 		char		c = s[i];
@@ -4535,10 +4583,12 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 				if (st->wrapped)
 				{
 					appendStringInfoChar(buf, ')');
-					if (st->cast_to)
-						appendStringInfo(buf, " AS %s)", st->cast_to);
 					st->wrapped = false;
-					st->cast_to = NULL;
+					if (st->cast_to)
+					{
+						tpl_close_cast(buf, st->cast_to, s, len, i + 1);
+						st->cast_to = NULL;
+					}
 				}
 				continue;
 			}
@@ -4712,6 +4762,24 @@ tpl_typed_literal(StringInfo buf, int at)
 }
 
 /*
+ * The type name of a typed literal, buf[ty, at), as a CAST target. A char or
+ * character literal is unbounded bpchar, but CAST(x AS char) is char(1) and
+ * would cut the value to one character.
+ */
+static char *
+tpl_cast_type(StringInfo buf, int ty, int at)
+{
+	int			tl = at;
+
+	while (tl > ty && (buf->data[tl - 1] == ' ' || buf->data[tl - 1] == '\t' ||
+					   buf->data[tl - 1] == '\n' || buf->data[tl - 1] == '\r'))
+		tl--;
+	if (tpl_word_is(buf, ty, tl - ty, "char") || tpl_word_is(buf, ty, tl - ty, "character"))
+		return pstrdup("bpchar");
+	return pnstrdup(buf->data + ty, tl - ty);
+}
+
+/*
  * Emit one value interpolation. ref is the text that stands for the value: the
  * rewritten expression (static) or "$n" (dynamic). Returns true when the
  * closing quote of a '#{x}' was consumed and must be skipped in the next run.
@@ -4736,9 +4804,25 @@ tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
 		next->len >= 1 && next->s[0] == '\'' &&
 		!(next->len >= 2 && next->s[1] == '\''))
 	{
-		buf->len = st->sq_open;
-		buf->data[buf->len] = '\0';
-		appendStringInfo(buf, "(%s)", ref);
+		int			ty = tpl_typed_literal(buf, st->sq_open);
+
+		if (ty >= 0)
+		{
+			/*
+			 * TYPE '#{x}' -> CAST((x)::text AS TYPE), closed by the next run:
+			 * the literal is the value's text read as TYPE
+			 */
+			st->cast_after = tpl_cast_type(buf, ty, st->sq_open);
+			buf->len = ty;
+			buf->data[buf->len] = '\0';
+			appendStringInfo(buf, "CAST((%s)::text", ref);
+		}
+		else
+		{
+			buf->len = st->sq_open;
+			buf->data[buf->len] = '\0';
+			appendStringInfo(buf, "(%s)", ref);
+		}
 		st->sq = false;
 		return true;
 	}
@@ -4756,13 +4840,9 @@ tpl_put_value(PlxTplState *st, StringInfo buf, const char *ref,
 			 * TYPE '...' -> CAST(('...' || v || '...') AS TYPE): TYPE (...)
 			 * would be a syntax error, or a type modifier
 			 */
-			int			tl = at;
 			char	   *rest;
 
-			while (tl > ty && (buf->data[tl - 1] == ' ' || buf->data[tl - 1] == '\t' ||
-							   buf->data[tl - 1] == '\n' || buf->data[tl - 1] == '\r'))
-				tl--;
-			st->cast_to = pnstrdup(buf->data + ty, tl - ty);
+			st->cast_to = tpl_cast_type(buf, ty, at);
 			rest = pstrdup(buf->data + at);
 			buf->len = ty;
 			buf->data[buf->len] = '\0';

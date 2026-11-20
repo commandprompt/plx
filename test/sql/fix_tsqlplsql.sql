@@ -767,3 +767,17 @@ $$;
 SELECT fxu10_unk() AS r;  -- SQL Server: |12|7
 DROP FUNCTION public.plx_tsql_int4(numeric), public.plx_tsql_int8(numeric),
   public.plx_tsql_int2(numeric), public.plx_tsql_int4(anyelement), public.plx_tsql_int4(text);
+
+-- R3-S11 (PR 24 review r2 s1[1]): classifying the operands of + rescanned
+-- every CAST(...) to find its AS, so nested CASTs took time quadratic in the
+-- nesting (40,000 levels: about 3.6 s) before the depth limit rejected them.
+-- The AS of each '(' is now found in the pass that pairs the parentheses.
+SET statement_timeout = '2s';
+DO $d$ BEGIN EXECUTE format('CREATE FUNCTION r3s11() RETURNS int LANGUAGE plxtsql AS %L',
+  'BEGIN RETURN ' || repeat('CAST(', 40000) || '1' || repeat(' AS INT)', 40000) || ' END'); END $d$;
+RESET statement_timeout;
+-- CAST still finds its own AS, not one inside a nested parenthesis
+CREATE FUNCTION r3s11_ok(x int) RETURNS text LANGUAGE plxtsql AS $$
+  RETURN CAST(CAST(@x * 2 AS varchar(10)) + 'a' AS varchar(20)) + CAST((SELECT 1 AS one) AS varchar(3));
+$$;
+SELECT r3s11_ok(21) AS r;  -- 42a1

@@ -25,7 +25,9 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | where SQL needs a name: `FROM #{t}` | `FROM (t)`: `CREATE FUNCTION` fails with a syntax error (not in `UPDATE ... SET #{c} =`; see below) | `FROM $k`: the statement fails when it runs |
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
+| a whole literal after a type name: `interval '#{s}'` | `CAST((s)::text AS interval)` | `CAST(($k)::text AS interval)` |
 | inside a literal after a type name: `interval '#{n} days'` | `CAST(('' \|\| (n)::text \|\| ' days') AS interval)` | `CAST(('' \|\| ($k)::text \|\| ' days') AS interval)` |
+| before an interval field: `interval '#{n}' hour` | rejected | rejected |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
 | inside a SQL comment: `-- #{x}`, `/* #{x} */` | rejected | rejected |
 | inside a dollar-quoted string: `$q$#{s}$q$` | rejected | rejected |
@@ -55,7 +57,14 @@ type. Where SQL needs another type, cast it: with a `text` variable `since`,
 `ts > '#{since}'::date` works. A type name before a literal that holds an
 interpolation makes plx write a `CAST` to that type. plx knows the built-in
 type names, including `double precision`, `character varying` and
-`timestamp with time zone`; after any other word the literal stays text.
+`timestamp with time zone`; after any other word the literal stays text. A
+`char` or `character` literal becomes a `CAST` to `bpchar`, so the value
+keeps its length, as `char 'abc'` does. A type with a modifier, such as
+`varchar(2) '#{s}'`, is not recognised and fails with a syntax error; write
+`CAST('#{s}' AS varchar(2))`. An interval field after the literal,
+`interval '#{n}' hour`, is rejected, because a `CAST` cannot give it the
+literal's meaning: write the unit inside the literal, `interval '#{n} hours'`,
+or call `make_interval(hours => #{n})`.
 
 A call is static when its SQL argument is a single string literal and it has
 no bind arguments; otherwise it runs as dynamic SQL (`EXECUTE`). `execute` is

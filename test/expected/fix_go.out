@@ -1594,3 +1594,65 @@ SELECT fg_r2c21_big(3, 30) AS r;  -- 3221225472
  3221225472
 (1 row)
 
+-- R3-D30 (PR 24 review r3): a constant declared with a type has that type
+-- (Go spec, Constant declarations); only an untyped constant takes its type
+-- from the context of a shift. Round 2 treated every integer constant as
+-- untyped and widened it to bigint, so a typed constant's overflow was
+-- silently lost (int32: 6442450944, int16: 98304). int32 is integer, and an
+-- integer shifted out of range fails (doc/plxgo.md); an int16 drops the bits
+-- that leave its width.
+CREATE FUNCTION fg_r3d30_i32() RETURNS bigint LANGUAGE plxgo AS $$
+const m int32 = 3
+k := 31
+var a int64 = int64(m << k)
+return a
+$$;
+\set VERBOSITY terse
+SELECT fg_r3d30_i32() AS r;  -- integer out of range (Go: -2147483648)
+ERROR:  integer out of range
+\set VERBOSITY default
+CREATE FUNCTION fg_r3d30() RETURNS text LANGUAGE plxgo AS $$
+const h int16 = 3
+const u = 3
+k := 31
+j := 15
+var b int64 = int64(h << j)
+var c int64 = u << k
+return fmt.Sprintf("%d %d", b, c)
+$$;
+SELECT fg_r3d30() AS r;  -- Go: -32768 6442450944
+         r         
+-------------------
+ -32768 6442450944
+(1 row)
+
+-- R3-E30 (PR 24 review r3): the loop variable of a three-clause for is a new
+-- int that shadows a parameter of the same name (Go spec, For statements),
+-- so string(i) is the character with that code point.
+CREATE FUNCTION fg_r3e30(i text) RETURNS text LANGUAGE plxgo AS $$
+r := ""
+for i := 65; i < 67; i++ {
+	r += string(i)
+}
+return r + i
+$$;
+SELECT fg_r3e30('p') AS r;  -- Go: ABp
+  r  
+-----
+ ABp
+(1 row)
+
+-- R3-G30 (PR 24 review r3): an int16 shifted left by 16 or more is 0 (Go
+-- spec, Arithmetic operators: shifts behave as if shifted n times by 1).
+-- A count of 32 or more failed with integer out of range.
+CREATE FUNCTION fg_r3g30(n int) RETURNS text LANGUAGE plxgo AS $$
+var a int16 = 1
+var c int16 = a << n
+return fmt.Sprintf("%d", c)
+$$;
+SELECT fg_r3g30(15) AS a, fg_r3g30(16) AS b, fg_r3g30(40) AS c;  -- Go: -32768 0 0
+   a    | b | c 
+--------+---+---
+ -32768 | 0 | 0
+(1 row)
+

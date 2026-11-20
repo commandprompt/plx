@@ -1857,12 +1857,16 @@ go_int_const(Go *g, int a, int b)
 			lit = true;
 			continue;
 		}
-		/* a named integer constant (const mask = 0xFF) is untyped too */
+		/*
+		 * A named integer constant declared without a type (const mask =
+		 * 0xFF) is untyped too. One declared with a type (const m int32 = 3)
+		 * has that type, as in Go.
+		 */
 		if (tk->kind == GO_WORD)
 		{
 			PlxLocal2  *l = plx_local_find(g->cx, tk->s, tk->len);
 
-			if (l && l->is_const && go_typ_int_class(l->typ) == 'i')
+			if (l && l->is_const && l->untyped && go_typ_int_class(l->typ) == 'i')
 			{
 				lit = true;
 				continue;
@@ -1903,7 +1907,7 @@ static const char GO_SHL_OPEN[] =
 " WHEN __plx_c < 0 THEN ('plxgo: negative shift amount ' || __plx_c)::integer"
 " WHEN __plx_c < " GO_SHIFT_WIDTH " THEN CASE WHEN pg_typeof(__plx_a) = 'integer'::regtype"
 " THEN (__plx_a::bigint << __plx_c::integer)::integer ELSE __plx_a << __plx_c::integer END"
-" WHEN __plx_a = 0 OR pg_typeof(__plx_a) = 'bigint'::regtype THEN __plx_a & 0"
+" WHEN __plx_a = 0 OR pg_typeof(__plx_a) IN ('bigint'::regtype, 'smallint'::regtype) THEN __plx_a & 0"
 " ELSE (__plx_a::bigint << " GO_SHIFT_WIDTH ")::integer"
 " END FROM (SELECT (";
 static const char GO_SHR_OPEN[] =
@@ -3074,6 +3078,8 @@ go_declare_one(Go *g, const char *name, StringInfo typ, int e0, int e1, bool isc
 	if (isconst && e1 <= e0)
 		plx_err(g->cx, g->t[e0 < g->nt ? e0 : g->nt - 1].line,
 				"a constant needs a value (const %s = ...)", name);
+	/* untyped: no type named, and the value is an untyped constant */
+	l->untyped = isconst && !(typ && typ->len) && e1 > e0 && go_int_const(g, e0, e1);
 	l->is_const = isconst;
 	if (e1 > e0)
 	{
@@ -3913,20 +3919,18 @@ go_for(Go *g, int ind)
 			/*
 			 * Type the name as the loop variable for the body, so string(j) and
 			 * the operand typing see an integer, and restore it after the loop.
-			 * A parameter of the same name is left alone.
+			 * A local shadows a parameter of the same name in the type lookups,
+			 * as the loop variable shadows it in Go and in the DECLARE above.
 			 */
-			if (!plx_is_param(g->cx, g->t[h0].s, g->t[h0].len))
+			lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
+			if (lv)
+				lv_saved = lv->typ;
+			else
 			{
-				lv = plx_local_find(g->cx, g->t[h0].s, g->t[h0].len);
-				if (lv)
-					lv_saved = lv->typ;
-				else
-				{
-					lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
-					lv_added = true;
-				}
-				lv->typ = ltyp;
+				lv = plx_local_add(g->cx, g->t[h0].s, g->t[h0].len);
+				lv_added = true;
 			}
+			lv->typ = ltyp;
 		}
 		else if (semi1 > h0)				/* any other init statement */
 			go_simple(g, bind, semi1);
