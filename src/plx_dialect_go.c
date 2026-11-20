@@ -1818,14 +1818,40 @@ go_sql_class(const GoTok *tk)
 	return 'o';					/* << >> & &^ | ^: SQL's "other" operators */
 }
 
-/* [a,b) is an integer or rune literal, with an optional sign */
+/*
+ * [a,b) is an integer constant expression: integer and rune literals joined by
+ * arithmetic and bitwise operators, with unary signs and brackets. It holds no
+ * name, call or float, so Go types it by its context.
+ */
 static bool
 go_int_const(Go *g, int a, int b)
 {
-	while (a < b && (go_op_is(&g->t[a], "-") || go_op_is(&g->t[a], "+")))
-		a++;
-	return b - a == 1 && ((g->t[a].kind == GO_NUM && !go_num_is_float(&g->t[a])) ||
-						  go_is_rune(&g->t[a]));
+	static const char *const ops[] = {
+		"+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^", "&^", NULL
+	};
+	bool		lit = false;
+	int			i,
+				k;
+
+	for (i = a; i < b; i++)
+	{
+		GoTok	   *tk = &g->t[i];
+
+		CHECK_FOR_INTERRUPTS();
+		if ((tk->kind == GO_NUM && !go_num_is_float(tk)) || go_is_rune(tk))
+		{
+			lit = true;
+			continue;
+		}
+		if (tk->kind == GO_LP || tk->kind == GO_RP)
+			continue;
+		for (k = 0; ops[k]; k++)
+			if (go_op_is(tk, ops[k]))
+				break;
+		if (!ops[k])
+			return false;
+	}
+	return lit;
 }
 
 /*
@@ -1874,11 +1900,15 @@ go_emit_binary(Go *g, const int *os, const int *oe, const int *op, int lo, int h
 	 * the type of its context, and Go's int64 is 64 bits wide. SQL types the
 	 * literal as a 32-bit integer and takes the shift count mod 32, so 1 << 32
 	 * is 1. Shift a bigint instead; a 32-bit target that cannot hold the
-	 * result then fails with "integer out of range" instead of wrapping.
+	 * result then fails with "integer out of range" instead of wrapping. The
+	 * constant can be an expression, as in 2 * 1 << 40, which Go reads as
+	 * (2 * 1) << 40: making its first operand a bigint makes it all bigint.
+	 * Shifts bind tightest, with * and &, so they are all at this level.
 	 */
-	if (lo == sp[0] && (go_op_is(&g->t[op[sp[0]]], "<<") ||
-						go_op_is(&g->t[op[sp[0]]], ">>")) &&
-		go_int_const(g, os[lo], oe[lo]))
+	for (j = 0; j < m; j++)
+		if (go_op_is(&g->t[op[sp[j]]], "<<") || go_op_is(&g->t[op[sp[j]]], ">>"))
+			break;
+	if (j < m && lo == sp[0] && go_int_const(g, os[lo], oe[sp[j]]))
 	{
 		go_sp(out);
 		appendStringInfoChar(out, '(');

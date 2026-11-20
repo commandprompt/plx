@@ -269,7 +269,8 @@ Each entry names the dialects it affects.
   the literal as a 32-bit integer and took the shift count mod 32, so
   `var m int64 = 1 << n` gave -2147483648 for n = 31 and 1 for n = 32, and
   `1 << 40` gave 256. plx now shifts the constant as `bigint`, which gives
-  Go's values. Stored in an `int` (a 32-bit `integer` in plx), a result that
+  Go's values. This includes a constant expression or a rune literal, such as
+  `(1) << 40`, `2 * 1 << 40` and `'a' << 40`. Stored in an `int` (a 32-bit `integer` in plx), a result that
   does not fit now fails with `integer out of range` instead of wrapping.
 - **Integer conversions truncate.** `int(x)`, `int64(x)` and the other integer
   conversions truncate a float toward zero, as Go does, instead of rounding

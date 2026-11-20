@@ -807,3 +807,16 @@ $$;
 SELECT fgstr_expr(33) AS go_chars;
 -- a float in the expression makes it a float, which Go rejects here
 CREATE FUNCTION fgstr_fexpr(n int, f float8) RETURNS text LANGUAGE plxgo AS $$ return string(n * f) $$;
+-- Review of the PR 24 fixes, problem 3: the left operand of a shift is an
+-- integer constant also when it is a constant expression or is in brackets.
+-- Only a bare literal was shifted as a 64-bit value, so 2 * 1 << 40 gave 512
+-- and (1) << 40 gave 256.
+CREATE FUNCTION fgsh_cexpr() RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 2 * 1 << 40
+ var b int64 = (1) << 40
+ var c int64 = (1 + 1) << 40
+ var d int64 = -(1) << 40
+ var e int64 = 'a' * 1 << 40
+ return fmt.Sprintf("%d %d %d %d %d", a, b, c, d, e)
+$$;
+SELECT fgsh_cexpr() AS go_shifts;
