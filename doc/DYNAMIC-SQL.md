@@ -25,6 +25,11 @@ EXECUTE 'SELECT id, name FROM users WHERE name = ($2) LIMIT $1' INTO u USING lim
 | a whole quoted literal: `'#{s}'` | `(s)` | `($k)` |
 | inside a longer literal: `'%#{s}%'` | `('%' \|\| (s)::text \|\| '%')` | `('%' \|\| ($k)::text \|\| '%')` |
 | inside a quoted identifier: `"#{t}"` | rejected | rejected |
+| inside a SQL comment: `-- #{x}`, `/* #{x} */` | rejected | rejected |
+
+plx reads the SQL string as PostgreSQL does: a quote inside a `--` or
+`/* */` comment (block comments nest) does not open a string, and an
+interpolation inside a comment is rejected when the function is created.
 
 A call is static when its SQL argument is a single string literal and it has
 no bind arguments; otherwise it runs as dynamic SQL (`EXECUTE`). `execute` is

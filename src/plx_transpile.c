@@ -4134,7 +4134,9 @@ typedef struct
 {
 	bool		sq,				/* inside '...' */
 				dq,				/* inside "..." */
-				estr;			/* the '...' is an E'...' */
+				estr,			/* the '...' is an E'...' */
+				line_cmt;		/* inside a -- comment */
+	int			block_cmt;		/* depth of nested slash-star comments */
 	int			sq_open;		/* buf offset of the opening quote */
 	bool		wrapped;		/* a '(' was inserted before sq_open */
 } PlxTplState;
@@ -4175,6 +4177,23 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 				continue;
 			}
 		}
+		else if (st->line_cmt)
+		{
+			if (c == '\n')
+				st->line_cmt = false;
+		}
+		else if (st->block_cmt > 0)
+		{
+			/* comments nest: each slash-star needs its own star-slash */
+			if ((c == '/' && i + 1 < len && s[i + 1] == '*') ||
+				(c == '*' && i + 1 < len && s[i + 1] == '/'))
+			{
+				st->block_cmt += (c == '/') ? 1 : -1;
+				appendStringInfoChar(buf, c);
+				appendStringInfoChar(buf, s[++i]);
+				continue;
+			}
+		}
 		else if (st->dq)
 		{
 			if (c == '"')
@@ -4200,6 +4219,15 @@ tpl_put_literal(PlxTplState *st, StringInfo buf, const char *s, int len)
 		}
 		else if (c == '"')
 			st->dq = true;
+		else if (c == '-' && i + 1 < len && s[i + 1] == '-')
+			st->line_cmt = true;
+		else if (c == '/' && i + 1 < len && s[i + 1] == '*')
+		{
+			st->block_cmt = 1;
+			appendStringInfoChar(buf, c);
+			appendStringInfoChar(buf, s[++i]);
+			continue;
+		}
 		appendStringInfoChar(buf, c);
 	}
 }
@@ -4283,6 +4311,9 @@ plx_emit_string_as_sql(Ctx *cx, Tok *tk, StringInfo out)
 			skip = false;
 			continue;
 		}
+		if (st.line_cmt || st.block_cmt > 0)
+			plx_err(cx, tk->line, "an interpolation inside a SQL comment is not allowed; "
+					"move it out of the comment");
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");
@@ -4377,6 +4408,9 @@ tpl_dynamic(Ctx *cx, Tok *tk, int first, StringInfo binds)
 		kind = tpl_kind(segs[i].s, segs[i].len, &is, &il);
 		if (kind == TPL_VALUE && !params)
 			kind = TPL_LITERAL;		/* this statement takes no $n parameters */
+		if (st.line_cmt || st.block_cmt > 0)
+			plx_err(cx, tk->line, "an interpolation inside a SQL comment is not allowed; "
+					"move it out of the comment");
 		if (st.dq)
 			plx_err(cx, tk->line, "an interpolation inside a quoted SQL identifier is not "
 					"allowed; interpolate ident(expr), without the quotes, to quote it");

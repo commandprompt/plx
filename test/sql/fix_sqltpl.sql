@@ -1,0 +1,63 @@
+-- Regression tests for the SQL template scanner: how an interpolation in the
+-- SQL argument of execute, fetch_one, query and friends is lowered.
+-- Each case names its PR 24 review finding ([n]).
+CREATE EXTENSION IF NOT EXISTS plx;
+SET client_min_messages = warning;
+-- fs_err(q) runs q and returns 'SQLSTATE: message' if it fails. The message
+-- leaves out the error position, which differs between PostgreSQL 13
+-- (plpgsql prefixes each expression with SELECT) and later versions.
+CREATE FUNCTION fs_err(q text) RETURNS text LANGUAGE plpgsql AS $h$
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
+END $h$;
+CREATE TABLE fs_victim (id int);
+
+-- [2]: an apostrophe inside a SQL comment does not open a string, so the
+-- quoted literal after it is still seen as quoted and the value stays data
+CREATE FUNCTION fs_c_block(c text) RETURNS text LANGUAGE plxruby AS $$
+execute("COMMENT /* the owner's note */ ON TABLE fs_victim IS '#{c}'")
+d = fetch_one("SELECT obj_description('fs_victim'::regclass) AS d")
+return d.d
+$$;
+SELECT fs_c_block('hello');
+SELECT fs_c_block('; DROP TABLE fs_victim; --');
+SELECT to_regclass('fs_victim') IS NOT NULL AS victim_survives;
+CREATE FUNCTION fs_c_line(c text) RETURNS text LANGUAGE plxruby AS $$
+execute("COMMENT -- the owner's note\nON TABLE fs_victim IS '#{c}'")
+d = fetch_one("SELECT obj_description('fs_victim'::regclass) AS d")
+return d.d
+$$;
+SELECT fs_c_line('; DROP TABLE fs_victim; --');
+SELECT to_regclass('fs_victim') IS NOT NULL AS victim_survives;
+-- [2]: block comments nest
+CREATE FUNCTION fs_c_nested(c text) RETURNS text LANGUAGE plxjs AS $$
+execute(`COMMENT /* outer /* it's */ still's */ ON TABLE fs_victim IS '${c}'`);
+let d = fetch_one(`SELECT obj_description('fs_victim'::regclass) AS d`);
+return d.d;
+$$;
+SELECT fs_c_nested('; DROP TABLE fs_victim; --');
+SELECT to_regclass('fs_victim') IS NOT NULL AS victim_survives;
+-- [2]: static SQL reads the value, not the variable's name
+CREATE FUNCTION fs_c_static(x text) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT /* the user's tag */ '${x}' AS v`);
+return r.v;
+$$;
+SELECT fs_c_static('hello');
+CREATE FUNCTION fs_c_static_line(x text) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT 'a' -- it's
+  || '${x}' AS v`);
+return r.v;
+$$;
+SELECT fs_c_static_line('hello');
+-- [2]: an interpolation inside a SQL comment is rejected when the function is
+-- created: it would silently do nothing
+CREATE FUNCTION fs_c_in_block(x text) RETURNS text LANGUAGE plxjs AS $$
+let r = fetch_one(`SELECT 1 AS v /* ${x} */`);
+return r.v;
+$$;
+CREATE FUNCTION fs_c_in_line(c text) RETURNS void LANGUAGE plxruby AS $$
+execute("COMMENT ON TABLE fs_victim IS 'x' -- #{c}\n")
+$$;

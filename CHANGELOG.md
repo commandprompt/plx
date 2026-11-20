@@ -63,7 +63,9 @@ Each entry names the dialects it affects.
   through `quote_nullable()`. `'#{x}'` is the value of `x` in static and
   dynamic SQL alike (it used to be the literal text `'x'` in static SQL), and
   an interpolation inside a longer literal concatenates the value. An
-  interpolation inside a quoted identifier is rejected. A body that
+  interpolation inside a quoted identifier or a SQL comment is rejected. The
+  lowering reads the SQL string as PostgreSQL does, so a quote inside a
+  `--` or `/* */` comment does not open a string. A body that
   interpolated an identifier (`FROM #{t}`) or a SQL fragment on purpose fails
   when re-created (`syntax error at or near "$1"`) until it uses `ident()` or
   `raw()` (see Added). See doc/DYNAMIC-SQL.md.
