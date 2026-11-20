@@ -3548,13 +3548,30 @@ plx_fin_pop(Ctx *cx, PlxFin *f)
 	cx->fin = f->outer;
 }
 
-/* Record a loop label, so a labeled break/continue knows which frame its
- * target loop is in. */
+/*
+ * Record a loop label, so a labeled break/continue knows which frame its
+ * target loop is in. plpgsql reads labels as it reads names, ignoring case,
+ * and an exit goes to the innermost loop with that label. A label spelled
+ * like an enclosing loop's label but for case would make an exit meant for
+ * the outer loop go to the inner one: reject it, as for variables. A label
+ * spelled exactly the same way keeps meaning the innermost loop.
+ */
 void
 plx_label_note(Ctx *cx, const char *name, int len)
 {
-	PlxLabel   *l = palloc(sizeof(PlxLabel));
+	PlxLabel   *l;
 
+	if (!names_fold_case(cx))
+	{
+		char	   *key = downcase_truncate_identifier(name, len, false);
+
+		for (l = cx->labels; l; l = l->next)
+			if (!same_spelling(l->name, name, len) &&
+				strcmp(downcase_truncate_identifier(l->name, strlen(l->name),
+													false), key) == 0)
+				name_clash(cx, l->name, name, len);
+	}
+	l = palloc(sizeof(PlxLabel));
 	l->name = pnstrdup(name, len);
 	l->fin_id = cx->fin ? cx->fin->id : 0;
 	l->next = cx->labels;

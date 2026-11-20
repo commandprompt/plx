@@ -129,6 +129,12 @@ Each entry names the dialects it affects.
   counting-loop variable that spells an earlier local or parameter another
   way, such as `for (let I = ...)` beside `let i`, is rejected too; before, it
   hid the local. Rename one of the names.
+- **Nested loop labels that differ only in case are rejected** (plxjs, plxts,
+  plxphp, plxpython3, plxruby). plpgsql ignores case in labels too, so in
+  `Outer: for ... { outer: for ... { continue Outer; } }` the `continue` went
+  to the inner loop and the function returned a wrong value. `CREATE FUNCTION`
+  now rejects a loop label that spells the label of an enclosing loop another
+  way. Rename one of the labels.
 - **An integer literal with a leading zero is octal** (plxruby, plxphp,
   plxjs), as in the source language, so `0755` is 493, not 755. plxpython3 and
   plxts reject such a literal at `CREATE FUNCTION` and suggest `0o755`.

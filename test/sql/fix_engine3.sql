@@ -29,3 +29,38 @@ CREATE FUNCTION e3_r1_pow() RETURNS int LANGUAGE plxjs AS $$
 return abs(((2 ** 3 ** 2)) - 0) + (1 + (2 ** 2));
 $$;
 SELECT e3_r1_pow();
+
+-- R6: nested loop labels that differ only in case are rejected (plpgsql
+-- would read both as one label, so continue Outer went to the inner loop)
+CREATE FUNCTION e3_r6_js() RETURNS int LANGUAGE plxjs AS $$
+let s = 0;
+Outer: for (let i = 0; i < 3; i++) { outer: for (let j = 0; j < 3; j++) { if (j == 1) { continue Outer; } s += 1; } }
+return s;
+$$;
+CREATE FUNCTION e3_r6_py() RETURNS int LANGUAGE plxpython3 AS $$
+s = 0
+Outer: for i in range(3):
+    outer: for j in range(3):
+        if j == 1:
+            break Outer
+        s += 1
+return s
+$$;
+CREATE FUNCTION e3_r6_rb() RETURNS int LANGUAGE plxruby AS $$
+s = 0
+Outer: for i in 0..2
+  outer: for j in 0..2
+    break Outer if j == 1
+    s += 1
+  end
+end
+return s
+$$;
+-- labels that differ only in case on loops that are not nested still work
+CREATE FUNCTION e3_r6_seq() RETURNS int LANGUAGE plxjs AS $$
+let s = 0;
+Outer: for (let i = 0; i < 3; i++) { if (i == 1) { break Outer; } s += 1; }
+outer: for (let j = 0; j < 3; j++) { if (j == 2) { break outer; } s += 10; }
+return s;
+$$;
+SELECT e3_r6_seq();
