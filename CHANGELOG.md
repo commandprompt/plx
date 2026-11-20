@@ -302,11 +302,33 @@ Each entry names the dialects it affects.
   SQL power, so `6 ^ 3` gave 216), unary `^x` and `&^` work, `1 << 2 + 1` is
   5, and `<<=`, `>>=`, `&=`, `|=`, `^=` and `&^=` are accepted. Unary `^x`
   binds tighter than `+` and `*`, so `^y + 1` gives `-y`.
+- **An integer constant shifted by `<<` or `>>` is a 64-bit value.** SQL typed
+  the literal as a 32-bit integer and took the shift count mod 32, so
+  `var m int64 = 1 << n` gave -2147483648 for n = 31 and 1 for n = 32, and
+  `1 << 40` gave 256. plx now shifts the constant as `bigint`, which gives
+  Go's values. This includes a constant expression or a rune literal, such as
+  `(1) << 40`, `2 * 1 << 40` and `'a' << 40`. Stored in an `int` (a 32-bit
+  `integer` in plx), a result that does not fit now fails with
+  `integer out of range` instead of wrapping.
+- **A shift count at least as large as the width of the value gives Go's
+  result.** SQL took the count mod 64 for a `bigint` and mod 32 for an
+  `integer`, so with `n` = 64, `1 << n` gave 1 and `x >> n` gave `x`. Go gives 0
+  for `<<`, and 0 or -1 for `>>`, and so does plx now. A negative count fails,
+  as it panics in Go. A non-zero `int` shifted left by 32 or more fails with
+  `integer out of range`. An expression with more than 64 shifts by a count
+  that is not a literal, nested in one another, is rejected at
+  `CREATE FUNCTION`.
 - **Integer conversions truncate.** `int(x)`, `int64(x)` and the other integer
   conversions truncate a float toward zero, as Go does, instead of rounding
   (`int(3.7)` is now 3). `int(x)` and `int64(x)` of a row field or an
   expression stay exact for integers beyond 2^53, and `int(r.n)` of a text
   field works.
+- **A `*` width or precision in `fmt.Sprintf` takes the next argument**, as in
+  Go. plx printed `%*d` as text and gave every later verb the wrong argument,
+  so `fmt.Sprintf("[%*d|%s]", 5, 42, "x")` gave `[%*d|5]`; it now gives
+  `[   42|x]`. A `*` precision takes its argument and is then dropped, like a
+  written precision. Where the directives and arguments do not line up, a `*`
+  is rejected at `CREATE FUNCTION`.
 - **A `fmt.Sprintf` width pads but never truncates.** `%3d` of 12345 gave
   `"123"`; it now gives the full value. An explicit argument index such as
   `%[1]d` is rejected at `CREATE FUNCTION`, in `fmt.Sprintf` and
@@ -314,12 +336,22 @@ Each entry names the dialects it affects.
   the wrong order.
 - **Literals keep their value.** String and rune literals decode every Go
   escape (`\x`, octal, `\u`, `\U`, `\a` `\b` `\f` `\v`). A rune literal such
-  as `'\xe9'` or `'\351'` gives the character U+00E9, as in Go. An unknown
+  as `'\xe9'` or `'\351'` is the code point 233 (see the next entry). An unknown
   escape (such as `"\d"`), a NUL, or bytes that are not valid text are
   rejected at `CREATE FUNCTION`. Hexadecimal, octal (`0o` and leading `0`),
   binary and `_`-separated integer literals keep their value on every
   supported PostgreSQL version (`017` was 17, `0o17` was 0, and on PostgreSQL
   13 to 15 `0x1F` was 0). A number with letters glued to it is rejected.
+- **A rune literal is an integer, its code point**, as in Go. plx emitted it
+  as a SQL string, so `var d rune = '7'` stored 7 instead of 55,
+  `var r rune = 'a'` failed with `invalid input syntax for type integer`, and
+  `'7' - '0'` failed with `operator is not unique`. `c := 'a'` now declares an
+  `integer`. A rune literal must hold exactly one character. `string(x)` of an
+  integer is now the character with that code point, as in Go, instead of the
+  number's digits: `string(65)` is `"A"`, not `"65"`. Use `strconv.Itoa` for
+  the digits. `%c` in `fmt.Sprintf` prints the character. `string(x)` of a
+  float, `numeric` or bool value gave its text and is now rejected at
+  `CREATE FUNCTION`, as Go rejects it. Format such a value with `fmt.Sprintf`.
 - **`+` between a string and a number is rejected** at `CREATE FUNCTION`, as
   Go rejects it. Before, `n + "1"` with an integer `n` returned `n + 1`,
   because SQL read the literal as a number. Convert the number with
@@ -561,6 +593,27 @@ PUBLIC has USAGE by default).
   seconds, and `statement_timeout` could not cancel it. The rewriter now finds
   every group in one pass, which takes 33 milliseconds for the same body, and
   checks for interrupts as it goes.
+- **Quadratic, uninterruptible transpile time and a crash in plxgo string
+  `+`.** To decide whether a `+` joins strings, plxgo typed each bracketed
+  operand again at every level of nesting. A body of nested `("x" + (...))`
+  therefore took quadratic time and memory: 6,400 levels took about 40
+  seconds, and 40,000 levels used 12 GB and ignored both `pg_cancel_backend`
+  and `pg_terminate_backend`. A string `+` inside the arguments of nested
+  calls, such as `strings.ReplaceAll(x, "a", "a" + strings.ReplaceAll(...))`,
+  was emitted twice per level, so the time doubled with each level. A chain of
+  200,000 unary signs (`- - - 1`) overflowed the stack and crashed the
+  backend. plxgo now types each bracketed expression once, stops at the
+  nesting limit before it does the deeper work, types unary signs without
+  recursion, and checks for interrupts while it lexes, types and emits, so
+  `statement_timeout` can cancel the transpile.
+- **Exponential memory when plxgo subqueries are nested.** plxgo evaluates
+  some values once in a subquery: the operand of `int64(x)` or `int(x)` when
+  plx cannot see its type, the value of a `fmt.Sprintf` width when it is a
+  call, and the value and width of a `*` width. The planner pulled each
+  subquery up and copied the value into every place it is used, so the plan
+  grew exponentially with nesting: 8 nested `int64()` conversions ran out of
+  memory when the function ran. The subqueries now have `OFFSET 0`, which
+  keeps the planner from pulling them up.
 - **Memory amplification in chained ternaries.** Each `?:` level kept its own
   copy of the rest of the chain, so peak memory was depth times source length
   (568 MB for a 1 MB body). Intermediate results are now freed.

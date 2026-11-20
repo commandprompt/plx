@@ -385,11 +385,11 @@ $$;
 CREATE FUNCTION fg33_esc() RETURNS text LANGUAGE plxgo AS $$ return "\u00e9|\U0001F600|\x41|\101|\b|\a\f\v|\x27\047\u0027" $$;
 SELECT fg33_esc() = E'\u00e9|\U0001F600|A|A|\b|\007\f\013|''''''' AS go_true,
        length(fg33_esc()) AS go_len_17;
-CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return '\x41' $$;
+CREATE FUNCTION fg33_rune() RETURNS text LANGUAGE plxgo AS $$ return string('\x41') $$;
 SELECT fg33_rune() AS go_a;
 -- in a rune literal, \x and octal escapes are code points, not bytes
 CREATE FUNCTION fg33_rune2() RETURNS text LANGUAGE plxgo AS $$
- return fmt.Sprintf("%s|%s|%s", '\xe9', '\351', "\xc3\xa9")
+ return fmt.Sprintf("%c|%c|%s", '\xe9', '\351', "\xc3\xa9")
 $$;
 SELECT fg33_rune2() = E'\u00e9|\u00e9|\u00e9' AS go_true;
 CREATE FUNCTION fg33_oct() RETURNS int LANGUAGE plxgo AS $$ return 017 $$;
@@ -501,7 +501,8 @@ CREATE FUNCTION fgh18_ctx(s text) RETURNS text LANGUAGE plxgo AS $$
 	return "no"
 $$;
 SELECT fgh18_ctx('a') AS go_AB_ac_dae, fgh18_ctx('z') AS go_no;
--- calls that return a string, and string(x)
+-- calls that return a string, and string(x). string(n) of an integer is the
+-- character with that code point, as in Go (PR 24 review [12])
 CREATE FUNCTION fgh18_calls(n int) RETURNS text LANGUAGE plxgo AS $$
 	return strings.TrimSpace("  z ") + strings.ToLower("Q") + string(n) + fmt.Sprintf("%d", n)
 $$;
@@ -656,3 +657,221 @@ CREATE FUNCTION fgmake_fill(n int) RETURNS int[] LANGUAGE plxgo AS $$
 	return s
 $$;
 SELECT fgmake_fill(3) AS go_0_7_0;
+
+-- PR 24 review [0]: typing nested string concatenation takes linear time,
+-- stops at the nesting limit, and does not crash. fg_timed(q, lim) runs q
+-- through fg_err and says whether it finished within lim. Before the fix, the
+-- 6400-level input took about 40 s and ignored statement_timeout and
+-- pg_cancel_backend, and a chain of 200000 unary signs crashed the backend.
+CREATE FUNCTION fg_timed(q text, lim interval) RETURNS text LANGUAGE plpgsql AS $h$
+DECLARE
+  t0 timestamptz := clock_timestamp();
+  r text;
+BEGIN
+  r := fg_err(q);
+  RETURN CASE WHEN clock_timestamp() - t0 < lim THEN 'in time' ELSE 'too slow' END
+    || ' / ' || r;
+END $h$;
+SET statement_timeout = '60s';
+-- a long flat run inside nesting below the limit compiles, quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_wide() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 200) || repeat('"x" + ', 3000)
+  || '"a"' || repeat(')', 200) || ')'), '5s') AS go_wide;
+SELECT fgdos_wide() AS go_3201;
+-- the reviewer's input is rejected at the nesting limit, quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_nest() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 6400) || '"a"'
+  || repeat(')', 6400) || ')'), '5s') AS go_nest_6400;
+-- a body of about 360 KB nested 40000 deep is rejected just as quickly
+SELECT fg_timed('CREATE FUNCTION fgdos_nest() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('return len(' || repeat('("x" + ', 40000) || '"a"'
+  || repeat(')', 40000) || ')'), '5s') AS go_nest_40000;
+-- a long chain of unary signs is typed without recursion
+SELECT fg_timed('CREATE FUNCTION fgdos_unary() RETURNS int LANGUAGE plxgo AS '
+  || quote_literal('x := 1 + ' || repeat('- ', 200000) || '1' || chr(10)
+  || 'return x'), '5s') AS go_unary;
+-- a string + inside the arguments of a nested call is emitted once, not
+-- twice per level (24 levels took about 16 s before the fix)
+SELECT fg_timed('CREATE FUNCTION fgdos_args(x text) RETURNS text LANGUAGE plxgo AS '
+  || quote_literal('return ' || repeat('strings.ReplaceAll(x, "a", "a" + ', 24) || 'x'
+  || repeat(')', 24)), '5s') AS go_args;
+SELECT fgdos_args('b') AS go_b;
+RESET statement_timeout;
+-- PR 24 review [9]: an integer constant on the left of << or >> is shifted as
+-- a 64-bit value, as Go gives it the type of its 64-bit context. SQL typed the
+-- literal as a 32-bit integer and took the shift count mod 32.
+CREATE FUNCTION fgsh_var(n int) RETURNS bigint LANGUAGE plxgo AS $$
+ var mask int64 = 1 << n
+ return mask
+$$;
+SELECT fgsh_var(31) AS go_2147483648, fgsh_var(32) AS go_4294967296,
+       fgsh_var(35) AS go_34359738368;
+CREATE FUNCTION fgsh_const() RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 1 << 40
+ var c int64 = 3
+ c = c << 33
+ var d int64 = -1 << 40
+ var e int64 = (1 << 40) >> 39
+ return fmt.Sprintf("%d %d %d %d", a, c, d, e)
+$$;
+SELECT fgsh_const() AS go_1099511627776_25769803776_m1099511627776_2;
+-- a 32-bit int target that cannot hold the value fails loudly
+CREATE FUNCTION fgsh_int(n int) RETURNS int LANGUAGE plxgo AS $$
+ var m int = 1 << n
+ return m
+$$;
+SELECT fgsh_int(4) AS go_16;
+SELECT fg_err('SELECT fgsh_int(31)') AS go_out_of_range;
+-- PR 24 review [12]: a rune literal is an integer, its code point, as in Go.
+-- plx emitted it as a SQL string, so '7' became the number 7 and 'a' failed.
+CREATE FUNCTION fgrn_arith(s text) RETURNS int LANGUAGE plxgo AS $$
+ var d rune = '7'
+ var n int = '7' + 1
+ return d * 100 + n
+$$;
+SELECT fgrn_arith('x') AS go_5556;
+CREATE FUNCTION fgrn_var() RETURNS int LANGUAGE plxgo AS $$
+ var r rune = 'a'
+ return r
+$$;
+SELECT fgrn_var() AS go_97;
+CREATE FUNCTION fgrn_infer() RETURNS text LANGUAGE plxgo AS $$
+ c := 'a'
+ var d rune = c + 1
+ return fmt.Sprintf("%v %v", c, d)
+$$;
+SELECT fgrn_infer() AS go_97_98;
+CREATE FUNCTION fgrn_digit(s text) RETURNS int LANGUAGE plxgo AS $$
+ return '7' - '0'
+$$;
+SELECT fgrn_digit('x') AS go_7;
+-- string(r) and %c turn a rune back into its character
+CREATE FUNCTION fgrn_char() RETURNS text LANGUAGE plxgo AS $$
+ var r rune = 'a' + 1
+ return fmt.Sprintf("%s|%c|%d", string(r), 'z', 'é')
+$$;
+SELECT fgrn_char() AS go_b_z_233;
+-- a rune literal holds exactly one character
+CREATE FUNCTION fgrn_two() RETURNS int LANGUAGE plxgo AS $$ return 'ab' $$;
+CREATE FUNCTION fgrn_empty() RETURNS int LANGUAGE plxgo AS $$ return '' $$;
+-- %c where the directives and arguments do not line up is rejected, since the
+-- format() lowering would print the number
+CREATE FUNCTION fgrn_cfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%c %d", 'a') $$;
+-- PR 24 review [14]: a * width or precision in fmt.Sprintf takes its value
+-- from the next argument, as in Go. plx printed the directive as text and
+-- gave every later verb the wrong argument.
+CREATE FUNCTION fgsp_star() RETURNS text LANGUAGE plxgo AS $$
+ n := 6
+ return fmt.Sprintf("[%*d|%s]", 5, 42, "x") + fmt.Sprintf("[%-*s|%d]", 4, "ab", 7) +
+   fmt.Sprintf("[%*d]", -4, 7) + fmt.Sprintf("[%*s]", n, "ab") + fmt.Sprintf("[%*d]", 1, 123)
+$$;
+SELECT fgsp_star() AS go_star;
+-- a * precision takes its argument too; the precision itself is dropped, as
+-- for a written precision, so 3.5 prints in full
+CREATE FUNCTION fgsp_prec() RETURNS text LANGUAGE plxgo AS $$
+ return fmt.Sprintf("[%.*f|%d]", 2, 3.5, 9)
+$$;
+SELECT fgsp_prec() AS go_prec;
+-- where the directives and arguments do not line up, * is rejected, since the
+-- format() lowering cannot take a width from an argument
+CREATE FUNCTION fgsp_starfall() RETURNS text LANGUAGE plxgo AS $$ return fmt.Sprintf("%*d %d", 5, 42) $$;
+-- Review of the PR 24 fixes, problem 1: a rune literal on the left of a shift
+-- is an integer constant too, so it is shifted as a 64-bit value. It was
+-- shifted as a 32-bit integer, with the count taken mod 32.
+CREATE FUNCTION fgsh_rune(n int) RETURNS text LANGUAGE plxgo AS $$
+ var m int64 = 'a' << 40
+ var k int64 = 'a' << n
+ return fmt.Sprintf("%d %d", m, k)
+$$;
+SELECT fgsh_rune(40) AS go_rune_shift;
+-- Review of the PR 24 fixes, problem 2: string(x) is a character only for an
+-- integer x. Go rejects string(x) of a float or a bool, and so does plx at
+-- CREATE FUNCTION. plx made each of these a character, or a run-time error.
+CREATE FUNCTION fgstr_float(f float8) RETURNS text LANGUAGE plxgo AS $$ return string(f) $$;
+CREATE FUNCTION fgstr_flit() RETURNS text LANGUAGE plxgo AS $$ return string(1.5) $$;
+CREATE FUNCTION fgstr_bool(b bool) RETURNS text LANGUAGE plxgo AS $$ return string(b) $$;
+CREATE FUNCTION fgstr_true() RETURNS text LANGUAGE plxgo AS $$ return string(true) $$;
+CREATE FUNCTION fgstr_num(x numeric) RETURNS text LANGUAGE plxgo AS $$ return string(x + x) $$;
+CREATE FUNCTION fgstr_conv(n int) RETURNS text LANGUAGE plxgo AS $$ return string(float64(n)) $$;
+-- an integer operand still gives its character
+CREATE FUNCTION fgstr_int(n int) RETURNS text LANGUAGE plxgo AS $$
+ var r rune = 'a'
+ return string(n) + string(r + 1) + string(int(66.9))
+$$;
+SELECT fgstr_int(65) AS go_abb;
+-- Review of the PR 24 fixes, problem 4: string(x) of any integer expression
+-- is its character, not only of a + of integers. string(n * 2) gave "66".
+CREATE FUNCTION fgstr_expr(n int) RETURNS text LANGUAGE plxgo AS $$
+ return string(n * 2) + string(n - 1) + string((n + 1) * 2) + string(n << 1) + string(n / 1)
+$$;
+SELECT fgstr_expr(33) AS go_chars;
+-- a float in the expression makes it a float, which Go rejects here
+CREATE FUNCTION fgstr_fexpr(n int, f float8) RETURNS text LANGUAGE plxgo AS $$ return string(n * f) $$;
+-- Review of the PR 24 fixes, problem 3: the left operand of a shift is an
+-- integer constant also when it is a constant expression or is in brackets.
+-- Only a bare literal was shifted as a 64-bit value, so 2 * 1 << 40 gave 512
+-- and (1) << 40 gave 256.
+CREATE FUNCTION fgsh_cexpr() RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 2 * 1 << 40
+ var b int64 = (1) << 40
+ var c int64 = (1 + 1) << 40
+ var d int64 = -(1) << 40
+ var e int64 = 'a' * 1 << 40
+ return fmt.Sprintf("%d %d %d %d %d", a, b, c, d, e)
+$$;
+SELECT fgsh_cexpr() AS go_shifts;
+-- Review of the PR 24 fixes, problem 3: a shift count at least as large as the
+-- width of the value. Go gives 0 for <<, and 0 or -1 for >>. SQL takes the
+-- count mod 64 for a bigint and mod 32 for an integer, so 1 << 64 gave 1.
+CREATE FUNCTION fgsh_count(n int) RETURNS text LANGUAGE plxgo AS $$
+ var a int64 = 1 << n
+ var x int64 = -8
+ var y int64 = 8
+ var z int64 = 5
+ z <<= n
+ return fmt.Sprintf("%d %d %d %d", a, x >> n, y >> n, z)
+$$;
+SELECT fgsh_count(63) AS go_63, fgsh_count(64) AS go_64, fgsh_count(65) AS go_65;
+SELECT fgsh_count(NULL) IS NULL AS go_null;
+-- a negative count panics in Go; plx fails
+SELECT fg_err('SELECT fgsh_count(-1)') AS go_negative;
+-- an integer (32 bits in plx) shifted right by 32 or more is 0 or -1
+CREATE FUNCTION fgsh_r32(v int, n int) RETURNS int LANGUAGE plxgo AS $$ return v >> n $$;
+SELECT fgsh_r32(-8, 33) AS go_m1, fgsh_r32(8, 33) AS go_0, fgsh_r32(-8, 1) AS go_m4;
+-- shifted left by 32 or more, a non-zero integer does not fit: Go's int is 64
+-- bits wide, so plx fails as it does for any shift that leaves the range
+CREATE FUNCTION fgsh_l32(v int, n int) RETURNS int LANGUAGE plxgo AS $$ return v << n $$;
+SELECT fgsh_l32(1, 4) AS go_16, fgsh_l32(0, 40) AS go_0;
+SELECT fg_err('SELECT fgsh_l32(1, 32)') AS go_out_of_range;
+-- Each such shift is a subquery, and PostgreSQL needs memory that grows faster
+-- than linearly to plan subqueries nested in one another: shifts nested 800
+-- deep ran out of memory. plx allows 64 nested in one another.
+CREATE FUNCTION fgsh_mk(k int, lv int) RETURNS text LANGUAGE sql AS $f$
+  SELECT format('CREATE FUNCTION fgsh_many_%s_%s(n int) RETURNS bigint LANGUAGE plxgo AS %L',
+                k, lv, 'var x int64 = 1' || chr(10) || 'return ' || repeat('(', lv) || 'x' ||
+                repeat(repeat(' << n', k) || ')', lv))
+$f$;
+SELECT fg_err(fgsh_mk(64, 1)) AS go_no_error;
+SELECT fgsh_many_64_1(0) AS go_1;
+SELECT fg_err(fgsh_mk(65, 1)) AS go_too_many;
+SELECT fg_err(fgsh_mk(100, 8)) AS go_too_many;
+-- Review of the PR 24 fixes: plx evaluates some values once in a subquery (a
+-- * width, a width of a call, an integer conversion of an expression). The
+-- planner pulled each subquery up and copied the value into every place it
+-- is used, so nesting them grew exponentially: 18 nested * widths took about
+-- 14 s, and 8 nested int64() conversions ran out of memory.
+DO $d$
+BEGIN
+  EXECUTE format('CREATE FUNCTION fgsq_star(n int) RETURNS text LANGUAGE plxgo AS %L',
+    'return ' || repeat('fmt.Sprintf("%*s", n, ', 18) || '"a"' || repeat(')', 18));
+  EXECUTE format('CREATE FUNCTION fgsq_width(x text) RETURNS text LANGUAGE plxgo AS %L',
+    'return ' || repeat('fmt.Sprintf("%3s", strings.ToUpper(', 18) || 'x' || repeat('))', 18));
+  EXECUTE format('CREATE FUNCTION fgsq_int(n bigint) RETURNS bigint LANGUAGE plxgo AS %L',
+    'return ' || repeat('int64(', 8) || 'n + 1' || repeat(' + 1)', 8));
+END $d$;
+SET statement_timeout = '5s';
+SELECT fg_timed('SELECT fgsq_star(2)', '2s') AS go_star;
+SELECT fg_timed('SELECT fgsq_width(''a'')', '2s') AS go_width;
+SELECT fg_timed('SELECT fgsq_int(2)', '2s') AS go_int;
+RESET statement_timeout;
+SELECT fgsq_star(2) AS go_star, fgsq_width('a') AS go_width, fgsq_int(2) AS go_11;

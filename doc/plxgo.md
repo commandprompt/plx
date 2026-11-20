@@ -152,21 +152,22 @@ $$;
 | `&&`, `\|\|`, `!x` | `AND`, `OR`, `NOT x` |
 | `a + b` on strings | `(a) \|\| (b)` (see below) |
 | `a ^ b`, `^x`, `a &^ b` | `a # b` (XOR), `(~x)`, `a & ~(b)` |
-| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence |
+| `<<`, `>>`, `&`, `\|` | the same operators, bracketed to keep Go's precedence; an integer constant on the left of `<<` or `>>` becomes `(1)::bigint` (see below) |
 | `nil` | `NULL` |
-| `"..."`, `` `...` ``, `'x'` | SQL string literal (escapes decoded, see below) |
+| `"..."`, `` `...` `` | SQL string literal (escapes decoded, see below) |
+| `'x'` (a rune) | its code point as an integer: `'a'` is `97` |
 | `0x1F`, `0o17`, `017`, `0b101`, `1_000` | the decimal value (`31`, `15`, `15`, `5`, `1000`) |
 | `[]int{1, 2, 3}` | `ARRAY[1, 2, 3]` |
 | `len(x)` | `length(x)` (text) or `coalesce(cardinality(x), 0)` (a slice declared in the body) |
 | `append(s, x)` | `array_append(s, x)` |
 | `a[i]` (subscript) | `a[(i) + 1]` (see below) |
-| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text` (see below) |
+| `int(x)`, `int64(x)`, `float64(x)`, `string(x)` | `(x)::integer` or `trunc(x)::integer` / the same for `bigint` / `(x)::double precision` / `(x)::text`, or `chr((x)::integer)` for an integer `x` (see below) |
 | `panic(m)` | `RAISE EXCEPTION '%', m;` |
 | `fmt.Println(x)` / `fmt.Printf(f, x)` | `RAISE NOTICE '%', x;` |
 
 plx decodes every escape Go defines in an interpreted string or rune literal:
 `\a \b \f \n \r \t \v \\ \' \"`, `\xHH` and `\NNN` (one byte each in a
-string, and a Unicode character in a rune, so `'\xe9'` is `é`, as in Go), and
+string, and a Unicode code point in a rune, so `'\xe9'` is 233, as in Go), and
 `\uHHHH` and `\UHHHHHHHH` (a Unicode character, stored in the database
 encoding). As in Go, any other escape is an error. A literal that would contain
 a NUL character, or whose `\x` or octal bytes do not form valid text in the
@@ -176,6 +177,17 @@ Integer literals in hexadecimal, octal and binary, and literals with `_`
 separators, become plain decimal numbers, so they mean the same on every
 supported PostgreSQL version. A number with letters Go does not allow (such as
 `12abc`), a hexadecimal float and an imaginary literal are rejected.
+
+A rune literal is an integer, as in Go: `'7'` is 55, so `c - '0'` gives a
+digit's value. A rune literal must hold exactly one character. `string(x)` of
+an integer is the character with that code point (`string('a' + 1)` is `"b"`),
+and `%c` in `fmt.Sprintf` prints that character too. plx sees an integer in a
+rune or integer literal, a local or parameter of an integer type, an integer
+conversion such as `int(x)`, `len(x)`, and arithmetic or bitwise operators
+joining these, such as `n * 2`. Go rejects `string(x)` of a float or a bool, and plx rejects `string(x)`
+of a float, `numeric` or bool value at `CREATE FUNCTION`; format such a value
+with `fmt.Sprintf`. `string(x)` of any other operand, such as a row field, is
+its text.
 
 A conversion to an integer type truncates toward zero, as in Go: `int(3.7)` is
 3 and `int(-2.7)` is -2. A SQL cast would round instead. plx casts an integer
@@ -193,6 +205,22 @@ bitwise operator, plx brackets it by Go's rules, so `1 << 2 + 1` is
 `(1 << 2) + 1`, which is 5, as in Go. A unary `^x` binds tighter than any
 binary operator in Go, but SQL's prefix `~` binds looser than `+` and `*`, so
 plx brackets it with its operand: `^y + 1` is `(~y) + 1`, which is `-y`.
+
+In Go, an integer or rune constant on the left of a shift takes the type of its
+context, such as `int64`. SQL would type it as a 32-bit integer and take the
+shift count mod 32, so plx shifts it as a `bigint`: `var m int64 = 1 << 40` is
+1099511627776, as in Go. The same holds for a constant expression, such as
+`(1) << 40` or `2 * 1 << 40`, which Go reads as `(2 * 1) << 40`. plx maps `int` to the 32-bit `integer`, so storing a
+shift that does not fit in an `int` fails with `integer out of range`. Go's
+64-bit `int` would hold it; declare the variable `int64`.
+
+A shift count that is not a decimal literal below 32 gives Go's result for
+every count. `x << n` is 0 when `n` is at least the width of `x` (64 bits for
+`int64`), and `x >> n` is then 0 or -1. A negative count fails, as it panics in
+Go. A non-zero `int` shifted left by 32 or more fails with
+`integer out of range`, since a plx `int` has 32 bits. plx evaluates such a
+shift in a subquery, and rejects an expression with more than 64 of them nested
+in one another; split it into several statements.
 
 ### String concatenation with `+`
 
@@ -274,14 +302,20 @@ as empty. A message built for `panic` is the exception and keeps each operand's
 empty-string fallback, so one NULL cannot swallow the message.
 
 Every verb renders its operand as text. A `-` flag and a width are kept and
-become `rpad`/`lpad`, so `%-8d` still pads to eight columns. As in Go, the width
+become `rpad`/`lpad`, so `%-8d` still pads to eight columns. A `*` width
+takes its value from the next argument, as in Go, so `fmt.Sprintf("%*d", 5, 42)`
+is `"   42"`, and a negative width pads on the right. A `*` precision takes an
+argument too, and is then dropped like a written precision. Where the
+directives and arguments do not line up, plx rejects a `*`. As in Go, the width
 is a minimum: an operand longer than the width prints in full. An explicit
 argument index such as `%[1]d` is not supported, and plx rejects the function. Go's other flags
 and its precision field are dropped, so `%.2f` prints the operand's full text
 rather than rounding it to two decimal places. Verbs that change an operand's
 representation rather than its padding are affected the same way: `%x`, `%o`,
 `%b`, `%e` and `%q` all render the operand's text, so `fmt.Sprintf("%x", 255)`
-yields `255` and not `ff`.
+yields `255` and not `ff`. `%c` prints the character whose code point its
+integer operand holds, as in Go; it needs exactly one argument for each
+directive, and at most 16, or plx rejects the function.
 A doubled `%%` stays a literal `%`. A `%` that starts no directive is also
 rendered as a literal percent, but it makes plx fall back to `format()`, where
 a NULL operand renders as empty instead of propagating; write `%%` instead.
