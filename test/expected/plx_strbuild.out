@@ -105,7 +105,7 @@ SELECT regexp_replace(prosrc, '/\*plx-orig:[^*]*\*/\s*', '', 'g') FROM pg_proc W
    FOR i IN 1..n LOOP                                     +
      s := public.plx_sb_append_strict(s, (i::text)::text);+
    END LOOP;                                              +
-   RETURN s;                                              +
+   RETURN (s)::text;                                      +
  END;                                                     +
  
 (1 row)

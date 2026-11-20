@@ -1298,12 +1298,14 @@ php_value_ref(const char *s, int len, int i, int j)
 }
 
 /*
- * plxphp: is name the target of a .= anywhere in the body? Such a local is
- * declared as the string builder (see the append lowering in the statement
- * emitter), and PostgreSQL cannot choose a || for a builder beside an
- * untyped literal, so the rewriter reads it as text. The source order does
- * not matter: a read before the first .= sees the same declared type. The set
- * is built by one scan of the tokens, on first use.
+ * Is name the target of an append anywhere in the body: .= in plxphp, += or
+ * << in the other dialects? An append to a string local declares it as the
+ * string builder (see the append lowering in the statement emitter), and
+ * PostgreSQL cannot choose a || for a builder beside an untyped literal, so
+ * the rewriter reads it as text. The source order does not matter: a read
+ * before the first append sees the same declared type. The set is built by
+ * one scan of the tokens, on first use. Outside plxphp, += and << also apply
+ * to numbers, so the caller checks builder_local too.
  */
 static bool
 php_appended(Ctx *cx, const char *name, int len)
@@ -1329,8 +1331,10 @@ php_appended(Ctx *cx, const char *name, int len)
 		for (k = 0; cx->t[k].kind != T_EOF; k++)
 		{
 			CHECK_FOR_INTERRUPTS();
-			if (cx->t[k].kind == T_IDENT && cx->t[k + 1].kind == T_DOT &&
-				plx_tok_is(&cx->t[k + 2], "="))
+			if (cx->t[k].kind == T_IDENT &&
+				(cx->surf->concat_op ?
+				 (cx->t[k + 1].kind == T_DOT && plx_tok_is(&cx->t[k + 2], "=")) :
+				 (plx_tok_is(&cx->t[k + 1], "+=") || plx_tok_is(&cx->t[k + 1], "<<"))))
 			{
 				plx_local_key(cx->t[k].s, cx->t[k].len, key);
 				(void) hash_search(cx->appended, key, HASH_ENTER, NULL);
@@ -1339,6 +1343,18 @@ php_appended(Ctx *cx, const char *name, int len)
 	}
 	plx_local_key(name, len, key);
 	return hash_search(cx->appended, key, HASH_FIND, NULL) != NULL;
+}
+
+/*
+ * Outside plxphp: is name a local whose append makes it the string builder,
+ * that is, a local of a type the builder stands in for?
+ */
+static bool
+builder_local(Ctx *cx, const char *name, int len)
+{
+	PlxLocal2  *l = plx_local_find(cx, name, len);
+
+	return l && l->typ && is_builder_type(l->typ);
 }
 
 void
@@ -2965,8 +2981,10 @@ rewrite_expr_inner(Ctx *cx, const char *s, int len, bool boolctx)
 				appendStringInfoString(&out, "OR");
 			else if (wl == 3 && strncmp(s + i, "not", 3) == 0)
 				appendStringInfoString(&out, "NOT ");
-			else if (surf->concat_op && php_value_ref(s, len, i, j) &&
-					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl))
+			else if (php_value_ref(s, len, i, j) &&
+					 (surf->concat_op || !(j < len && s[j] == '.')) &&
+					 php_appended(cx, s + i, wl) && !plx_is_param(cx, s + i, wl) &&
+					 (surf->concat_op || builder_local(cx, s + i, wl)))
 			{
 				/* a .= target is a string builder: read it as text */
 				note_name_ref(cx, s, len, i, j);

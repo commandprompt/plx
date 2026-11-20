@@ -711,6 +711,11 @@ not here.
 
 #### Several dialects
 
+- plxjs, plxts, plxpython3, plxruby: `||` on a string built with `+=` or
+  `<<`, and an interpolation of such a string into SQL, failed at run time
+  with `operator is not unique: plx_strbuild || unknown`, because the append
+  makes the variable a `plx_strbuild`. plx now reads such a variable as
+  `text` in expressions, as it does for plxphp `.=` (see plxphp below).
 - plxjs, plxts, plxphp, plxpython3, plxruby: a loop bound that used `<<`,
   `>>`, `&`, `|` or `#`, such as `i < n >> 1` or `range(n >> 1)`, gave the
   wrong number of iterations with no error. plx turns an exclusive bound HI

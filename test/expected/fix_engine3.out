@@ -469,3 +469,45 @@ SELECT r2c10_js(6) AS js, r2c10_ts(6) AS ts, r2c10_php(6) AS php, r2c10_py(6) AS
 (1 row)
 
 -- js: 0 1 2 0;3;6;9;  ts: 0 1 2  php: 0 1 2  py: 0 1 2 6,5,4,10;8;  rb: 0 1 2 0,1,2,3,4,5,
+-- R2-C12 (PR 24 review r2 c1[2]): a string local that an append turns into
+-- the string builder is read as text in every dialect, so || and an
+-- interpolation into SQL work on it (review [7] fixed plxphp only).
+-- A numeric += local is still read as a number.
+CREATE FUNCTION r2c12_js() RETURNS text LANGUAGE plxjs AS $$
+let s = '';
+s += 'a';
+s += 'b';
+let n = 1;
+n += 2;
+let r = fetch_one(`SELECT ${s} || '?' AS v`);
+return `${s || '!'}${r.v}${n + 1}`;
+$$;
+CREATE FUNCTION r2c12_ts() RETURNS text LANGUAGE plxts AS $$
+let s: string = '';
+s += 'a';
+s += 'b';
+let r = fetch_one(`SELECT ${s} || '!' AS v`);
+return r.v;
+$$;
+CREATE FUNCTION r2c12_rb() RETURNS text LANGUAGE plxruby AS $$
+s = ''
+s << 'a'
+s << 'b'
+return s || '!'
+$$;
+CREATE FUNCTION r2c12_py() RETURNS text LANGUAGE plxpython3 AS $$
+s = ''
+s += 'a'
+s += 'b'
+n = 1
+n += 2
+r = fetch_one(f"SELECT {s} || '!' AS v, {n} + 1 AS m")
+return f"{r.v}{r.m}"
+$$;
+SELECT r2c12_js() AS js, r2c12_ts() AS ts, r2c12_rb() AS rb, r2c12_py() AS py;
+   js    | ts  | rb  |  py  
+---------+-----+-----+------
+ ab!ab?4 | ab! | ab! | ab!4
+(1 row)
+
+-- js: ab!ab?4  ts: ab!  rb: ab!  py: ab!4
