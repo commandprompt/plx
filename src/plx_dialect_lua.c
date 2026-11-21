@@ -290,7 +290,19 @@ tok_desc(Tok *k)
 		return pstrdup("type annotation");
 	if (!k->s || k->len <= 0)
 		return pstrdup("token");
-	return psprintf("'%.*s'", Min(k->len, 40), k->s);
+	{
+		/*
+		 * Cut on a character boundary, so the message is valid in the server
+		 * encoding. A token that is part of a multibyte character (the lexer
+		 * splits a non-ASCII byte off as its own token) shows the whole
+		 * character; the body holds it in full.
+		 */
+		int			n = pg_mbcliplen(k->s, k->len, Min(k->len, 40));
+
+		if (n == 0)
+			n = pg_mblen(k->s);
+		return psprintf("'%.*s'", n, k->s);
+	}
 }
 
 /* ------------------------------------------------------------------ types */
@@ -1032,7 +1044,7 @@ lua_str_decode(Ctx *cx, const char *s, int len, int line)
 					{
 						uint32		cp = 0;
 						int			nd = 0;
-						unsigned char u8[8];
+						unsigned char u8[MAX_UNICODE_EQUIVALENT_STRING + 1];
 
 						if (p >= e || *p != '{')
 							plx_err(cx, line, "missing '{' in a \\u{xxxx} escape");
@@ -1052,8 +1064,9 @@ lua_str_decode(Ctx *cx, const char *s, int len, int line)
 							plx_err(cx, line, "a string cannot contain a NUL character in PostgreSQL");
 						if (cp >= 0xD800 && cp <= 0xDFFF)
 							plx_err(cx, line, "a \\u escape cannot name a surrogate");
+						/* the character in the database encoding, as plxcsharp does */
 						memset(u8, 0, sizeof(u8));
-						unicode_to_utf8((pg_wchar) cp, u8);
+						pg_unicode_to_server((pg_wchar) cp, u8);
 						appendStringInfoString(&b, (char *) u8);
 						break;
 					}

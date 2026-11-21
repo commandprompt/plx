@@ -849,3 +849,12 @@ CREATE FUNCTION lua_q6(userId int) RETURNS int LANGUAGE plxlua AS $$
 return userId + 1
 $$;
 SELECT lua_q6(41);  -- 42
+
+-- 3.1.0 review: an error message quotes a token without cutting a
+-- multibyte character in half.
+\set VERBOSITY terse
+CREATE FUNCTION lua_mb() RETURNS int LANGUAGE plxlua AS $$
+local éééé = 1
+return 1
+$$;
+\set VERBOSITY default
