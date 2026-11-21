@@ -98,7 +98,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `.=` starts as an empty string. A message built with appends is not covered
   by the RAISE exception: if a part was NULL, the raised message is `<NULL>`.
   plxcobol's `STRING-APPEND` does not follow the append rule: it treats a NULL
-  as nothing to append, because COBOL has no NULL.
+  as nothing to append, because COBOL has no NULL. Nor does plxcsharp's `+=`
+  on a string: it treats a NULL as an empty string, as C# does.
 - **A NULL errcode makes RAISE fail.** In plxruby, a NULL value in the
   `detail:`, `hint:`, `column:` or `constraint:` option of `raise` becomes an
   empty string, the same as in the message, so your error is still raised with

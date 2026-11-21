@@ -290,7 +290,7 @@ taken to be a schema-qualified SQL function.
 |---|---|
 | `s.Length` | `length(s)` (`cardinality(a)` on an array) |
 | `s.ToUpper()`, `s.ToLower()` (and the `Invariant` forms) | `upper(s)`, `lower(s)` |
-| `s.Trim()`, `s.TrimStart()`, `s.TrimEnd()` (optionally with characters) | `btrim`, `ltrim`, `rtrim` |
+| `s.Trim()`, `s.TrimStart()`, `s.TrimEnd()` (optionally with characters) | `btrim`, `ltrim`, `rtrim`; with no argument they remove white space as `char.IsWhiteSpace` defines it (in a database that is not UTF-8, only tab through carriage return and space) |
 | `s.Contains(x)` | `strpos(s, x) > 0` (`x = ANY(a)` on an array) |
 | `s.StartsWith(x)`, `s.EndsWith(x)` | `starts_with(s, x)`, a suffix test |
 | `s.IndexOf(x)` | `strpos(s, x) - 1` (0-based, -1 when absent) |
@@ -699,10 +699,14 @@ emulating the .NET runtime.
   and `ToString("F2")` of a `double` round its decimal form half away from
   zero: `2.675` with `:F2` is `2.68` and `2.5` with `:F0` is `3` (.NET: `2.67`
   and `2`). A cast `(int)x` truncates toward zero, as in C#.
-- Decimal division keeps at most 20 digits after the point for a quotient that
-  does not end (`1m / 3m` is `0.33333333333333333333`; .NET keeps 28), and a
-  quotient that ends keeps only the digits it needs, as in C# (`7m / 2` is
-  `3.5`).
+- Decimal division follows C#'s scale for a quotient that ends: it keeps at
+  least as many decimal places as the dividend has more than the divisor, and
+  drops trailing zeros past that (`7m / 2` is `3.5`, `250.00m / 2` is
+  `125.00`). A quotient that does not end keeps PostgreSQL's precision
+  (`1m / 3m` is `0.33333333333333333333`), where .NET keeps 28 significant
+  digits.
+- `Math.Round(x, digits)` on a `decimal` gives exactly `digits` decimal
+  places (`Math.Round(5m, 2)` is `5.00`; C#: `5`).
 - `byte`, `sbyte`, `ushort` and `uint` are the wider SQL types `smallint`,
   `integer` and `bigint`, so they neither wrap nor fail at their C# range:
   `byte b = 255; b++` gives 256 (C#: 0) and `(byte)300` is 300 (C#: 44).
@@ -721,7 +725,8 @@ emulating the .NET runtime.
   for `Math.Log(8, 2)`), and fails for `double` arguments.
 - `Convert.ToInt32` of a NULL string is NULL (C#: 0). `int.Parse`,
   `bool.Parse` and the other `Parse` methods read text as PostgreSQL does, so
-  they also accept `0x1F`, `1_000` and `yes`, where .NET throws.
+  they also accept `yes` and, on PostgreSQL 16 and later, `0x1F` and `1_000`,
+  where .NET throws.
 - `Length` counts characters, so a character outside the Basic Multilingual
   Plane counts once (`"a😀b".Length` is 3; C#: 4 UTF-16 code units).
 - `bool` values print as `true` and `false`, not `True` and `False`.

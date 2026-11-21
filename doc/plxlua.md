@@ -158,7 +158,7 @@ iteration.
 | `t[i]`, `r.f`, `r["f"]` | `t[i]`, `r.f`, `r.f` |
 | `a // b` | `floor(a::numeric / b)` |
 | `a & b`, `a \| b`, `a ~ b`, `~a` | `&`, `\|`, `#`, `~` |
-| `a << n`, `a >> n` | Lua's 64-bit logical shift (a `bigint`): a count of 64 or more gives 0, and a negative count shifts the other way |
+| `a << n`, `a >> n` | Lua's 64-bit logical shift (a `bigint`): a count of 64 or more gives 0, a negative count shifts the other way, and an operand or count with a fraction is an error. At most 64 shifts may nest in one expression |
 | `tostring(x)`, `tonumber(s)` | `x::text`, `s::numeric` |
 
 ## Control flow
@@ -611,7 +611,9 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   `nil` becomes `IS NULL`. A condition that is NULL counts as false.
 - `and` and `or` in a value give a boolean, except for the idioms `x or d`,
   `c and a or b` (with a literal `a`) and `c and v or d`. `x or d` is
-  `COALESCE`, which differs from Lua only when `x` is `false`.
+  `COALESCE`, which differs from Lua only when `x` is `false`. `c and false
+  or d` and `c and nil or d` are `d`, and `c` is not evaluated, so a call in
+  it does not run.
 - `..` with a nil operand is an error in Lua; here the result is NULL. In a
   message for `error`, `raise`, `assert` or `print` the operand prints as an
   empty string instead, and in the string-builder form `s = s .. e` a NULL
@@ -638,7 +640,9 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   prefixes `0b` and `0o`, where Lua returns nil.
 - `ipairs` visits every element of the array, NULLs included; Lua stops at the
   first nil. Over a variable it reads the array afresh on each step, as Lua
-  does, so elements the body appends or changes are seen.
+  does, so elements the body appends or changes are seen. A body that assigns
+  the variable itself (`t = {...}`, `t = nil`) does not change the loop, as in
+  Lua: the loop then walks the array as it was when it began.
 - Tables are PostgreSQL arrays. Assigning `t[0]` or a negative index extends
   the array downward, so `#t` and `table.concat` include that element; in Lua
   it is a key outside the sequence. Use indexes from 1.
