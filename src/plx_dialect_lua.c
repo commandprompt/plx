@@ -785,7 +785,20 @@ lua_declare(Lua *L, const char *name, int len, const char *typ, bool rec,
 		pany = lua_param_ci(cx, cand, (int) strlen(cand), lname, &psame);
 		if (forvar)
 		{
+			int			w;
+			bool		watched = false;
+
 			if (v && strcmp(v->lname, lname) != 0)
+				continue;
+			/*
+			 * An enclosing ipairs loop watches its array's plpgsql name for
+			 * reassignment; a loop variable that took the same name would
+			 * look like one (lua_note_rebind).
+			 */
+			for (w = 0; w < L->nwatch; w++)
+				if (strcmp(L->watch[w], cand) == 0)
+					watched = true;
+			if (watched)
 				continue;
 			if (pany && !psame)
 				continue;

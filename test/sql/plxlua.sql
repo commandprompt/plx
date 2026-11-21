@@ -1021,3 +1021,30 @@ end
 return s
 $$;
 SELECT lua_ipairs_pcall_p(ARRAY['a', 'b', 'c']);  -- a,b,c,
+-- 3.1.0 review round 7: a for variable named like the array is another
+-- variable; assigning it does not freeze the ipairs loop over the array.
+-- Expected values from lua5.4.
+CREATE FUNCTION lua_ipairs_forvar() RETURNS text LANGUAGE plxlua AS $$
+local s = ""
+local ok
+local t = {1, 2, 3}
+for i, v in ipairs(t) do
+  if i == 1 then table.insert(t, 9) end
+  for t = 1, 1 do t = 5 end
+  s = s .. v .. ","
+end
+local u = {1, 2, 3}
+for i, v in ipairs(u) do
+  if i == 1 then table.insert(u, 9) end
+  for u = 1, 1 do ok, u = pcall(function() end) end
+  s = s .. v .. ","
+end
+local w = {1, 2, 3}
+for i, v in ipairs(w) do
+  if i == 1 then table.insert(w, 9) end
+  for w in ipairs({5}) do w = 5 end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_forvar();  -- 1,2,3,9,1,2,3,9,1,2,3,9,
