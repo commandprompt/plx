@@ -816,3 +816,36 @@ if b == nil then return "nil" end
 return tostring(b)
 $$;
 SELECT lua_byte('ABC', 10), lua_byte('', 1), lua_byte('ABC', 2);  -- nil nil 66
+
+-- 3.1.0 review: parameter names are written as the catalog spells them,
+-- quoted where needed. An OUT parameter name was pasted unquoted, so a
+-- quoted name could inject code and "Total" set total; a reference to
+-- parameter "X" beside x read x.
+CREATE FUNCTION lua_q1(x int, OUT a int, OUT "a := 42; RAISE NOTICE 'injected'; a" int)
+LANGUAGE plxlua AS $$
+return x, x
+$$;
+SELECT * FROM lua_q1(1);  -- 1 | 1, no notice
+CREATE FUNCTION lua_q2(OUT "Total" int, OUT total int) LANGUAGE plxlua AS $$
+return 1, 2
+$$;
+SELECT * FROM lua_q2();  -- 1 | 2
+CREATE FUNCTION lua_q3(n int) RETURNS TABLE(a int, "Total" int) LANGUAGE plxlua AS $$
+emit(n, n + 1)
+$$;
+SELECT * FROM lua_q3(5);  -- 5 | 6
+CREATE FUNCTION lua_q4("X" int, x int) RETURNS int LANGUAGE plxlua AS $$
+return X * 10 + x
+$$;
+SELECT lua_q4(1, 2);  -- 12
+CREATE FUNCTION lua_q5("X" int, x int) RETURNS int LANGUAGE plxlua AS $$
+X = X + 100
+return X + x
+$$;
+SELECT lua_q5(1, 2);  -- 103
+-- a name the source spells in another case than the catalog still finds
+-- its parameter (SQL folds userId to userid)
+CREATE FUNCTION lua_q6(userId int) RETURNS int LANGUAGE plxlua AS $$
+return userId + 1
+$$;
+SELECT lua_q6(41);  -- 42

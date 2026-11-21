@@ -412,12 +412,18 @@ typ_elem(const char *t)
 
 /* ------------------------------------------------------------- parameters */
 
-/* index of the parameter named name (case-insensitively, as PostgreSQL
- * folded it), or -1 */
+/*
+ * Index of the parameter named name, or -1. A parameter spelled exactly so
+ * wins; otherwise the one that matches ignoring case, as SQL folds an
+ * unquoted name (userId is the parameter userid). Two parameters that match
+ * only ignoring case ("X" and "x" for the name X1) are ambiguous.
+ */
 static int
 lua_param(Ctx *cx, const char *name, int len)
 {
-	int			i;
+	int			i,
+				found = -1,
+				nfound = 0;
 
 	if (!cx->meta || !cx->meta->argnames)
 		return -1;
@@ -425,11 +431,30 @@ lua_param(Ctx *cx, const char *name, int len)
 	{
 		const char *an = cx->meta->argnames[i];
 
-		if (an && an[0] && (int) strlen(an) == len &&
-			pg_strncasecmp(an, name, len) == 0)
+		if (!an || !an[0] || (int) strlen(an) != len)
+			continue;
+		if (strncmp(an, name, len) == 0)
 			return i;
+		if (pg_strncasecmp(an, name, len) == 0)
+		{
+			found = i;
+			nfound++;
+		}
 	}
-	return -1;
+	if (nfound > 1)
+		plx_err(cx, cx->t[cx->pos].line,
+				"\"%.*s\" matches more than one parameter that differ only in case; spell it as the parameter is declared",
+				len, name);
+	return found;
+}
+
+/* the parameter named name, as SQL text: its catalog name, quoted if needed */
+static char *
+lua_param_ref(Ctx *cx, const char *name, int len)
+{
+	int			i = lua_param(cx, name, len);
+
+	return pstrdup(quote_identifier(cx->meta->argnames[i]));
 }
 
 static Oid
@@ -2208,6 +2233,14 @@ x_name(LuaX *x, Tok *k, LuaBind *b)
 		v = lv_new(pnstrdup(k->s, k->len), SP_ATOM);
 		if (pi >= 0)
 			v->typ = lua_param_typ(x->cx, pi);
+		lua_ref(x->L, v->s);
+		/* a parameter as the catalog spells it, quoted if needed */
+		if (pi >= 0)
+			v->s = pstrdup(quote_identifier(x->cx->meta->argnames[pi]));
+		v->simple = v->chain = true;
+		v->isbool = typ_is_bool(v->typ);
+		v->istext = typ_is_text(v->typ);
+		return v;
 	}
 	lua_ref(x->L, v->s);
 	v->simple = v->chain = true;
@@ -3869,7 +3902,7 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 					bd->errid = lua_errvar(L, bd->pgname)->id;
 			}
 			else if (lua_param(cx, t[ta[i]].s, t[ta[i]].len) >= 0)
-				pg[i] = pnstrdup(t[ta[i]].s, t[ta[i]].len);
+				pg[i] = lua_param_ref(cx, t[ta[i]].s, t[ta[i]].len);
 			else
 			{
 				imp[i] = lua_declare(L, t[ta[i]].s, t[ta[i]].len,
@@ -3933,7 +3966,7 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 				lhs = bd->pgname;
 			}
 			else if (param)
-				lhs = pnstrdup(nmk->s, nmk->len);
+				lhs = lua_param_ref(cx, nmk->s, nmk->len);
 			else
 			{
 				bd = lua_declare(L, nmk->s, nmk->len, typ, rec, false, L->fscope,
@@ -3969,7 +4002,7 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 				lua_emit_assign(L, ind, bd->pgname, v->s);
 			}
 			else if (param)
-				lua_emit_assign(L, ind, pnstrdup(nmk->s, nmk->len), v->s);
+				lua_emit_assign(L, ind, lua_param_ref(cx, nmk->s, nmk->len), v->s);
 			else
 			{
 				/* an undeclared name: a local of the whole function */
@@ -4041,7 +4074,7 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 				}
 				else if (lua_param(cx, nmk->s, nmk->len) >= 0)
 				{
-					tgt[i] = pnstrdup(nmk->s, nmk->len);
+					tgt[i] = lua_param_ref(cx, nmk->s, nmk->len);
 					tgtyp[i] = lua_param_typ(cx, lua_param(cx, nmk->s, nmk->len));
 				}
 				else if (lua_is_libns(nmk))
@@ -4735,7 +4768,7 @@ lua_return(Lua *L, int ind)
 				lua_refs_begin(L);
 				val[i] = lua_expr(L, as[i], ae[i], false)->s;
 				vrefs[i] = lua_refs_take(L, &nvrefs[i]);
-				tgt[i] = (char *) lua_param_name(cx, oidx[i]);
+				tgt[i] = (char *) quote_identifier(lua_param_name(cx, oidx[i]));
 				tgtyp[i] = lua_param_typ(cx, oidx[i]);
 				trefs[i] = NULL;
 				ntrefs[i] = 0;
@@ -4803,7 +4836,7 @@ lua_emit(Lua *L, int ind)
 			lua_refs_begin(L);
 			val[i] = lua_expr(L, as[i], ae[i], false)->s;
 			vrefs[i] = lua_refs_take(L, &nvrefs[i]);
-			tgt[i] = (char *) lua_param_name(cx, oidx[i]);
+			tgt[i] = (char *) quote_identifier(lua_param_name(cx, oidx[i]));
 			tgtyp[i] = lua_param_typ(cx, oidx[i]);
 			trefs[i] = NULL;
 			ntrefs[i] = 0;
