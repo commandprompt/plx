@@ -1469,6 +1469,10 @@ check_local_name(CsP *P, CsTok *t)
 		if (strcmp(low, plpgsql_reserved[i]) == 0)
 			perr(P, "'%.*s' is a reserved word in PL/pgSQL; choose another variable name",
 				 t->len, t->s);
+	/* inside a catch, plpgsql's SQLSTATE and SQLERRM hide a local so named */
+	if (strcmp(low, "sqlstate") == 0 || strcmp(low, "sqlerrm") == 0)
+		perr(P, "'%.*s' is the name of PL/pgSQL's error variable in a catch; choose another variable name",
+			 t->len, t->s);
 	/* a reserved or type/function-name keyword cannot be a column reference,
 	 * so plpgsql cannot read it as a variable */
 	kw = ScanKeywordLookup(low, &ScanKeywords);

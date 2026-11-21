@@ -656,3 +656,18 @@ CREATE FUNCTION cs_trimws(a text, b text, c text) RETURNS text LANGUAGE plxcshar
 return "[" + a.Trim() + "][" + b.TrimStart() + "][" + c.TrimEnd() + "]";
 $$;
 SELECT cs_trimws(E'\tab\n' || chr(160), E' \tx', E'y\r\n ');  -- [ab][x][y]
+
+-- 3.1.0 review: inside a catch, plpgsql's SQLSTATE and SQLERRM hide a local
+-- of the same name, so such a local read the error instead of its value.
+-- Those names are rejected.
+\set VERBOSITY terse
+CREATE FUNCTION cs_sqs(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string sqlstate = "mine";
+try { int z = 1 / n; } catch (Exception e) { return sqlstate; }
+return "none";
+$$;
+CREATE FUNCTION cs_sqs2(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string SqlErrm = "mine";
+return SqlErrm;
+$$;
+\set VERBOSITY default

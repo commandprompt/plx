@@ -1304,3 +1304,19 @@ SELECT cs_trimws(E'\tab\n' || chr(160), E' \tx', E'y\r\n ');  -- [ab][x][y]
  [ab][x][y]
 (1 row)
 
+-- 3.1.0 review: inside a catch, plpgsql's SQLSTATE and SQLERRM hide a local
+-- of the same name, so such a local read the error instead of its value.
+-- Those names are rejected.
+\set VERBOSITY terse
+CREATE FUNCTION cs_sqs(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string sqlstate = "mine";
+try { int z = 1 / n; } catch (Exception e) { return sqlstate; }
+return "none";
+$$;
+ERROR:  plxcsharp: 'sqlstate' is the name of PL/pgSQL's error variable in a catch; choose another variable name
+CREATE FUNCTION cs_sqs2(n int) RETURNS text LANGUAGE plxcsharp AS $$
+string SqlErrm = "mine";
+return SqlErrm;
+$$;
+ERROR:  plxcsharp: 'SqlErrm' is the name of PL/pgSQL's error variable in a catch; choose another variable name
+\set VERBOSITY default
