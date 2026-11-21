@@ -1897,3 +1897,34 @@ CREATE FUNCTION lua_fshift4(x numeric) RETURNS bigint LANGUAGE plxlua AS $$ retu
 SELECT lua_fshift4(1.5);
 ERROR:  invalid input syntax for type bigint: "plxlua: number has no integer representation"
 \set VERBOSITY default
+-- 3.1.0 review round 4: the variable among indexed or field targets, a
+-- local of the same name assigned again, and a for variable of that name.
+CREATE FUNCTION lua_ipairs_rebind3() RETURNS text LANGUAGE plxlua AS $$
+local r = fetch_one("SELECT 0 AS x")
+local w = {0}
+local u = {1, 2, 3}
+local s = ""
+for i, v in ipairs(u) do
+  if i == 1 then u, w[1] = {10, 20, 30, 40, 50}, 1 end
+  s = s .. v .. ","
+end
+local u2 = {1, 2, 3}
+for i, v in ipairs(u2) do
+  if i == 1 then r.x, u2 = 1, nil end
+  s = s .. v .. ","
+end
+local u3 = {1, 2, 3}
+for i, v in ipairs(u3) do
+  if i == 1 then u3[#u3 + 1] = 4 end
+  if i == 4 then local u3 = 0; u3 = 1 end
+  for u3 = 1, 2 do s = s .. "" end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_rebind3();  -- 1,2,3,1,2,3,1,2,3,4,
+  lua_ipairs_rebind3  
+----------------------
+ 1,2,3,1,2,3,1,2,3,4,
+(1 row)
+

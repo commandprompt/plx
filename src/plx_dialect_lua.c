@@ -4528,6 +4528,60 @@ lua_numfor(Lua *L, int ind, int a, int dok)
 }
 
 /* for names in iterator do ... end */
+/*
+ * Does generated plpgsql body assign the variable named name: a line
+ * "name := ...", or name in the target list after INTO?
+ */
+static bool
+lua_body_assigns(const char *body, const char *name)
+{
+	size_t		nl = strlen(name);
+	const char *p = body;
+
+	while (*p)
+	{
+		const char *eol = strchr(p, '\n');
+		const char *q = p,
+				   *in;
+
+		if (!eol)
+			eol = p + strlen(p);
+		CHECK_FOR_INTERRUPTS();
+		while (q < eol && (*q == ' ' || *q == '\t'))
+			q++;
+		if ((size_t) (eol - q) > nl + 3 && strncmp(q, name, nl) == 0 &&
+			strncmp(q + nl, " := ", 4) == 0)
+			return true;
+		for (in = q; (in = strstr(in, " INTO ")) != NULL && in < eol; in += 6)
+		{
+			const char *r = in + 6;
+
+			if (strncmp(r, "STRICT ", 7) == 0)
+				r += 7;
+
+			for (;;)
+			{
+				const char *e = r;
+
+				while (e < eol && *e != ',' && *e != ' ' && *e != ';')
+					e++;
+				if ((size_t) (e - r) == nl && strncmp(r, name, nl) == 0)
+					return true;
+				if (e < eol && *e == ',')
+				{
+					r = e + 1;
+					while (r < eol && *r == ' ')
+						r++;
+					continue;
+				}
+				break;
+			}
+		}
+		p = *eol ? eol + 1 : eol;
+	}
+	return false;
+}
+
 static void
 lua_genfor(Lua *L, int ind, int a, int dok)
 {
@@ -4546,6 +4600,12 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 			   *prologue = NULL,
 			   *body;
 	bool		isnew;
+	/* ipairs over a variable: the live loop's parts */
+	char	   *dk = NULL;
+	const char *darr = NULL,
+			   *dtyp = NULL;
+	LuaBind    *dib = NULL,
+			   *dvb = NULL;
 
 	for (;;)
 	{
@@ -4630,38 +4690,6 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 		 * over it gives the same result.
 		 */
 		dyn = (ae[0] == as[0] + 1 && t[as[0]].kind == T_IDENT);
-		/*
-		 * Lua's ipairs keeps the table it was given: a body that assigns the
-		 * variable itself (t = {...}, t = nil) does not change the loop.
-		 * Then the loop walks the array as it was at the start.
-		 */
-		if (dyn)
-		{
-			int			j,
-						bend = L->match[dok] >= 0 ? L->match[dok] : L->ntok - 1;
-
-			for (j = dok + 1; j + 1 < bend && dyn; j++)
-			{
-				int			f = j + 1,
-							b = j;
-
-				if (!(t[j].kind == T_IDENT && t[j].len == t[as[0]].len &&
-					  strncmp(t[j].s, t[as[0]].s, t[j].len) == 0))
-					continue;
-				/* t in a target list: t = ..., t, a = ..., a, t = ... */
-				while (f + 1 < bend && t[f].kind == T_COMMA && t[f + 1].kind == T_IDENT)
-					f += 2;
-				if (!plx_tok_is(&t[f], "="))
-					continue;
-				while (b - 2 > dok && t[b - 1].kind == T_COMMA && t[b - 2].kind == T_IDENT)
-					b -= 2;
-				/* a field (r.t =), or local t = ...: another variable */
-				if (t[b - 1].kind == T_DOT || plx_tok_is(&t[b - 1], ":") ||
-					(t[b - 1].kind == T_KW && t[b - 1].kw == KW_LET))
-					continue;
-				dyn = false;
-			}
-		}
 		if (dyn)
 		{
 			StringInfo	o = &cx->out;
@@ -4677,7 +4705,6 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 		lua_scope_push(L);
 		if (dyn)
 		{
-			StringInfoData pro;
 			LuaBind    *ib = NULL,
 					   *vb = NULL;
 
@@ -4712,22 +4739,13 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 				lua_activate(L, vb, L->scope);
 			}
 			header = pstrdup("LOOP");
-			initStringInfo(&pro);
-			plx_indent(&pro, ind + 1);
-			appendStringInfo(&pro, "%s := %s + 1;\n", k, k);
-			plx_indent(&pro, ind + 1);
-			appendStringInfo(&pro, "EXIT WHEN %s > coalesce(cardinality(%s), 0);\n", k, arr->s);
-			if (ib)
-			{
-				plx_indent(&pro, ind + 1);
-				appendStringInfo(&pro, "%s := %s;\n", ib->pgname, k);
-			}
-			if (vb)
-			{
-				plx_indent(&pro, ind + 1);
-				appendStringInfo(&pro, "%s := %s[%s];\n", vb->pgname, arr->s, k);
-			}
-			prologue = pro.data;
+			/* the prologue is written once the body is known (see below) */
+			dk = k;
+			darr = arr->s;
+			dtyp = arr->typ ? arr->typ :
+				lua_param_typ(cx, lua_param(cx, t[as[0]].s, t[as[0]].len));
+			dib = ib;
+			dvb = vb;
 		}
 		else if (nn == 1)
 		{
@@ -4788,6 +4806,43 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 
 	cx->pos = bodystart;
 	body = lua_capture(L, ind + 1);
+	if (dk)
+	{
+		/*
+		 * Lua's ipairs keeps the table it was given: a body that assigns the
+		 * variable itself (t = {...}, t = nil, t, a = ...) does not change
+		 * the loop. The generated body shows every such assignment as
+		 * "t := ..." or "INTO ..., t"; a local of the same name declared in
+		 * the body has another plpgsql name. Then the loop walks a copy made
+		 * at the start.
+		 */
+		const char *src = darr;
+		StringInfoData pro;
+
+		if (lua_body_assigns(body, darr))
+		{
+			if (!dtyp)
+				plx_err(cx, line, "cannot infer the type of the array the loop body assigns; annotate it where it is declared");
+			src = lua_hidden(L, "a", dtyp);
+			lua_emit_assign(L, ind, src, darr);
+		}
+		initStringInfo(&pro);
+		plx_indent(&pro, ind + 1);
+		appendStringInfo(&pro, "%s := %s + 1;\n", dk, dk);
+		plx_indent(&pro, ind + 1);
+		appendStringInfo(&pro, "EXIT WHEN %s > coalesce(cardinality(%s), 0);\n", dk, src);
+		if (dib)
+		{
+			plx_indent(&pro, ind + 1);
+			appendStringInfo(&pro, "%s := %s;\n", dib->pgname, dk);
+		}
+		if (dvb)
+		{
+			plx_indent(&pro, ind + 1);
+			appendStringInfo(&pro, "%s := %s[%s];\n", dvb->pgname, src, dk);
+		}
+		prologue = pro.data;
+	}
 	lua_expect(L, KW_END, "end", line);
 	lua_scope_pop(L);
 	lua_loop_pop(L);
