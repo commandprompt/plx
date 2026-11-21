@@ -652,9 +652,10 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   limit (ceils it for a negative step), as Lua does.
 - `assert` is plpgsql's `ASSERT`, which `plpgsql.check_asserts = off` turns
   off. `error`'s level is ignored, and its message has no position prefix.
-- A local that shadows another is renamed in the plpgsql (`x_2`). SQL text
-  refers to plpgsql names, so pass such a local to SQL as a bind argument
-  rather than by name.
+- A local that shadows another can be renamed in the plpgsql (`x_2`), and so
+  can a loop variable named like an array an enclosing `ipairs` walks. SQL
+  text refers to plpgsql names, so pass a local or loop variable to SQL as a
+  bind argument (`fetch_one("SELECT $1", t)`) rather than by name.
 - As in plpgsql, a local with the same name as a column used in static SQL
   makes the column reference ambiguous; use a bind argument or another name.
 

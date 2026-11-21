@@ -4,7 +4,7 @@ All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
 version in `plx.control` (currently `3.1.0`).
 
-## [3.1.0] - unreleased
+## [3.1.0] - 2026-11-21
 
 3.1.0 adds two dialects, plxlua and plxcsharp. Nothing that 3.0.0 does
 changes: functions in the other dialects transpile as before.
