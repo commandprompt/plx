@@ -157,7 +157,8 @@ iteration.
 | `{1, 2, 3}`, `{}` | `ARRAY[1, 2, 3]`, `'{}'` |
 | `t[i]`, `r.f`, `r["f"]` | `t[i]`, `r.f`, `r.f` |
 | `a // b` | `floor(a::numeric / b)` |
-| `a & b`, `a \| b`, `a ~ b`, `~a`, `a << n`, `a >> n` | `&`, `\|`, `#`, `~`, `<<`, `>>` |
+| `a & b`, `a \| b`, `a ~ b`, `~a` | `&`, `\|`, `#`, `~` |
+| `a << n`, `a >> n` | Lua's 64-bit logical shift (a `bigint`): a count of 64 or more gives 0, and a negative count shifts the other way |
 | `tostring(x)`, `tonumber(s)` | `x::text`, `s::numeric` |
 
 ## Control flow
@@ -619,18 +620,29 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   literals are exact `numeric`. `/` is SQL division: two integers divide as
   integers and truncate (`7 / 2` is `3`; write `7 / 2.0` for `3.5`). `%`
   truncates toward zero as in SQL (`-7 % 2` is `-1`, where Lua gives `1`).
-  `//` is floor division, as in Lua. Integer overflow raises an error instead
-  of wrapping. `math.floor` and `math.ceil` return the SQL type of their
+  `//` is floor division, as in Lua. Integer overflow in arithmetic raises an
+  error instead of wrapping; the shifts `<<` and `>>` wrap as in Lua. `math.floor` and `math.ceil` return the SQL type of their
   argument rather than an integer.
 - A number concatenated with `..` or passed to `tostring` renders in SQL's
   text form (`numeric` keeps its scale, so `2.50` stays `2.50`).
 - Strings are character strings: `#s`, `string.len` and `string.sub` count
-  characters, not bytes, and comparisons use the database collation.
+  characters, not bytes, and comparisons use the database collation. A
+  `\u{XXXX}` escape is that character in the database encoding.
+- `string.format`'s `%.Nf` rounds the number half away from zero, as SQL's
+  `round` does: `string.format("%.0f", 2.5)` is `3`, where Lua's C `printf`
+  gives `2`, and `string.format("%.2f", 2.675)` is `2.68` (Lua: `2.67`).
 - `tostring(nil)` is NULL, not `"nil"`, and `print` shows NULL as `<NULL>`.
   `tonumber` of text that is not a number raises an error instead of
-  returning nil.
+  returning nil. It reads the text as PostgreSQL's `numeric` does, which also
+  accepts `NaN`, `Infinity`, digits grouped with `_` (`1_000`), and the
+  prefixes `0b` and `0o`, where Lua returns nil.
 - `ipairs` visits every element of the array, NULLs included; Lua stops at the
-  first nil.
+  first nil. Over a variable it reads the array afresh on each step, as Lua
+  does, so elements the body appends or changes are seen.
+- Tables are PostgreSQL arrays. Assigning `t[0]` or a negative index extends
+  the array downward, so `#t` and `table.concat` include that element and
+  `ipairs` starts from it; in Lua it is a key outside the sequence. Use
+  indexes from 1.
 - A numeric `for` with an integer start and a fractional limit floors the
   limit (ceils it for a negative step), as Lua does.
 - `assert` is plpgsql's `ASSERT`, which `plpgsql.check_asserts = off` turns

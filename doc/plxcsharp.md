@@ -695,8 +695,35 @@ emulating the .NET runtime.
 - A `numeric` (`decimal`) value rounds half away from zero, where .NET rounds
   half to even. That covers `Math.Round` on a `decimal`, `Math.Round(x,
   digits)`, the `Convert.To...` conversions of a `decimal`, and the `:F` format.
-  A `double` rounds half to even in both. A cast `(int)x` truncates toward zero,
-  as in C#.
+  `Math.Round` of a `double` rounds half to even, as in C#, but the `:F` format
+  and `ToString("F2")` of a `double` round its decimal form half away from
+  zero: `2.675` with `:F2` is `2.68` and `2.5` with `:F0` is `3` (.NET: `2.67`
+  and `2`). A cast `(int)x` truncates toward zero, as in C#.
+- Decimal division keeps at most 20 digits after the point for a quotient that
+  does not end (`1m / 3m` is `0.33333333333333333333`; .NET keeps 28), and a
+  quotient that ends keeps only the digits it needs, as in C# (`7m / 2` is
+  `3.5`).
+- `byte`, `sbyte`, `ushort` and `uint` are the wider SQL types `smallint`,
+  `integer` and `bigint`, so they neither wrap nor fail at their C# range:
+  `byte b = 255; b++` gives 256 (C#: 0) and `(byte)300` is 300 (C#: 44).
+- Arrays are values: `int[] b = a;` copies `a`, so a later `b[0] = 9` leaves
+  `a` unchanged, and `foreach` walks the array as it was when the loop began.
+  In C# both names refer to one array.
+- A `double` converts to text in PostgreSQL's form (`1e+15`, where .NET writes
+  `1E+15`), and a `float` (`real`) combined with an integer becomes a `double`
+  (`1.1f + 1` is `2.100000023841858`; C#: `2.1`). `%` on `double` values, and
+  dividing a `double` by zero, raise an error; C# gives a remainder and
+  `Infinity`.
+- `Substring` past the end of the string returns what there is instead of
+  throwing (`"abc".Substring(5)` is `""`), and `"".Split(",")` has no parts
+  (C#: one empty part).
+- `Math.Log(x, b)` with two arguments returns `numeric` (`3.0000000000000000`
+  for `Math.Log(8, 2)`), and fails for `double` arguments.
+- `Convert.ToInt32` of a NULL string is NULL (C#: 0). `int.Parse`,
+  `bool.Parse` and the other `Parse` methods read text as PostgreSQL does, so
+  they also accept `0x1F`, `1_000` and `yes`, where .NET throws.
+- `Length` counts characters, so a character outside the Basic Multilingual
+  Plane counts once (`"a😀b".Length` is 3; C#: 4 UTF-16 code units).
 - `bool` values print as `true` and `false`, not `True` and `False`.
 - Reading an array past its end yields NULL and assigning past it extends the
   array, where C# throws `IndexOutOfRangeException`.
