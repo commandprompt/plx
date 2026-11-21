@@ -4371,8 +4371,11 @@ render_se(CsP *P, CsSE *se)
 			 * C# appends a null as an empty string, as concat() does; || would
 			 * make the whole string NULL.
 			 */
-			if (strcmp(se->op, "+") == 0 && l->ty.k == TY_STRING)
-				c = tpl(P, PR_ATOM, TY_TEXT, "concat(%1, %2)", l, se->rhs);
+			if (strcmp(se->op, "+") == 0 &&
+				(l->ty.k == TY_STRING ||
+				 (l->ty.k == TY_UNKNOWN && ty_stringish(se->rhs->ty))))
+				/* (%2)::text: a bool prints as true/false, as + prints it */
+				c = tpl(P, PR_ATOM, TY_TEXT, "concat(%1, (%2)::text)", l, se->rhs);
 			else
 				c = bin_step(P, l, se->op, se->rhs);
 			break;
@@ -6919,7 +6922,7 @@ csharp_parse_body(Ctx *cx)
 			if (an && (pg_strcasecmp(an, "sqlstate") == 0 || pg_strcasecmp(an, "sqlerrm") == 0))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("plxcsharp: parameter \"%s\" has the name of PL/pgSQL's error variable in a catch; rename it", an)));
+						 errmsg("plxcsharp: parameter or result column \"%s\" has the name of PL/pgSQL's error variable in a catch; rename it", an)));
 		}
 	}
 	cx->body = cs_stage1(cx);

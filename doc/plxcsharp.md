@@ -682,6 +682,9 @@ each construct was read.
 These are intentional. plx pins semantics to SQL and plpgsql rather than
 emulating the .NET runtime.
 
+- A local, parameter or result column may not be named `sqlstate` or
+  `sqlerrm` (in any case): inside a `catch`, plpgsql's variables of those
+  names would hide it. `CREATE FUNCTION` fails and asks you to rename it.
 - A NULL takes part in SQL three-valued logic. A comparison with a NULL operand
   is unknown, so neither `a == b` nor `a != b` is true; only a comparison with
   the literal `null` becomes `IS NULL`. A positive `if`/`while` condition treats

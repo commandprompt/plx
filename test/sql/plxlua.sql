@@ -904,3 +904,31 @@ local ab = 3
 return ab + Ab
 $$;
 SELECT lua_amb(1, 2);  -- 4
+
+-- 3.1.0 review round 3: the array variable assigned in a multiple
+-- assignment keeps the loop on the original table; a local of the same name
+-- declared in the body is another variable and leaves the loop live.
+-- Expected values from lua5.4.
+CREATE FUNCTION lua_ipairs_rebind2() RETURNS text LANGUAGE plxlua AS $$
+local t = {1, 2, 3}
+local a = 0
+local s = ""
+for i, v in ipairs(t) do
+  if i == 1 then t, a = {10, 20, 30, 40, 50}, 1 end
+  s = s .. v .. ","
+end
+local u = {1, 2, 3}
+local s2 = ""
+for i, v in ipairs(u) do
+  if i == 1 then u[#u + 1] = 4 end
+  if i == 4 then local u = 0 end
+  s2 = s2 .. v .. ","
+end
+return s .. "|" .. s2
+$$;
+SELECT lua_ipairs_rebind2();  -- 1,2,3,|1,2,3,4,
+-- the error for a fraction names neither operator nor operands
+\set VERBOSITY terse
+CREATE FUNCTION lua_fshift4(x numeric) RETURNS bigint LANGUAGE plxlua AS $$ return 8 >> x $$;
+SELECT lua_fshift4(1.5);
+\set VERBOSITY default

@@ -709,3 +709,19 @@ a[1] += "y";
 return p + "|" + a[0] + "|" + a[1];
 $$;
 SELECT cs_pluseq(NULL, NULL);  -- x|a|y
+
+-- 3.1.0 review round 3: += of a bool on any string target prints it as
+-- true/false, as everywhere in plxcsharp; += on a field whose type is not
+-- known but with a string on the right treats NULL as empty, as C# does.
+CREATE FUNCTION cs_pluseq_bool(p text, ok bool) RETURNS text LANGUAGE plxcsharp AS $$
+string s = "x";
+string[] a = new string[] {"x"};
+p += ok; s += ok; a[0] += ok;
+return p + "|" + s + "|" + a[0];
+$$;
+SELECT cs_pluseq_bool('x', true);  -- xtrue|xtrue|xtrue
+CREATE TABLE cs_tt(id int, note text);
+CREATE FUNCTION cs_trg_pe() RETURNS trigger LANGUAGE plxcsharp AS $$ NEW.note += "!"; return NEW; $$;
+CREATE TRIGGER cs_trg_pe BEFORE INSERT ON cs_tt FOR EACH ROW EXECUTE FUNCTION cs_trg_pe();
+INSERT INTO cs_tt VALUES (1, 'a'), (2, NULL);
+SELECT id, note FROM cs_tt ORDER BY id;  -- a! and !

@@ -2877,8 +2877,10 @@ x_binary(LuaX *x, int op, LuaV *l, LuaV *r)
 				 */
 				v = lv_new(psprintf("(SELECT CASE WHEN __plx_sa IS NULL OR __plx_sc IS NULL THEN NULL::bigint"
 									" WHEN __plx_sa <> trunc(__plx_sa) OR __plx_sc <> trunc(__plx_sc)"
-									" THEN ('plxlua: number has no integer representation: '"
-									" || __plx_sa || ' << ' || __plx_sc)::bigint"
+									/* the empty substr keeps the planner from folding
+									 * the cast, which would raise in every case */
+									" THEN ('plxlua: number has no integer representation'"
+									" || substr(__plx_sa::text, 1, 0))::bigint"
 									" WHEN __plx_sc <= -64 OR __plx_sc >= 64 THEN 0::bigint"
 									" WHEN __plx_sc >= 0 THEN __plx_sa::bigint << __plx_sc::integer"
 									" ELSE (__plx_sa::bigint >> (-__plx_sc)::integer)"
@@ -4639,11 +4641,26 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 						bend = L->match[dok] >= 0 ? L->match[dok] : L->ntok - 1;
 
 			for (j = dok + 1; j + 1 < bend && dyn; j++)
-				if (t[j].kind == T_IDENT && t[j].len == t[as[0]].len &&
-					strncmp(t[j].s, t[as[0]].s, t[j].len) == 0 &&
-					plx_tok_is(&t[j + 1], "=") &&
-					!(j > 0 && (t[j - 1].kind == T_DOT || plx_tok_is(&t[j - 1], ":"))))
-					dyn = false;
+			{
+				int			f = j + 1,
+							b = j;
+
+				if (!(t[j].kind == T_IDENT && t[j].len == t[as[0]].len &&
+					  strncmp(t[j].s, t[as[0]].s, t[j].len) == 0))
+					continue;
+				/* t in a target list: t = ..., t, a = ..., a, t = ... */
+				while (f + 1 < bend && t[f].kind == T_COMMA && t[f + 1].kind == T_IDENT)
+					f += 2;
+				if (!plx_tok_is(&t[f], "="))
+					continue;
+				while (b - 2 > dok && t[b - 1].kind == T_COMMA && t[b - 2].kind == T_IDENT)
+					b -= 2;
+				/* a field (r.t =), or local t = ...: another variable */
+				if (t[b - 1].kind == T_DOT || plx_tok_is(&t[b - 1], ":") ||
+					(t[b - 1].kind == T_KW && t[b - 1].kw == KW_LET))
+					continue;
+				dyn = false;
+			}
 		}
 		if (dyn)
 		{

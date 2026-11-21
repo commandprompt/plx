@@ -158,7 +158,7 @@ iteration.
 | `t[i]`, `r.f`, `r["f"]` | `t[i]`, `r.f`, `r.f` |
 | `a // b` | `floor(a::numeric / b)` |
 | `a & b`, `a \| b`, `a ~ b`, `~a` | `&`, `\|`, `#`, `~` |
-| `a << n`, `a >> n` | Lua's 64-bit logical shift (a `bigint`): a count of 64 or more gives 0, a negative count shifts the other way, and an operand or count with a fraction is an error. At most 64 shifts may nest in one expression |
+| `a << n`, `a >> n` | Lua's 64-bit logical shift (a `bigint`): a count of 64 or more gives 0, a negative count shifts the other way, and an operand or count with a fraction is an error. A shift written directly inside another shift may nest at most 64 deep |
 | `tostring(x)`, `tonumber(s)` | `x::text`, `s::numeric` |
 
 ## Control flow
