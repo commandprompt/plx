@@ -220,6 +220,7 @@ typedef struct LuaV
 								 * first and_plen bytes of bs (and_a NULL) */
 	bool		case_open;		/* CASE from 'a and x or ...' that a further
 								 * 'or' extends (another arm, or the ELSE) */
+	int			shifts;			/* shift subqueries nested in this value */
 	int			nest;			/* parenthesis nesting of a left-associative
 								 * chain, bounded by PLX_MAX_DEPTH */
 
@@ -458,6 +459,34 @@ lua_param(Ctx *cx, const char *name, int len)
 				"\"%.*s\" matches more than one parameter that differ only in case; spell it as the parameter is declared",
 				len, name);
 	return found;
+}
+
+/*
+ * Does any parameter have the plpgsql name of name (ignoring case)? *same is
+ * set when one of them is spelled exactly lname. Never raises: a new name
+ * only has to avoid the parameters, not choose between them.
+ */
+static bool
+lua_param_ci(Ctx *cx, const char *name, int len, const char *lname, bool *same)
+{
+	int			i;
+	bool		any = false;
+
+	*same = false;
+	if (!cx->meta || !cx->meta->argnames)
+		return false;
+	for (i = 0; i < cx->meta->nargs; i++)
+	{
+		const char *an = cx->meta->argnames[i];
+
+		if (an && an[0] && (int) strlen(an) == len && pg_strncasecmp(an, name, len) == 0)
+		{
+			any = true;
+			if (strcmp(an, lname) == 0)
+				*same = true;
+		}
+	}
+	return any;
 }
 
 /* the parameter named name, as SQL text: its catalog name, quoted if needed */
@@ -728,7 +757,8 @@ lua_declare(Lua *L, const char *name, int len, const char *typ, bool rec,
 	{
 		char	   *cand;
 		LuaBind    *v;
-		int			pi;
+		bool		pany,
+					psame;
 
 		CHECK_FOR_INTERRUPTS();
 		if (k == 1)
@@ -747,12 +777,12 @@ lua_declare(Lua *L, const char *name, int len, const char *typ, bool rec,
 		if (lua_bad_name(cand))
 			continue;
 		v = lua_pg_visible(L, cand);
-		pi = lua_param(cx, cand, (int) strlen(cand));
+		pany = lua_param_ci(cx, cand, (int) strlen(cand), lname, &psame);
 		if (forvar)
 		{
 			if (v && strcmp(v->lname, lname) != 0)
 				continue;
-			if (pi >= 0 && strcmp(cx->meta->argnames[pi], lname) != 0)
+			if (pany && !psame)
 				continue;
 			pg = cand;
 			break;
@@ -768,7 +798,7 @@ lua_declare(Lua *L, const char *name, int len, const char *typ, bool rec,
 			}
 			continue;
 		}
-		if (pi >= 0)
+		if (pany)
 			continue;
 		loc = plx_local_find(cx, cand, (int) strlen(cand));
 		if (loc)
@@ -2837,15 +2867,30 @@ x_binary(LuaX *x, int op, LuaV *l, LuaV *r)
 				 */
 				const char *cnt = op == OP_SHL ? "%s" : "-(%s)";
 
-				v = lv_new(psprintf("(SELECT CASE WHEN __plx_sc IS NULL THEN NULL::bigint"
+				/*
+				 * Both operands are read as numeric first: Lua raises
+				 * "number has no integer representation" for a fraction,
+				 * where a cast would round, and a count beyond +-64 gives 0
+				 * whatever its size. Nested shift subqueries cost plpgsql
+				 * more than linear time to plan, so at most 64 nest, as in
+				 * plxgo.
+				 */
+				v = lv_new(psprintf("(SELECT CASE WHEN __plx_sa IS NULL OR __plx_sc IS NULL THEN NULL::bigint"
+									" WHEN __plx_sa <> trunc(__plx_sa) OR __plx_sc <> trunc(__plx_sc)"
+									" THEN ('plxlua: number has no integer representation: '"
+									" || __plx_sa || ' << ' || __plx_sc)::bigint"
 									" WHEN __plx_sc <= -64 OR __plx_sc >= 64 THEN 0::bigint"
-									" WHEN __plx_sc >= 0 THEN __plx_sa << __plx_sc"
-									" ELSE (__plx_sa >> -__plx_sc) & ~((-1)::bigint << (64 + __plx_sc)) END"
-									" FROM (SELECT (%s)::bigint AS __plx_sa, (%s)::integer AS __plx_sc"
+									" WHEN __plx_sc >= 0 THEN __plx_sa::bigint << __plx_sc::integer"
+									" ELSE (__plx_sa::bigint >> (-__plx_sc)::integer)"
+									" & ~((-1)::bigint << (64 + __plx_sc)::integer) END"
+									" FROM (SELECT (%s)::numeric AS __plx_sa, (%s)::numeric AS __plx_sc"
 									" OFFSET 0) AS __plx_s)",
 									l->s, psprintf(cnt, r->s)),
 						   SP_ATOM);
 				v->typ = "bigint";
+				v->shifts = Max(l->shifts, r->shifts) + 1;
+				if (v->shifts > 64)
+					x_err(x, "too many shifts nested in one expression; split it into several statements");
 				lv_nest(x, v, l, false, r, false);
 				return v;
 			}
@@ -4583,6 +4628,23 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 		 * over it gives the same result.
 		 */
 		dyn = (ae[0] == as[0] + 1 && t[as[0]].kind == T_IDENT);
+		/*
+		 * Lua's ipairs keeps the table it was given: a body that assigns the
+		 * variable itself (t = {...}, t = nil) does not change the loop.
+		 * Then the loop walks the array as it was at the start.
+		 */
+		if (dyn)
+		{
+			int			j,
+						bend = L->match[dok] >= 0 ? L->match[dok] : L->ntok - 1;
+
+			for (j = dok + 1; j + 1 < bend && dyn; j++)
+				if (t[j].kind == T_IDENT && t[j].len == t[as[0]].len &&
+					strncmp(t[j].s, t[as[0]].s, t[j].len) == 0 &&
+					plx_tok_is(&t[j + 1], "=") &&
+					!(j > 0 && (t[j - 1].kind == T_DOT || plx_tok_is(&t[j - 1], ":"))))
+					dyn = false;
+		}
 		if (dyn)
 		{
 			StringInfo	o = &cx->out;

@@ -1803,3 +1803,64 @@ return 1
 $$;
 ERROR:  plxlua: local expects a variable name, found 'é'
 \set VERBOSITY default
+-- 3.1.0 review round 2: a shift operand or count with a fraction is an
+-- error, as in Lua; an integral float shifts; a count far out of range is 0.
+\set VERBOSITY terse
+CREATE FUNCTION lua_fshift1() RETURNS bigint LANGUAGE plxlua AS $$ return 1.5 << 1 $$;
+SELECT lua_fshift1();
+ERROR:  invalid input syntax for type bigint: "plxlua: number has no integer representation: 1.5 << 1"
+CREATE FUNCTION lua_fshift2(f numeric) RETURNS bigint LANGUAGE plxlua AS $$ return 1 << f $$;
+SELECT lua_fshift2(1.5);
+ERROR:  invalid input syntax for type bigint: "plxlua: number has no integer representation: 1 << 1.5"
+\set VERBOSITY default
+CREATE FUNCTION lua_fshift3(n bigint) RETURNS text LANGUAGE plxlua AS $$
+return (2.0 << 1) .. " " .. (1 << 3000000000) .. " " .. (1 >> n) .. " " .. (1 >> 4294967296)
+$$;
+SELECT lua_fshift3(-2147483648);  -- 4 0 0 0
+ lua_fshift3 
+-------------
+ 4 0 0 0
+(1 row)
+
+-- more than 64 shifts nested in one expression are rejected, as in plxgo
+\set VERBOSITY terse
+CREATE FUNCTION lua_shiftchain(x bigint) RETURNS bigint LANGUAGE plxlua AS $$
+return x << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1 << 1
+$$;
+ERROR:  plxlua: too many shifts nested in one expression; split it into several statements
+\set VERBOSITY default
+-- 3.1.0 review round 2: Lua's ipairs iterates the table it was given; a
+-- body that assigns the array variable itself does not change the loop.
+CREATE FUNCTION lua_ipairs_rebind() RETURNS text LANGUAGE plxlua AS $$
+local t = {1, 2, 3}
+local s = ""
+for i, v in ipairs(t) do
+  if i == 1 then t = {10, 20, 30, 40, 50} end
+  s = s .. v .. ","
+end
+local u = {1, 2, 3}
+local s2 = ""
+for i, v in ipairs(u) do
+  if i == 1 then u = nil end
+  s2 = s2 .. v .. ","
+end
+return s .. "|" .. s2
+$$;
+SELECT lua_ipairs_rebind();  -- 1,2,3,|1,2,3,
+ lua_ipairs_rebind 
+-------------------
+ 1,2,3,|1,2,3,
+(1 row)
+
+-- 3.1.0 review round 2: a new local whose name matches two parameters
+-- ignoring case refers to neither.
+CREATE FUNCTION lua_amb("Ab" int, "aB" int) RETURNS int LANGUAGE plxlua AS $$
+local ab = 3
+return ab + Ab
+$$;
+SELECT lua_amb(1, 2);  -- 4
+ lua_amb 
+---------
+       4
+(1 row)
+
