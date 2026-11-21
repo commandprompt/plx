@@ -2096,11 +2096,17 @@ bin_step(CsP *P, CsNode *left, const char *op, CsNode *right)
 		perr(P, "the operator '%s' is not supported", op);
 
 	/*
-	 * C# decimal division keeps only the digits the quotient needs (7m / 2 is
-	 * 3.5); numeric division keeps at least 16 decimal places.
+	 * C# decimal division drops trailing zeros from the quotient but keeps at
+	 * least scale(a) - scale(b) decimal places (7m / 2 is 3.5, 250.00m / 2 is
+	 * 125.00); numeric division keeps at least 16. The subquery names each
+	 * operand once, so nested divisions do not repeat their operands.
 	 */
 	if (strcmp(op, "/") == 0 && rt.k == TY_NUM && rt.sql && strcmp(rt.sql, "numeric") == 0)
-		return tpl(P, PR_ATOM, rt, "trim_scale((%1) / (%2))", left, right);
+		return tpl(P, PR_ATOM, rt,
+				   "(SELECT round(__plx_q, greatest(scale(trim_scale(__plx_q)), "
+				   "scale(__plx_da) - scale(__plx_db))) FROM (SELECT __plx_da / __plx_db AS __plx_q, "
+				   "__plx_da, __plx_db FROM (SELECT (%1)::numeric AS __plx_da, (%2)::numeric AS __plx_db "
+				   "OFFSET 0) AS __plx_d1 OFFSET 0) AS __plx_d2)", left, right);
 
 	if (left->k == N_CHAIN && !left->sealed && left->prec == prec &&
 		left->nonassoc == nonassoc)
@@ -4360,7 +4366,15 @@ render_se(CsP *P, CsSE *se)
 					return;
 				}
 			}
-			c = bin_step(P, l, se->op, se->rhs);
+			/*
+			 * string += x on any other target (a parameter, an array element):
+			 * C# appends a null as an empty string, as concat() does; || would
+			 * make the whole string NULL.
+			 */
+			if (strcmp(se->op, "+") == 0 && l->ty.k == TY_STRING)
+				c = tpl(P, PR_ATOM, TY_TEXT, "concat(%1, %2)", l, se->rhs);
+			else
+				c = bin_step(P, l, se->op, se->rhs);
 			break;
 		case 2:
 			if (ty_stringish(l->ty))
@@ -6129,7 +6143,8 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 	char	   *lo,
 			   *hi,
 			   *k;
-	bool		down;
+	bool		down,
+				guard;
 
 	cx->pos++;
 	s2_paren(cx, &a, &b);
@@ -6147,6 +6162,26 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 	hi = s2_rw(cx, s1 + 3, s2);
 	k = s2_rw(cx, s2 + 3, b);
 	down = plx_tok_is(step, "-=");
+	/*
+	 * A NULL bound makes C#'s condition unknown, which a for treats as false:
+	 * no iterations. plpgsql's integer FOR raises an error on a NULL bound, so
+	 * a bound that is not an integer literal is tested first. It has no call
+	 * and the body does not assign it (see st_for), so reading it twice is
+	 * safe.
+	 */
+	{
+		const char *h = hi;
+
+		if (*h == '-')
+			h++;
+		guard = !(*h && strspn(h, "0123456789") == strlen(h));
+	}
+	if (guard)
+	{
+		plx_indent(o, ind);
+		appendStringInfo(o, "IF (%s) IS NOT NULL THEN\n", hi);
+		ind++;
+	}
 	plx_indent(o, ind);
 	appendStringInfo(o, "FOR %.*s IN %s%s..", v->len, v->s, down ? "REVERSE " : "", lo);
 	if (plx_tok_is(cmp, "<"))
@@ -6161,6 +6196,11 @@ s2_for(Ctx *cx, CsS2 *S, int ind)
 	s2_loop_inline(cx, S, ind + 1);
 	plx_indent(o, ind);
 	appendStringInfoString(o, "END LOOP;\n");
+	if (guard)
+	{
+		plx_indent(o, ind - 1);
+		appendStringInfoString(o, "END IF;\n");
+	}
 	return false;
 }
 
@@ -6867,6 +6907,21 @@ csharp_parse_body(Ctx *cx)
 	CsS2		S;
 
 	memset(&S, 0, sizeof(S));
+	/* inside a catch, plpgsql's SQLSTATE and SQLERRM hide a parameter so named */
+	if (cx->meta && cx->meta->argnames)
+	{
+		int			i;
+
+		for (i = 0; i < cx->meta->nargs; i++)
+		{
+			const char *an = cx->meta->argnames[i];
+
+			if (an && (pg_strcasecmp(an, "sqlstate") == 0 || pg_strcasecmp(an, "sqlerrm") == 0))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("plxcsharp: parameter \"%s\" has the name of PL/pgSQL's error variable in a catch; rename it", an)));
+		}
+	}
 	cx->body = cs_stage1(cx);
 	elog(DEBUG1, "plxcsharp normalized program:\n%s", cx->body);
 	plx_lex(cx);

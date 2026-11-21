@@ -671,3 +671,41 @@ string SqlErrm = "mine";
 return SqlErrm;
 $$;
 \set VERBOSITY default
+
+-- 3.1.0 review round 2: decimal division keeps at least scale(a) - scale(b)
+-- decimal places and drops only trailing zeros past that, as C# does.
+CREATE FUNCTION cs_divscale(total numeric) RETURNS text LANGUAGE plxcsharp AS $$
+return (total / 2) + "|" + (total / 4) + "|" + (12.3400m / 2) + "|" + (1.50m / 1m) + "|" + (3.00m / 1.5m) + "|" + (7m / 2) + "|" + (10M / 4) + "|" + (1m / 8);
+$$;
+SELECT cs_divscale(250.00);  -- 125.00|62.50|6.1700|1.50|2.0|3.5|2.5|0.125
+
+-- 3.1.0 review round 2: a parameter named sqlstate or sqlerrm is hidden
+-- inside a catch by plpgsql's error variable, so it is rejected too.
+\set VERBOSITY terse
+CREATE FUNCTION cs_psqs(sqlstate text) RETURNS text LANGUAGE plxcsharp AS $$
+try { int z = 1 / 0; } catch (Exception e) { return sqlstate; }
+return "none";
+$$;
+\set VERBOSITY default
+
+-- 3.1.0 review round 2: a NULL bound makes the condition unknown, which a
+-- for treats as false: no iterations (plpgsql's integer FOR would raise).
+CREATE FUNCTION cs_nullbound(lim int) RETURNS text LANGUAGE plxcsharp AS $$
+int n = 0; int? nb = null;
+for (int i = 0; i < nb; i++) n++;
+for (int i = 0; i <= lim; i++) n++;
+for (int i = 5; i > lim; i--) n++;
+return "" + n;
+$$;
+SELECT cs_nullbound(NULL);  -- 0
+
+-- 3.1.0 review round 2: += on a string parameter or array element treats a
+-- NULL as an empty string, as on a local and as in C#.
+CREATE FUNCTION cs_pluseq(p text, q text) RETURNS text LANGUAGE plxcsharp AS $$
+string[] a = new string[] {"a", null};
+p += "x";
+a[0] += q;
+a[1] += "y";
+return p + "|" + a[0] + "|" + a[1];
+$$;
+SELECT cs_pluseq(NULL, NULL);  -- x|a|y

@@ -277,16 +277,20 @@ SELECT cs_src('cs_build');
    s public.plx_strbuild := '';                                                 +
    sb public.plx_strbuild := '';                                                +
  BEGIN                                                                          +
-   FOR i IN 0..(n) - 1 LOOP                                                     +
-     s := public.plx_sb_append(s, (i)::text);                                   +
-   END LOOP;                                                                    +
-   FOR i IN 0..(n) - 1 LOOP                                                     +
-     IF i > 0 THEN                                                              +
-       sb := public.plx_sb_append(sb, (', ')::text);                            +
-     END IF;                                                                    +
-     sb := public.plx_sb_append(sb, (i)::text);                                 +
-     sb := public.plx_sb_append(sb, ('!')::text);                               +
-   END LOOP;                                                                    +
+   IF (n) IS NOT NULL THEN                                                      +
+     FOR i IN 0..(n) - 1 LOOP                                                   +
+       s := public.plx_sb_append(s, (i)::text);                                 +
+     END LOOP;                                                                  +
+   END IF;                                                                      +
+   IF (n) IS NOT NULL THEN                                                      +
+     FOR i IN 0..(n) - 1 LOOP                                                   +
+       IF i > 0 THEN                                                            +
+         sb := public.plx_sb_append(sb, (', ')::text);                          +
+       END IF;                                                                  +
+       sb := public.plx_sb_append(sb, (i)::text);                               +
+       sb := public.plx_sb_append(sb, ('!')::text);                             +
+     END LOOP;                                                                  +
+   END IF;                                                                      +
    sb := public.plx_sb_append(sb, ('                                            +
  ')::text);                                                                     +
    sb := public.plx_sb_append(sb, (format('[%1$s]', length((sb)::text)))::text);+
@@ -400,15 +404,19 @@ SELECT cs_src('cs_for');
    j integer;                                                                            +
    __plx_for_1 boolean;                                                                  +
  BEGIN                                                                                   +
-   FOR i IN 1..n LOOP                                                                    +
-     up := up + i;                                                                       +
-   END LOOP;                                                                             +
+   IF (n) IS NOT NULL THEN                                                               +
+     FOR i IN 1..n LOOP                                                                  +
+       up := up + i;                                                                     +
+     END LOOP;                                                                           +
+   END IF;                                                                               +
    FOR i IN REVERSE n..(0) + 1 LOOP                                                      +
      down := down * 10 + i;                                                              +
    END LOOP;                                                                             +
-   FOR i IN 0..(n) - 1 BY 2 LOOP                                                         +
-     step := step + i;                                                                   +
-   END LOOP;                                                                             +
+   IF (n) IS NOT NULL THEN                                                               +
+     FOR i IN 0..(n) - 1 BY 2 LOOP                                                       +
+       step := step + i;                                                                 +
+     END LOOP;                                                                           +
+   END IF;                                                                               +
    j := n;                                                                               +
    __plx_for_1 := false;                                                                 +
    LOOP                                                                                  +
@@ -1320,3 +1328,53 @@ return SqlErrm;
 $$;
 ERROR:  plxcsharp: 'SqlErrm' is the name of PL/pgSQL's error variable in a catch; choose another variable name
 \set VERBOSITY default
+-- 3.1.0 review round 2: decimal division keeps at least scale(a) - scale(b)
+-- decimal places and drops only trailing zeros past that, as C# does.
+CREATE FUNCTION cs_divscale(total numeric) RETURNS text LANGUAGE plxcsharp AS $$
+return (total / 2) + "|" + (total / 4) + "|" + (12.3400m / 2) + "|" + (1.50m / 1m) + "|" + (3.00m / 1.5m) + "|" + (7m / 2) + "|" + (10M / 4) + "|" + (1m / 8);
+$$;
+SELECT cs_divscale(250.00);  -- 125.00|62.50|6.1700|1.50|2.0|3.5|2.5|0.125
+                cs_divscale                 
+--------------------------------------------
+ 125.00|62.50|6.1700|1.50|2.0|3.5|2.5|0.125
+(1 row)
+
+-- 3.1.0 review round 2: a parameter named sqlstate or sqlerrm is hidden
+-- inside a catch by plpgsql's error variable, so it is rejected too.
+\set VERBOSITY terse
+CREATE FUNCTION cs_psqs(sqlstate text) RETURNS text LANGUAGE plxcsharp AS $$
+try { int z = 1 / 0; } catch (Exception e) { return sqlstate; }
+return "none";
+$$;
+ERROR:  plxcsharp: parameter "sqlstate" has the name of PL/pgSQL's error variable in a catch; rename it
+\set VERBOSITY default
+-- 3.1.0 review round 2: a NULL bound makes the condition unknown, which a
+-- for treats as false: no iterations (plpgsql's integer FOR would raise).
+CREATE FUNCTION cs_nullbound(lim int) RETURNS text LANGUAGE plxcsharp AS $$
+int n = 0; int? nb = null;
+for (int i = 0; i < nb; i++) n++;
+for (int i = 0; i <= lim; i++) n++;
+for (int i = 5; i > lim; i--) n++;
+return "" + n;
+$$;
+SELECT cs_nullbound(NULL);  -- 0
+ cs_nullbound 
+--------------
+ 0
+(1 row)
+
+-- 3.1.0 review round 2: += on a string parameter or array element treats a
+-- NULL as an empty string, as on a local and as in C#.
+CREATE FUNCTION cs_pluseq(p text, q text) RETURNS text LANGUAGE plxcsharp AS $$
+string[] a = new string[] {"a", null};
+p += "x";
+a[0] += q;
+a[1] += "y";
+return p + "|" + a[0] + "|" + a[1];
+$$;
+SELECT cs_pluseq(NULL, NULL);  -- x|a|y
+ cs_pluseq 
+-----------
+ x|a|y
+(1 row)
+
