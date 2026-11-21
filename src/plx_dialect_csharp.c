@@ -2091,6 +2091,13 @@ bin_step(CsP *P, CsNode *left, const char *op, CsNode *right)
 	else
 		perr(P, "the operator '%s' is not supported", op);
 
+	/*
+	 * C# decimal division keeps only the digits the quotient needs (7m / 2 is
+	 * 3.5); numeric division keeps at least 16 decimal places.
+	 */
+	if (strcmp(op, "/") == 0 && rt.k == TY_NUM && rt.sql && strcmp(rt.sql, "numeric") == 0)
+		return tpl(P, PR_ATOM, rt, "trim_scale((%1) / (%2))", left, right);
+
 	if (left->k == N_CHAIN && !left->sealed && left->prec == prec &&
 		left->nonassoc == nonassoc)
 	{
@@ -2214,6 +2221,28 @@ call_node(CsP *P, const char *fname, CsArgs *a, CsTy ty)
 	return n;
 }
 
+/*
+ * The characters C#'s char.IsWhiteSpace accepts, which Trim() with no
+ * argument removes: U+0009-U+000D, space, and in a UTF-8 database also
+ * U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and
+ * U+3000 (generated code is stored in the database encoding).
+ */
+static CsNode *
+cs_ws_node(CsP *P)
+{
+	static const char ascii[] = "\t\n\v\f\r ";
+	static const char uni[] =
+		"\t\n\v\f\r \xC2\x85\xC2\xA0\xE1\x9A\x80"
+		"\xE2\x80\x80\xE2\x80\x81\xE2\x80\x82\xE2\x80\x83\xE2\x80\x84"
+		"\xE2\x80\x85\xE2\x80\x86\xE2\x80\x87\xE2\x80\x88\xE2\x80\x89"
+		"\xE2\x80\x8A\xE2\x80\xA8\xE2\x80\xA9\xE2\x80\xAF\xE2\x81\x9F"
+		"\xE3\x80\x80";
+
+	if (GetDatabaseEncoding() == PG_UTF8)
+		return nd_str(P, uni, (int) sizeof(uni) - 1, TY_STRING);
+	return nd_str(P, ascii, (int) sizeof(ascii) - 1, TY_STRING);
+}
+
 static CsNode *
 num_node(CsP *P, CsTok *t)
 {
@@ -2233,6 +2262,9 @@ num_node(CsP *P, CsTok *t)
 			return nd_text(P, psprintf("%s::double precision", v), PR_CAST,
 						   mkty(TY_NUM, "double precision"));
 		case 'M':
+			/* 8m is decimal: written bare, SQL would read 8 as an integer */
+			if (!strpbrk(v, ".eE"))
+				return nd_text(P, psprintf("%s::numeric", v), PR_CAST, mkty(TY_NUM, "numeric"));
 			return nd_text(P, v, PR_ATOM, mkty(TY_NUM, "numeric"));
 		default:
 			break;
@@ -2825,7 +2857,8 @@ inst_member(CsP *P, CsNode *recv, CsTok *m, bool call, CsArgs *a)
 				argc_is(P, m, a, 0, 1);
 				if (a->n == 1)
 					return tpl(P, PR_ATOM, TY_TEXT, psprintf("%s(%%1, %%2)", f), recv, a->a[0]);
-				return tpl(P, PR_ATOM, TY_TEXT, psprintf("%s(%%1)", f), recv);
+				/* with no argument C# trims white space, not only spaces */
+				return tpl(P, PR_ATOM, TY_TEXT, psprintf("%s(%%1, %%2)", f), recv, cs_ws_node(P));
 			}
 			if (mname_is(m, "Contains"))
 			{
@@ -2990,7 +3023,7 @@ map_static(CsP *P, CsTok *ct, CsTok *m, bool call, CsArgs *a)
 		{
 			argc_is(P, m, a, 1, 1);
 			return tpl(P, PR_ATOM, TY_BOOLEAN, "(COALESCE(btrim(%1, %2), %3) = %3)", a->a[0],
-					   nd_str(P, " \t\r\n\f\v", 6, TY_STRING), nd_str(P, "", 0, TY_STRING));
+					   cs_ws_node(P), nd_str(P, "", 0, TY_STRING));
 		}
 		if (call && mname_is(m, "Join"))
 		{
@@ -5017,7 +5050,13 @@ st_for(CsP *P)
 				up = (it->op[0] == '+');
 			}
 		}
+		/*
+		 * Only an integer bound: plpgsql's integer FOR rounds a numeric or
+		 * double bound, so i < 2.4 would run twice instead of three times.
+		 * Any other bound takes the general form, which compares as C# does.
+		 */
 		if (k && ((up && cmp[0] == '<') || (!up && cmp[0] == '>')) && !hi->has_call &&
+			hi->ty.k == TY_INT &&
 			!assigned_since(P, mark, vs->name) && !idents_assigned(P, mark, hi))
 		{
 			appendStringInfo(P->o, " for (%s = ", vs->name);

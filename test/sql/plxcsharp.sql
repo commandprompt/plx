@@ -630,3 +630,29 @@ SELECT cs_try('int y = 0; y = q' || repeat('.a', 40000) || '; return 1;');
 SELECT cs_try('int y = 0; ' || repeat('try { ', 400) || 'if (y == 0) return "x";' || repeat(' y = 1;', 2000) ||
               repeat(' } finally { y = 2; }', 400) || ' return "y";');
 SELECT length(prosrc) < 2000000 AS linear FROM pg_proc WHERE proname = 'cs_probe';
+
+-- 3.1.0 review: an M-suffixed literal is decimal even when it is a whole
+-- number, so 8m / 100 is 0.08, not integer 0. Expected values from .NET 8.
+CREATE FUNCTION cs_mlit(price numeric) RETURNS text LANGUAGE plxcsharp AS $$
+decimal rate = 8m / 100;
+return $"{price * rate:F2} {7m / 2} {Math.Round(7m / 2)} {10M / 4}";
+$$;
+SELECT cs_mlit(250.00);  -- 20.00 3.5 4 2.5
+
+-- 3.1.0 review: a counting for whose bound is not an integer runs as many
+-- times as in C# (an integer FOR would round the bound).
+CREATE FUNCTION cs_fracbound(lim float8, lim2 numeric, lim3 float8, lim4 numeric) RETURNS text LANGUAGE plxcsharp AS $$
+int n1 = 0; for (int i = 0; i < lim; i++) n1++;
+int n2 = 0; for (int i = 0; i <= lim2; i++) n2++;
+int n3 = 0; for (int i = 3; i > lim3; i--) n3++;
+int n4 = 0; for (int i = 3; i >= lim4; i--) n4++;
+return $"{n1} {n2} {n3} {n4}";
+$$;
+SELECT cs_fracbound(2.4, 2.6, -0.5, 0.5);  -- 3 3 4 3
+
+-- 3.1.0 review: Trim(), TrimStart() and TrimEnd() with no argument remove
+-- white space (tab, newline, no-break space, ...), not only spaces.
+CREATE FUNCTION cs_trimws(a text, b text, c text) RETURNS text LANGUAGE plxcsharp AS $$
+return "[" + a.Trim() + "][" + b.TrimStart() + "][" + c.TrimEnd() + "]";
+$$;
+SELECT cs_trimws(E'\tab\n' || chr(160), E' \tx', E'y\r\n ');  -- [ab][x][y]
