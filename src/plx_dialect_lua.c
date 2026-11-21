@@ -186,6 +186,11 @@ typedef struct Lua
 	char	  **refs;
 	int			nrefs,
 				refcap;
+	/* ipairs loops over a variable, innermost last: the variable's plpgsql
+	 * name and whether a statement in the body rebinds it (t = ...) */
+	const char *watch[PLX_MAX_DEPTH];
+	bool		watch_hit[PLX_MAX_DEPTH];
+	int			nwatch;
 } Lua;
 
 /* A translated expression. */
@@ -3299,6 +3304,21 @@ lua_capture(Lua *L, int ind)
 	return r;
 }
 
+/*
+ * A statement assigns the variable whose plpgsql name is pg as a whole
+ * (t = ..., t, a = ...): mark the ipairs loops over it. Library calls that
+ * change an array in place (table.insert) do not come here.
+ */
+static void
+lua_note_rebind(Lua *L, const char *pg)
+{
+	int			i;
+
+	for (i = 0; i < L->nwatch; i++)
+		if (strcmp(L->watch[i], pg) == 0)
+			L->watch_hit[i] = true;
+}
+
 static bool
 lua_toplevel(Lua *L)
 {
@@ -3506,7 +3526,10 @@ lua_parallel(Lua *L, int ind, int n, char **tgt, const char **tgtyp,
 	if (sound)
 	{
 		for (i = 0; i < n; i++)
+		{
+			lua_note_rebind(L, tgt[i]);
 			lua_emit_assign(L, ind, tgt[i], val[i]);
+		}
 		return;
 	}
 	for (i = 0; i < n; i++)
@@ -3523,7 +3546,10 @@ lua_parallel(Lua *L, int ind, int n, char **tgt, const char **tgtyp,
 			lua_emit_assign(L, ind, tmp[i], val[i]);
 		}
 		for (i = 0; i < n; i++)
+		{
+			lua_note_rebind(L, tgt[i]);
 			lua_emit_assign(L, ind, tgt[i], tmp[i]);
+		}
 	}
 }
 
@@ -4034,6 +4060,7 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 				lua_activate(L, bd, L->fscope);
 				lhs = bd->pgname;
 			}
+			lua_note_rebind(L, lhs);
 			lua_ri_emit(L, ind, lhs, &ri);
 			cx->pos = b;
 			return;
@@ -4059,10 +4086,14 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 			if (bd)
 			{
 				lua_learn_type(bd, v->typ, v->rec);
+				lua_note_rebind(L, bd->pgname);
 				lua_emit_assign(L, ind, bd->pgname, v->s);
 			}
 			else if (param)
+			{
+				lua_note_rebind(L, lua_param_ref(cx, nmk->s, nmk->len));
 				lua_emit_assign(L, ind, lua_param_ref(cx, nmk->s, nmk->len), v->s);
+			}
 			else
 			{
 				/* an undeclared name: a local of the whole function */
@@ -4528,60 +4559,6 @@ lua_numfor(Lua *L, int ind, int a, int dok)
 }
 
 /* for names in iterator do ... end */
-/*
- * Does generated plpgsql body assign the variable named name: a line
- * "name := ...", or name in the target list after INTO?
- */
-static bool
-lua_body_assigns(const char *body, const char *name)
-{
-	size_t		nl = strlen(name);
-	const char *p = body;
-
-	while (*p)
-	{
-		const char *eol = strchr(p, '\n');
-		const char *q = p,
-				   *in;
-
-		if (!eol)
-			eol = p + strlen(p);
-		CHECK_FOR_INTERRUPTS();
-		while (q < eol && (*q == ' ' || *q == '\t'))
-			q++;
-		if ((size_t) (eol - q) > nl + 3 && strncmp(q, name, nl) == 0 &&
-			strncmp(q + nl, " := ", 4) == 0)
-			return true;
-		for (in = q; (in = strstr(in, " INTO ")) != NULL && in < eol; in += 6)
-		{
-			const char *r = in + 6;
-
-			if (strncmp(r, "STRICT ", 7) == 0)
-				r += 7;
-
-			for (;;)
-			{
-				const char *e = r;
-
-				while (e < eol && *e != ',' && *e != ' ' && *e != ';')
-					e++;
-				if ((size_t) (e - r) == nl && strncmp(r, name, nl) == 0)
-					return true;
-				if (e < eol && *e == ',')
-				{
-					r = e + 1;
-					while (r < eol && *r == ' ')
-						r++;
-					continue;
-				}
-				break;
-			}
-		}
-		p = *eol ? eol + 1 : eol;
-	}
-	return false;
-}
-
 static void
 lua_genfor(Lua *L, int ind, int a, int dok)
 {
@@ -4805,21 +4782,31 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 		plx_err(cx, line, "for ... in expects query(...) or ipairs(...)");
 
 	cx->pos = bodystart;
+	if (dk)
+	{
+		if (L->nwatch >= PLX_MAX_DEPTH)
+			plx_err(cx, line, "statements nested too deeply");
+		L->watch[L->nwatch] = darr;
+		L->watch_hit[L->nwatch] = false;
+		L->nwatch++;
+	}
 	body = lua_capture(L, ind + 1);
 	if (dk)
 	{
 		/*
 		 * Lua's ipairs keeps the table it was given: a body that assigns the
 		 * variable itself (t = {...}, t = nil, t, a = ...) does not change
-		 * the loop. The generated body shows every such assignment as
-		 * "t := ..." or "INTO ..., t"; a local of the same name declared in
+		 * the loop. Each statement that assigns a variable as a whole marks
+		 * the loops over it (lua_note_rebind); table.insert and the other
+		 * in-place changes do not, and a local of the same name declared in
 		 * the body has another plpgsql name. Then the loop walks a copy made
 		 * at the start.
 		 */
 		const char *src = darr;
 		StringInfoData pro;
 
-		if (lua_body_assigns(body, darr))
+		L->nwatch--;
+		if (L->watch_hit[L->nwatch])
 		{
 			if (!dtyp)
 				plx_err(cx, line, "cannot infer the type of the array the loop body assigns; annotate it where it is declared");

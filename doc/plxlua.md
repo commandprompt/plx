@@ -640,9 +640,11 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   prefixes `0b` and `0o`, where Lua returns nil.
 - `ipairs` visits every element of the array, NULLs included; Lua stops at the
   first nil. Over a variable it reads the array afresh on each step, as Lua
-  does, so elements the body appends or changes are seen. A body that assigns
-  the variable itself (`t = {...}`, `t = nil`) does not change the loop, as in
-  Lua: the loop then walks the array as it was when it began.
+  does, so elements the body appends or changes are seen, including through
+  `table.insert` and `table.remove`. A body that assigns the variable itself
+  (`t = {...}`, `t = nil`, `t, a = ...`) does not change the loop, as in Lua,
+  but the loop then walks the array as it was when it began, so element
+  writes made before that assignment are not seen (in Lua they are).
 - Tables are PostgreSQL arrays. Assigning `t[0]` or a negative index extends
   the array downward, so `#t` and `table.concat` include that element; in Lua
   it is a key outside the sequence. Use indexes from 1.

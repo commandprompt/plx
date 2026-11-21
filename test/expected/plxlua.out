@@ -1928,3 +1928,48 @@ SELECT lua_ipairs_rebind3();  -- 1,2,3,1,2,3,1,2,3,4,
  1,2,3,1,2,3,1,2,3,4,
 (1 row)
 
+-- 3.1.0 review round 5: table.insert and table.remove change the array in
+-- place, so the loop sees them; SQL text that names the variable does not
+-- matter. Expected values from lua5.4 (the execute has no Lua effect).
+CREATE TABLE lua_tq (x int);
+CREATE FUNCTION lua_ipairs_inplace() RETURNS text LANGUAGE plxlua AS $$
+local q = {1}
+local s = ""
+for _, v in ipairs(q) do
+  if v < 4 then table.insert(q, v * 2) end
+  s = s .. v .. ","
+end
+s = s .. "|"
+local t = {1, 2, 3, 4}
+for i, v in ipairs(t) do
+  if v == 2 then table.remove(t, i) end
+  s = s .. v .. ","
+end
+s = s .. "|"
+local t3 = {1, 2, 3}
+for i, v in ipairs(t3) do
+  if i == 1 then table.insert(t3, 1, 0) end
+  s = s .. v .. ","
+end
+s = s .. "|"
+local t4 = {1, 2, 3}
+for i, v in ipairs(t4) do
+  if v < 3 then table.insert(t4, v + 10) end
+  if i == 1 then t4[#t4 + 1] = 100 end
+  s = s .. v .. ","
+end
+s = s .. "|"
+local lua_tq = {1}
+for _, v in ipairs(lua_tq) do
+  if v < 4 then lua_tq[#lua_tq + 1] = v * 2 end
+  execute("INSERT INTO lua_tq VALUES (1)")
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_inplace();  -- 1,2,4,|1,2,4,|1,1,2,3,|1,2,3,11,100,12,|1,2,4,
+               lua_ipairs_inplace               
+------------------------------------------------
+ 1,2,4,|1,2,4,|1,1,2,3,|1,2,3,11,100,12,|1,2,4,
+(1 row)
+
