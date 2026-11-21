@@ -4585,8 +4585,14 @@ lua_genfor(Lua *L, int ind, int a, int dok)
 		dyn = (ae[0] == as[0] + 1 && t[as[0]].kind == T_IDENT);
 		if (dyn)
 		{
+			StringInfo	o = &cx->out;
+
 			k = lua_hidden(L, "k", "integer");
 			lua_emit_assign(L, ind, k, "0");
+			/* ipairs(nil) is an error in Lua, as FOREACH over NULL is */
+			plx_indent(o, ind);
+			appendStringInfo(o, "IF %s IS NULL THEN RAISE EXCEPTION USING ERRCODE = '22004', "
+							 "MESSAGE = 'ipairs expects an array, got nil'; END IF;\n", arr->s);
 		}
 		lp = lua_loop_push(L, LOOP_FOR, dok, L->match[dok] >= 0 ? L->match[dok] + 1 : -1);
 		lua_scope_push(L);

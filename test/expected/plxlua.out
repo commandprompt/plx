@@ -1498,56 +1498,60 @@ SELECT lua_ipairs(ARRAY[1, 2, 3]);
 (1 row)
 
 SELECT lua_src('lua_ipairs');
-                                     lua_src                                     
----------------------------------------------------------------------------------
- DECLARE                                                                        +
-   total integer := 0;                                                          +
-   idx integer := 0;                                                            +
-   __plx_k_1 integer;                                                           +
-   i integer;                                                                   +
-   v integer;                                                                   +
-   names text[] := ARRAY['x', 'y'];                                             +
-   s public.plx_strbuild := '';                                                 +
-   __plx_k_3 integer;                                                           +
-   nm text;                                                                     +
-   cnt integer := 0;                                                            +
-   __plx_k_5 integer;                                                           +
-   u text[] := '{}';                                                            +
-   __plx_k_7 integer;                                                           +
-   w text;                                                                      +
- BEGIN                                                                          +
-   __plx_k_1 := 0;                                                              +
-   LOOP                                                                         +
-     __plx_k_1 := __plx_k_1 + 1;                                                +
-     EXIT WHEN __plx_k_1 > coalesce(cardinality(a), 0);                         +
-     i := __plx_k_1;                                                            +
-     v := a[__plx_k_1];                                                         +
-     total := total + v;                                                        +
-     idx := idx + i;                                                            +
-   END LOOP;                                                                    +
-   __plx_k_3 := 0;                                                              +
-   LOOP                                                                         +
-     __plx_k_3 := __plx_k_3 + 1;                                                +
-     EXIT WHEN __plx_k_3 > coalesce(cardinality(names), 0);                     +
-     nm := names[__plx_k_3];                                                    +
-     s := public.plx_sb_append(s, nm);                                          +
-   END LOOP;                                                                    +
-   __plx_k_5 := 0;                                                              +
-   LOOP                                                                         +
-     __plx_k_5 := __plx_k_5 + 1;                                                +
-     EXIT WHEN __plx_k_5 > coalesce(cardinality(a), 0);                         +
-     i := __plx_k_5;                                                            +
-     cnt := cnt + 1;                                                            +
-   END LOOP;                                                                    +
-   __plx_k_7 := 0;                                                              +
-   LOOP                                                                         +
-     __plx_k_7 := __plx_k_7 + 1;                                                +
-     EXIT WHEN __plx_k_7 > coalesce(cardinality(u), 0);                         +
-     w := u[__plx_k_7];                                                         +
-     s := public.plx_sb_append(s, w);                                           +
-   END LOOP;                                                                    +
-   RETURN total::text || '/' || idx::text || '/' || s::text || '/' || cnt::text;+
- END;                                                                           +
+                                                        lua_src                                                         
+------------------------------------------------------------------------------------------------------------------------
+ DECLARE                                                                                                               +
+   total integer := 0;                                                                                                 +
+   idx integer := 0;                                                                                                   +
+   __plx_k_1 integer;                                                                                                  +
+   i integer;                                                                                                          +
+   v integer;                                                                                                          +
+   names text[] := ARRAY['x', 'y'];                                                                                    +
+   s public.plx_strbuild := '';                                                                                        +
+   __plx_k_3 integer;                                                                                                  +
+   nm text;                                                                                                            +
+   cnt integer := 0;                                                                                                   +
+   __plx_k_5 integer;                                                                                                  +
+   u text[] := '{}';                                                                                                   +
+   __plx_k_7 integer;                                                                                                  +
+   w text;                                                                                                             +
+ BEGIN                                                                                                                 +
+   __plx_k_1 := 0;                                                                                                     +
+   IF a IS NULL THEN RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'ipairs expects an array, got nil'; END IF;    +
+   LOOP                                                                                                                +
+     __plx_k_1 := __plx_k_1 + 1;                                                                                       +
+     EXIT WHEN __plx_k_1 > coalesce(cardinality(a), 0);                                                                +
+     i := __plx_k_1;                                                                                                   +
+     v := a[__plx_k_1];                                                                                                +
+     total := total + v;                                                                                               +
+     idx := idx + i;                                                                                                   +
+   END LOOP;                                                                                                           +
+   __plx_k_3 := 0;                                                                                                     +
+   IF names IS NULL THEN RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'ipairs expects an array, got nil'; END IF;+
+   LOOP                                                                                                                +
+     __plx_k_3 := __plx_k_3 + 1;                                                                                       +
+     EXIT WHEN __plx_k_3 > coalesce(cardinality(names), 0);                                                            +
+     nm := names[__plx_k_3];                                                                                           +
+     s := public.plx_sb_append(s, nm);                                                                                 +
+   END LOOP;                                                                                                           +
+   __plx_k_5 := 0;                                                                                                     +
+   IF a IS NULL THEN RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'ipairs expects an array, got nil'; END IF;    +
+   LOOP                                                                                                                +
+     __plx_k_5 := __plx_k_5 + 1;                                                                                       +
+     EXIT WHEN __plx_k_5 > coalesce(cardinality(a), 0);                                                                +
+     i := __plx_k_5;                                                                                                   +
+     cnt := cnt + 1;                                                                                                   +
+   END LOOP;                                                                                                           +
+   __plx_k_7 := 0;                                                                                                     +
+   IF u IS NULL THEN RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'ipairs expects an array, got nil'; END IF;    +
+   LOOP                                                                                                                +
+     __plx_k_7 := __plx_k_7 + 1;                                                                                       +
+     EXIT WHEN __plx_k_7 > coalesce(cardinality(u), 0);                                                                +
+     w := u[__plx_k_7];                                                                                                +
+     s := public.plx_sb_append(s, w);                                                                                  +
+   END LOOP;                                                                                                           +
+   RETURN total::text || '/' || idx::text || '/' || s::text || '/' || cnt::text;                                       +
+ END;                                                                                                                  +
  
 (1 row)
 
