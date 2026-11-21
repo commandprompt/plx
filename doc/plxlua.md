@@ -640,9 +640,8 @@ These are intentional. plx pins semantics to SQL and plpgsql.
   first nil. Over a variable it reads the array afresh on each step, as Lua
   does, so elements the body appends or changes are seen.
 - Tables are PostgreSQL arrays. Assigning `t[0]` or a negative index extends
-  the array downward, so `#t` and `table.concat` include that element and
-  `ipairs` starts from it; in Lua it is a key outside the sequence. Use
-  indexes from 1.
+  the array downward, so `#t` and `table.concat` include that element; in Lua
+  it is a key outside the sequence. Use indexes from 1.
 - A numeric `for` with an integer start and a fractional limit floors the
   limit (ceils it for a negative step), as Lua does.
 - `assert` is plpgsql's `ASSERT`, which `plpgsql.check_asserts = off` turns
