@@ -44,7 +44,9 @@ These follow from running as plpgsql and are not specific to any one dialect.
 - **Function-scoped locals.** plx hoists every local declaration into a single
   plpgsql `DECLARE` block, so locals are visible for the whole function. There is
   no per-block (per-`{}`, per-`if`) scope, and a name cannot be redeclared with a
-  new type partway through.
+  new type partway through. plxlua keeps Lua's block scope by giving a local
+  that shadows another, or that is redeclared with a new type, its own plpgsql
+  variable.
 - **Names that differ only by case are one name.** plpgsql ignores case in
   names, so `total` and `Total` would be the same variable. In plxruby, plxphp,
   plxjs, plxts, plxpython3 and plxgo, where case matters, `CREATE FUNCTION`
@@ -53,7 +55,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   label `outer` on a loop inside a loop labelled `Outer`. Rename one of them.
   SQL folds an unquoted parameter name to lower case, so a parameter declared
   as `userId` may be written `userId` in the body, as long as the body always
-  spells it the same way.
+  spells it the same way. plxlua instead gives each spelling of a local its
+  own plpgsql variable, as Lua treats them as different names.
 - **No SQL reserved word as a variable name.** plx writes variable names into
   the generated SQL without quotes. A variable named after a reserved word,
   such as `array`, makes `CREATE FUNCTION` fail with a syntax error. When
@@ -78,7 +81,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   so a comparison involving NULL is unknown rather than false, and `==`/`===`
   become `=`. Integer division and modulo truncate toward zero. Conditions must
   be boolean expressions; source-language "truthiness" (a bare value used as a
-  condition) is not emulated. A non-boolean condition is not rejected at
+  condition) is not emulated, except that plxlua treats a parameter or local
+  of a known non-boolean type used as a condition as a nil test. A non-boolean condition is not rejected at
   `CREATE FUNCTION` time. When the function runs, plpgsql coerces it through
   its text form: a value whose text is a boolean literal (`0`, `1`, `t`, `yes`,
   `off`, ...) is silently accepted, and anything else raises `invalid input
@@ -94,7 +98,8 @@ These follow from running as plpgsql and are not specific to any one dialect.
   `.=` starts as an empty string. A message built with appends is not covered
   by the RAISE exception: if a part was NULL, the raised message is `<NULL>`.
   plxcobol's `STRING-APPEND` does not follow the append rule: it treats a NULL
-  as nothing to append, because COBOL has no NULL.
+  as nothing to append, because COBOL has no NULL. Nor does plxcsharp's `+=`
+  on a string: it treats a NULL as an empty string, as C# does.
 - **A NULL errcode makes RAISE fail.** In plxruby, a NULL value in the
   `detail:`, `hint:`, `column:` or `constraint:` option of `raise` becomes an
   empty string, the same as in the message, so your error is still raised with
@@ -104,24 +109,28 @@ These follow from running as plpgsql and are not specific to any one dialect.
   message replaces your message with plpgsql's generic `assertion failed`. Wrap
   such values in `coalesce(x, '')`.
 - **String concatenation with `+` is not string concatenation.** In every dialect
-  except plxtsql and plxgo, `+` is SQL numeric addition. Use the dialect's string
-  form: interpolation (Ruby/PHP/Python/JS/TS), `||` (PL/SQL), or `CONCAT(...)`.
+  except plxtsql, plxgo and plxcsharp, `+` is SQL numeric addition. Use the dialect's string
+  form: interpolation (Ruby/PHP/Python/JS/TS), `..` (Lua), `||` (PL/SQL), or `CONCAT(...)`.
   In plxcobol `||` is rejected. plxtsql writes `+` as `||` only when every
   operand is a known string, such as a `VARCHAR` variable or a string literal;
   see [plxtsql.md](plxtsql.md#string-concatenation-with). plxgo writes `+` as
   `||` only when every operand is a known string, such as a string literal or
   a `string` local; see [plxgo.md](plxgo.md#string-concatenation-with). In plxgo
-  `||` is logical OR.
+  `||` is logical OR. plxcsharp resolves the operand types, so `+` there is
+  `||` when an operand is known to be a string and numeric addition otherwise.
 - **Type inference is limited.** Where a dialect infers a local's type from its
   initializer (`x = 5`, `x := 5`, `let x = ...`), plx infers only from a literal
   (int, decimal, string, boolean), an array literal, or a direct type
-  conversion. When the right-hand side is a call or a compound expression, declare
-  the type explicitly (`x #:: int`, `var x T`, `let x: T`, a `DECLARE`).
+  conversion. plxlua also infers from a typed variable and from the operators
+  its chapter lists. When the right-hand side is a call or a compound
+  expression, declare the type explicitly (`x #:: int`, `var x T`, `let x: T`,
+  `local x --:: int`, a `DECLARE`). plxcsharp's `var` also takes the type of
+  a typed variable, a cast or a mapped .NET member.
 - **String-builder acceleration needs PostgreSQL 18.** plx lowers the dialect
   append operators (`<<`, `.=`, `+=`, `STRING-APPEND`) onto `plx_strbuild` for
-  amortized-O(1) building. The in-place path relies on a PostgreSQL 18 planner
-  hook; on 13 through 17 the result is correct but the append is O(n^2), the same
-  as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
+  amortized-O(1) building, as is plxlua's `s = s .. e` on a string local. The
+  in-place path relies on a PostgreSQL 18 planner hook; on 13 through 17 the
+  result is correct but the append is O(n^2), the same as plain concatenation. See [COMPATIBILITY.md](COMPATIBILITY.md).
 - **Only `text` and `varchar` locals use the string builder.** The append
   operators turn a local into a `plx_strbuild` only when it has no declared type
   or is declared `text` or `varchar` without a length. A local declared with
@@ -169,9 +178,10 @@ These follow from running as plpgsql and are not specific to any one dialect.
   [PARITY.md](PARITY.md) for the construct-by-construct matrix.
 
 A dialect gives you its syntax over SQL semantics, not its standard library.
-With the exception of the `fmt`/`strings`/`math`/`strconv` subset plxgo maps, a
-method or library call in a body is passed through and has to name a function
-PostgreSQL actually has. `s.upcase`, `s.toUpperCase()`, `s.upper()` and
+With the exception of the `fmt`/`strings`/`math`/`strconv` subset plxgo maps and
+the `string`/`math`/`table` subset plxlua maps and the .NET subset plxcsharp
+maps, a method or library call in a body is passed through and has to name a
+function PostgreSQL actually has. `s.upcase`, `s.toUpperCase()`, `s.upper()` and
 `strtoupper($s)` all transpile without complaint and then fail when the
 function is called; write `upper(s)` instead. The same applies to any other
 library call you would reach for out of habit. A call that happens to name a
@@ -277,6 +287,45 @@ fail when the function runs.
   do so either: `%x`, `%o`, `%b`, `%e` and `%q` all produce the operand's text,
   so `fmt.Sprintf("%x", 255)` yields `255` and not `ff`. Convert explicitly (for
   example `to_hex`) where the representation matters.
+
+### plxlua ([chapter](plxlua.md))
+
+- Function definitions (`function f()`, `local function`, anonymous functions)
+  other than `pcall(function() ... end)`; closures.
+- Metatables, coroutines, and tables as maps (keyed constructors, `pairs`).
+- Multiple return values (except into OUT parameters), varargs (`...`),
+  `select`.
+- `goto` and labels other than the loop idioms (`goto continue` with
+  `::continue::` ending the body, and a break target right after a loop).
+- The `os`, `io`, `debug`, `package`, `coroutine` and `utf8` libraries; Lua
+  patterns (`string.find`, `string.match`, `string.gsub`); only a subset of
+  `string`, `math` and `table` is mapped.
+- Lua's integer/float subtypes: `/` and `%` follow SQL (`7 / 2` is `3`, `-7 % 2`
+  is `-1`), and `and`/`or` in a value give a boolean except for the
+  `x or d`, `c and a or b` and `c and v or d` idioms.
+- `ipairs` visits NULL elements instead of stopping at the first nil.
+
+### plxcsharp ([chapter](plxcsharp.md))
+
+- Methods, local functions, lambdas, classes, structs, records, interfaces,
+  enums, namespaces, `using`, attributes, generics, preprocessor directives.
+- `object`, `dynamic`, tuples, `ref`/`out` arguments, pointers, LINQ, and the
+  collection classes (`List<T>`, `Dictionary<K,V>`); use arrays or SQL.
+- `new` other than for arrays, `new StringBuilder()`, and the exception after
+  `throw`.
+- `goto`, labels, `lock`, `async`/`await`, `checked`/`unchecked`.
+- `case` patterns (`case int n:`, `case > 5:`, `case null:`, `when` guards);
+  switch-expression and `is` patterns beyond constants, `_`, `null`, `not null`
+  and `< <= > >=`.
+- Interpolation format specifiers other than `:F`, and alignment.
+- `catch` of exception classes other than the mapped ones, and `when` filters
+  other than `e.SqlState` comparisons.
+- .NET members beyond the mapped subset (`string`, `Math`, `Convert`,
+  `DateTime`, `Guid`, `StringBuilder`, ...).
+- A NULL operand of a string `+` makes the result NULL, where C# treats null as
+  an empty string; `string.Concat` keeps the C# behaviour.
+- Local names that PostgreSQL or PL/pgSQL reserve (`user`, `order`, `limit`,
+  `end`, ...), and two locals whose names differ only in case.
 
 ### plxcobol ([chapter](plxcobol.md))
 

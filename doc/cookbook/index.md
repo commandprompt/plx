@@ -17,6 +17,8 @@ and a few idioms specific to the language.
 | TypeScript | [TypeScript cookbook](plxts.md) | [plxts](../plxts.md) |
 | Python | [Python cookbook](plxpython3.md) | [plxpython3](../plxpython3.md) |
 | Go | [Go cookbook](plxgo.md) | [plxgo](../plxgo.md) |
+| C# | [C# cookbook](plxcsharp.md) | [plxcsharp](../plxcsharp.md) |
+| Lua | [Lua cookbook](plxlua.md) | [plxlua](../plxlua.md) |
 | COBOL | [COBOL cookbook](plxcobol.md) | [plxcobol](../plxcobol.md) |
 | Oracle PL/SQL | [PL/SQL cookbook](plxplsql.md) | [plxplsql](../plxplsql.md) |
 | Transact-SQL | [T-SQL cookbook](plxtsql.md) | [plxtsql](../plxtsql.md) |

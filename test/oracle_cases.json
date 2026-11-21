@@ -1,0 +1,1036 @@
+{
+ "cases": [
+  {
+   "dialect": "plxlua",
+   "id": "int-floor-div",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": -7
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return tostring(a // b) .. \" \" .. tostring(a % b)",
+   "expected": "-4 1",
+   "diverges": "% truncates toward zero as in SQL (plxlua.md, Semantic differences)",
+   "plx": "-4 -1"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "float-div",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 7
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "float8",
+    "cs": "double"
+   },
+   "body": "return a / b",
+   "expected": "3.5",
+   "diverges": "/ on integers is SQL integer division (plxlua.md, Semantic differences)",
+   "plx": "3"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "pow",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 10
+    }
+   ],
+   "returns": {
+    "sql": "float8",
+    "cs": "double"
+   },
+   "body": "return a ^ b",
+   "expected": "1024"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "neg-mod-float",
+   "params": [
+    {
+     "name": "a",
+     "sql": "float8",
+     "cs": "double",
+     "value": -7.5
+    },
+    {
+     "name": "b",
+     "sql": "float8",
+     "cs": "double",
+     "value": 2.0
+    }
+   ],
+   "returns": {
+    "sql": "float8",
+    "cs": "double"
+   },
+   "body": "return a % b",
+   "expected": "0.5",
+   "diverges": "% follows SQL, which has no % for double precision (plxlua.md, Semantic differences)",
+   "plx": "ERROR: operator does not exist: double precision % double precision"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "int-overflow",
+   "params": [
+    {
+     "name": "a",
+     "sql": "bigint",
+     "cs": "long",
+     "value": 9223372036854775807
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return tostring(a + 1)",
+   "expected": "-9223372036854775808",
+   "diverges": "integer overflow raises an error instead of wrapping (plxlua.md, Semantic differences)",
+   "plx": "ERROR: bigint out of range"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "concat-num",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 5
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return \"n=\" .. n .. \"!\"",
+   "expected": "n=5!"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "string-len",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "héllo"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return #s .. \" \" .. string.len(s)",
+   "expected": "6 6",
+   "diverges": "strings are character strings: # counts characters (plxlua.md, Semantic differences)",
+   "plx": "5 5"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "string-sub",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "abcdef"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return string.sub(s, 2, 4) .. \"|\" .. s:sub(-2) .. \"|\" .. s:sub(3)",
+   "expected": "bcd|ef|cdef"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "string-upper-rep",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "ab"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return string.upper(s) .. string.rep(s, 3) .. s:lower()",
+   "expected": "ABabababab"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "string-format",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 42
+    },
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": 3.14159
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return string.format(\"%5d|%-4s|%.2f|%x\", n, \"ab\", x, n)",
+   "expected": "42|ab  |3.14|2a"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "for-step",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 10
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "local s = \"\"\nfor i = n, 1, -3 do\n  s = s .. i .. \",\"\nend\nreturn s",
+   "expected": "10,7,4,1,"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "for-float-step",
+   "params": [],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "local s = \"\"\nfor i = 1, 2, 0.5 do\n  s = s .. tostring(i) .. \",\"\nend\nreturn s",
+   "expected": "1.0,1.5,2.0,"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "while-break",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 100
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "local i = 0\nwhile true do\n  i = i + 7\n  if i > n then break end\nend\nreturn i",
+   "expected": "105"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "repeat-until-local",
+   "params": [],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "local i = 0\nrepeat\n  local j = i * 2\n  i = i + 1\nuntil j >= 6\nreturn i",
+   "expected": "4"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "goto-continue",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 6
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "local t = 0\nfor i = 1, n do\n  if i % 2 == 0 then goto continue end\n  t = t + i\n  ::continue::\nend\nreturn t",
+   "expected": "9"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "truthiness-zero",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "if n then return \"truthy\" else return \"falsy\" end",
+   "expected": "truthy"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "and-or-idiom",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "local a = n > 0 and \"pos\" or \"nonpos\"\nreturn a",
+   "expected": "nonpos"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "or-default-nil",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": null
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return s or \"dflt\"",
+   "expected": "dflt"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "nil-compare",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": null
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return tostring(s == nil) .. tostring(s ~= nil)",
+   "expected": "truefalse"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "ipairs-sum",
+   "params": [],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "local t = {3, 5, 7}\nlocal s = 0\nfor i, v in ipairs(t) do\n  s = s + i * v\nend\nreturn s",
+   "expected": "34"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "table-len",
+   "params": [],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "local t = {1, 2, 3, 4}\nreturn #t",
+   "expected": "4"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "math-lib",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": -2.5
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return math.floor(x) .. \" \" .. math.ceil(x) .. \" \" .. math.abs(x) .. \" \" .. math.max(1, 3, 2) .. \" \" .. math.min(4, -1)",
+   "expected": "-3 -2 2.5 3 -1"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "tonumber",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "42"
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "return tonumber(s) + 1",
+   "expected": "43"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "pcall-error",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "local ok, err = pcall(function()\n  if n == 0 then error(\"zero!\") end\nend)\nreturn tostring(ok)",
+   "expected": "false"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "multi-assign-swap",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 1
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "a, b = b, a\nreturn a .. \",\" .. b",
+   "expected": "2,1"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "int-div-zero",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 1
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return tostring(a // b)",
+   "expected": "ERROR"
+  },
+  {
+   "dialect": "plxlua",
+   "id": "shadow-block",
+   "params": [],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "local x = 1\ndo\n  local x = 2\nend\nreturn tostring(x)",
+   "expected": "1"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "int-div-mod",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": -7
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return (a / b) + \" \" + (a % b);",
+   "expected": "-3 -1"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "int-overflow",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 2147483647
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "int r = a + 1;\nreturn r;",
+   "expected": "-2147483648",
+   "diverges": "integer overflow raises numeric_value_out_of_range (plxcsharp.md, Semantic differences)",
+   "plx": "ERROR: integer out of range"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "long-mul",
+   "params": [
+    {
+     "name": "a",
+     "sql": "bigint",
+     "cs": "long",
+     "value": 3000000000
+    }
+   ],
+   "returns": {
+    "sql": "bigint",
+    "cs": "long"
+   },
+   "body": "return a * 3;",
+   "expected": "9000000000"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "double-div",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 7
+    },
+    {
+     "name": "b",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "float8",
+    "cs": "double"
+   },
+   "body": "return (double)a / b;",
+   "expected": "3.5"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "cast-trunc",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": -3.9
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return (int)x + \" \" + (int)3.9;",
+   "expected": "-3 3"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "math-round-bankers",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": 2.5
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return Math.Round(x) + \" \" + Math.Round(3.5) + \" \" + Math.Round(-2.5);",
+   "expected": "2 4 -2",
+   "diverges": "an unsuffixed real literal is numeric, which rounds half away from zero (plxcsharp.md, Semantic differences)",
+   "plx": "2 4 -3"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "convert-toint",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": 2.5
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "return Convert.ToInt32(x);",
+   "expected": "2"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "decimal-arith",
+   "params": [
+    {
+     "name": "a",
+     "sql": "numeric",
+     "cs": "decimal",
+     "value": 1.1
+    },
+    {
+     "name": "b",
+     "sql": "numeric",
+     "cs": "decimal",
+     "value": 2.2
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "decimal c = a + b;\nreturn c.ToString();",
+   "expected": "3.3"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "string-methods",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "  Hello World  "
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string t = s.Trim();\nreturn t.ToUpper() + \"|\" + t.Substring(6) + \"|\" + t.Length + \"|\" + t.IndexOf(\"World\") + \"|\" + t.Replace(\"o\", \"0\");",
+   "expected": "HELLO WORLD|World|11|6|Hell0 W0rld"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "string-contains",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "abcdef"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return s.Contains(\"cd\") + \" \" + s.StartsWith(\"ab\") + \" \" + s.EndsWith(\"x\");",
+   "expected": "true true false"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "interp-format",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": 3.14159
+    },
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 7
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return $\"{x:F2}|{n,4}|{n:D3}\";",
+   "expected": "3.14|   7|007",
+   "diverges": "alignment in an interpolation hole is rejected (plxcsharp.md, Interpolated strings)",
+   "plx": "ERROR: plxcsharp: alignment in an interpolation hole ({x,10}) is not supported; use lpad() or rpad()"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "string-concat-num",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 3
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return \"a\" + n + 1;",
+   "expected": "a31"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "stringbuilder",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 4
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "var sb = new StringBuilder();\nfor (int i = 0; i < n; i++) { sb.Append(i); sb.Append(\",\"); }\nreturn sb.ToString();",
+   "expected": "0,1,2,3,"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "for-loop-continue",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 10
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "int t = 0;\nfor (int i = 0; i < n; i++) {\n  if (i % 3 == 0) continue;\n  t += i;\n}\nreturn t;",
+   "expected": "27"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "do-while",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "int i = n;\ndo { i++; } while (i < 0);\nreturn i;",
+   "expected": "1"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "while-break",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 50
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "int i = 1;\nwhile (true) { i *= 3; if (i > n) break; }\nreturn i;",
+   "expected": "81"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "foreach-array",
+   "params": [],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "int[] a = {4, 5, 6};\nint s = 0;\nforeach (var v in a) s += v;\nreturn s;",
+   "expected": "15"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "switch-stmt",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 2
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string r;\nswitch (n) {\n  case 1: r = \"one\"; break;\n  case 2: case 3: r = \"two-three\"; break;\n  default: r = \"other\"; break;\n}\nreturn r;",
+   "expected": "two-three"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "switch-expr",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": -5
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return n switch { < 0 => \"neg\", 0 => \"zero\", _ => \"pos\" };",
+   "expected": "neg"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "ternary-nullcoal",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": null
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string t = s ?? \"dflt\";\nreturn t.Length > 3 ? t : \"short\";",
+   "expected": "dflt"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "try-catch-finally",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string log = \"\";\ntry {\n  log += \"t\";\n  int z = 10 / n;\n  log += \"x\";\n} catch (DivideByZeroException) {\n  log += \"c\";\n} finally {\n  log += \"f\";\n}\nreturn log;",
+   "expected": "tcf"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "finally-on-return",
+   "params": [
+    {
+     "name": "n",
+     "sql": "int",
+     "cs": "int",
+     "value": 1
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string log = \"s\";\nfor (int i = 0; i < 3; i++) {\n  try {\n    if (i == n) break;\n    log += i;\n  } finally {\n    log += \"f\";\n  }\n}\nreturn log;",
+   "expected": "s0ff"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "char-ops",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "abc"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "char c = s[1];\nreturn (int)c + \" \" + (char)(c + 1);",
+   "expected": "98 c",
+   "diverges": "arithmetic on char is rejected (plxcsharp.md, Types)",
+   "plx": "ERROR: plxcsharp: arithmetic on char values is not supported (C# would add character codes); convert with (int)c or concatenate strings"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "bool-logic",
+   "params": [
+    {
+     "name": "a",
+     "sql": "int",
+     "cs": "int",
+     "value": 5
+    }
+   ],
+   "returns": {
+    "sql": "bool",
+    "cs": "bool"
+   },
+   "body": "return a > 3 && a < 10 || a == 100;",
+   "expected": "true"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "string-join-split",
+   "params": [
+    {
+     "name": "s",
+     "sql": "text",
+     "cs": "string",
+     "value": "a,b,c"
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string[] p = s.Split(\",\");\nreturn string.Join(\"-\", p) + p.Length;",
+   "expected": "a-b-c3"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "string-null-concat",
+   "params": [
+    {
+     "name": "n",
+     "sql": "text",
+     "cs": "string",
+     "value": null
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "string b = \"a\";\nb += n;\nreturn b + \"|\";",
+   "expected": "a|"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "compound-ops",
+   "params": [
+    {
+     "name": "x",
+     "sql": "int",
+     "cs": "int",
+     "value": 13
+    }
+   ],
+   "returns": {
+    "sql": "int",
+    "cs": "int"
+   },
+   "body": "x += 2; x -= 1; x *= 3; x /= 2; x %= 5; x <<= 2; x >>= 1; x |= 1; x &= 7; x ^= 2;\nreturn x;",
+   "expected": "1"
+  },
+  {
+   "dialect": "plxcsharp",
+   "id": "math-funcs",
+   "params": [
+    {
+     "name": "x",
+     "sql": "float8",
+     "cs": "double",
+     "value": 2.0
+    }
+   ],
+   "returns": {
+    "sql": "text",
+    "cs": "string"
+   },
+   "body": "return Math.Pow(x, 10) + \" \" + Math.Sqrt(16) + \" \" + Math.Abs(-3) + \" \" + Math.Max(2, 9) + \" \" + Math.Floor(-1.5);",
+   "expected": "1024 4 3 9 -2"
+  }
+ ]
+}

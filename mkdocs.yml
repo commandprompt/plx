@@ -63,6 +63,8 @@ nav:
       - TypeScript (plxts): plxts.md
       - Python (plxpython3): plxpython3.md
       - Go (plxgo): plxgo.md
+      - C# (plxcsharp): plxcsharp.md
+      - Lua (plxlua): plxlua.md
       - COBOL (plxcobol): plxcobol.md
       - Oracle PL/SQL (plxplsql): plxplsql.md
       - Transact-SQL (plxtsql): plxtsql.md
@@ -74,6 +76,8 @@ nav:
       - TypeScript: cookbook/plxts.md
       - Python: cookbook/plxpython3.md
       - Go: cookbook/plxgo.md
+      - C#: cookbook/plxcsharp.md
+      - Lua: cookbook/plxlua.md
       - COBOL: cookbook/plxcobol.md
       - Oracle PL/SQL: cookbook/plxplsql.md
       - Transact-SQL: cookbook/plxtsql.md

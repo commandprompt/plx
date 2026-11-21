@@ -1,9 +1,9 @@
 # Interpolation in SQL
 
 Every dialect with string interpolation (plxruby `#{x}`, plxphp `{$x}`/`$x`,
-plxjs and plxts `${x}`, plxpython3 f-string `{x}`) can interpolate values into
-the SQL argument of `query`, `fetch_one`, `fetch_one!`, `execute`,
-`open_cursor`, `return_query` and `perform`. Since 3.0, an interpolated value
+plxjs and plxts `${x}`, plxpython3 f-string `{x}`, plxcsharp `$"{x}"`) can
+interpolate values into the SQL argument of `query`, `fetch_one`, `fetch_one!`,
+`execute`, `open_cursor`, `return_query` and `perform`. Since 3.0, an interpolated value
 never becomes SQL text. It is bound as a parameter, or quoted as a literal, and
 the author asks explicitly for anything else.
 

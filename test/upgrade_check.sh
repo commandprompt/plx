@@ -128,6 +128,32 @@ else
   echo "FAIL key collations after update: $c (expected wr_b=0 wr_e=100)"; fail=1
 fi
 
+# 5. 3.0.0 -> 3.1.0 adds the plxcsharp and plxlua languages: after the
+#    update both run a function, and the extension has the same functions
+#    as a fresh install.
+"$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
+q -d postgres -c "CREATE DATABASE $DB" || exit 1
+fns="SELECT count(*) || ' ' || md5(string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text)) FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e' JOIN pg_extension x ON x.oid = d.refobjid AND x.extname = 'plx'"
+q -d $DB -c "CREATE EXTENSION plx" >/dev/null || exit 1
+fresh=$(q -At -d $DB -c "$fns")
+q -d $DB -c "DROP EXTENSION plx" >/dev/null || exit 1
+q -d $DB -c "CREATE EXTENSION plx VERSION '3.0.0'" >/dev/null || exit 1
+if ! out=$(q -d $DB -c "ALTER EXTENSION plx UPDATE TO '3.1.0'" 2>&1); then
+  echo "FAIL update from 3.0.0 to 3.1.0:"; echo "$out"; fail=1
+fi
+upd=$(q -At -d $DB -c "$fns")
+r=$(q -At -d $DB 2>&1 <<'SQL'
+CREATE FUNCTION up_cs(n int) RETURNS int LANGUAGE plxcsharp AS $$ return n * 2; $$;
+CREATE FUNCTION up_lua(n int) RETURNS int LANGUAGE plxlua AS $$ return n + 1 $$;
+SELECT up_cs(20) + up_lua(1);
+SQL
+)
+if [ "$upd" = "$fresh" ] && [ "$r" = "42" ]; then
+  echo "ok   update 3.0.0 to 3.1.0 adds the plxcsharp and plxlua languages"
+else
+  echo "FAIL update 3.0.0 to 3.1.0: functions '$upd' (fresh '$fresh'), languages gave '$r'"; fail=1
+fi
+
 "$PSQL" -X -q -d postgres -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1
 "$PSQL" -X -q -d postgres -c "DROP ROLE IF EXISTS plx_upg_mallory" >/dev/null 2>&1
 exit $fail

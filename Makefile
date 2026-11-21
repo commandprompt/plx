@@ -1,14 +1,14 @@
 # plx - PGXS build
 MODULE_big = plx
-OBJS = src/plx_core.o src/plx_transpile.o src/plx_strbuild.o src/plx_dialect_ruby.o src/plx_dialect_php.o src/plx_dialect_js.o src/plx_dialect_python.o src/plx_dialect_cobol.o src/plx_dialect_plsql.o src/plx_dialect_ts.o src/plx_dialect_tsql.o src/plx_dialect_go.o src/plx_parse_brace.o
+OBJS = src/plx_core.o src/plx_transpile.o src/plx_strbuild.o src/plx_dialect_ruby.o src/plx_dialect_php.o src/plx_dialect_js.o src/plx_dialect_python.o src/plx_dialect_cobol.o src/plx_dialect_plsql.o src/plx_dialect_ts.o src/plx_dialect_tsql.o src/plx_dialect_go.o src/plx_dialect_csharp.o src/plx_dialect_lua.o src/plx_parse_brace.o
 
 EXTENSION = plx
-DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.3.2.sql plx--2.0.0.sql plx--3.0.0.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql plx--1.3.1--1.3.2.sql plx--1.3.2--2.0.0.sql plx--2.0.0--3.0.0.sql
+DATA = plx--1.0.sql plx--1.1.sql plx--1.1.1.sql plx--1.2.sql plx--1.2.1.sql plx--1.2.2.sql plx--1.3.0.sql plx--1.3.1.sql plx--1.3.2.sql plx--2.0.0.sql plx--3.0.0.sql plx--3.1.0.sql plx--1.0--1.1.sql plx--1.1--1.1.1.sql plx--1.1.1--1.2.sql plx--1.2--1.2.1.sql plx--1.2.1--1.2.2.sql plx--1.2.2--1.3.0.sql plx--1.3.0--1.3.1.sql plx--1.3.1--1.3.2.sql plx--1.3.2--2.0.0.sql plx--2.0.0--3.0.0.sql plx--3.0.0--3.1.0.sql
 
 # pg_regress suite (make installcheck). test/run_corpus.py is an additional
 # Ruby corpus runner (make corpuscheck), and test/differential.py checks each dialect against a
 # plpgsql reference (make differentialcheck).
-REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plx_features plx_scs_off plx_output plx_strbuild plx_errors plx_privileges fix_core fix_engine fix_brace fix_rubypy fix_go fix_cobol fix_tsqlplsql fix_sqltpl fix_engine3
+REGRESS = plxruby plxphp plxjs plxpython3 plxcobol plxplsql plxts plxtsql plxgo plxcsharp plxlua plx_features plx_scs_off plx_output plx_strbuild plx_errors plx_privileges fix_core fix_engine fix_brace fix_rubypy fix_go fix_cobol fix_tsqlplsql fix_sqltpl fix_engine3
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Point at the source-built PG 18 (not any distro pg_config on PATH).
@@ -34,6 +34,8 @@ differentialcheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" $(PLX_PYTHON) test/differential.py
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/finally_diff.py 300 1
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/finally_diff.py 300 1 plxcsharp
 
 # Corpus check: replay the Ruby corpus in test/corpus.json and compare each
 # case's output to its recorded expectation. Needs the extension installed and
@@ -44,6 +46,16 @@ differentialcheck:
 corpuscheck:
 	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
 		$(PLX_PYTHON) test/run_corpus.py
+
+# Oracle check: run plxlua and plxcsharp programs and compare their results
+# with what real Lua and C# print for the same programs (recorded in
+# test/oracle_cases.json; refresh them with python3 test/oracle_check.py
+# --refresh, which needs lua5.4 and dotnet). Needs the extension installed
+# and a running server, like installcheck.
+.PHONY: oraclecheck
+oraclecheck:
+	PLX_PSQL="$(shell $(PG_CONFIG) --bindir)/psql" PGDATABASE=contrib_regression \
+		$(PLX_PYTHON) test/oracle_check.py
 
 # Upgrade check: ALTER EXTENSION plx UPDATE in situations that need more
 # than one session. Needs the extension installed and a running server.

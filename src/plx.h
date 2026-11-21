@@ -65,6 +65,8 @@ extern const PlxDialect plx_plsql_dialect;
 extern const PlxDialect plx_ts_dialect;
 extern const PlxDialect plx_tsql_dialect;
 extern const PlxDialect plx_go_dialect;
+extern const PlxDialect plx_csharp_dialect;
+extern const PlxDialect plx_lua_dialect;
 
 /* Generic entry points; per-dialect trampolines forward to these */
 extern Datum plx_generic_validator(FunctionCallInfo fcinfo, const PlxDialect *d);

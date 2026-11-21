@@ -2,7 +2,66 @@
 
 All notable changes to plx are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and plx uses the extension
-version in `plx.control` (currently `3.0.0`).
+version in `plx.control` (currently `3.1.0`).
+
+## [3.1.0] - 2026-11-21
+
+3.1.0 adds two dialects, plxlua and plxcsharp. Nothing that 3.0.0 does
+changes: functions in the other dialects transpile as before.
+
+### Added
+
+- **plxlua, a Lua dialect** (`LANGUAGE plxlua`). Lua's keyword-`end` blocks,
+  `local` declarations with type inference and `--::` annotations, `<const>`,
+  `if`/`elseif`, `while`, `repeat ... until`, the numeric `for` (any step) and
+  `for ... in query(...)` / `ipairs(...)`, the `goto continue` idiom, and
+  `return` into OUT parameters. Errors are raised with `error(...)`,
+  `error{message = ..., sqlstate = ...}`, `assert` and `print`, and handled
+  with `pcall(function() ... end)`, whose `err` carries `err.sqlstate` and the
+  other diagnostics fields. In expressions: `..`, `~=`, `nil`, `#`, table
+  constructors as arrays, `//`, and the `x or d`, `c and a or b` and
+  `c and v or d` idioms, with a subset of the `string`, `math` and `table`
+  libraries. Locals keep Lua's block scope, and `s = s .. e` uses the string
+  builder. See [doc/plxlua.md](doc/plxlua.md).
+- **plxcsharp, a C# dialect** (`LANGUAGE plxcsharp`). Declarations put the type
+  first and C# types map to PostgreSQL types (`int` to `integer`, `string` to
+  `text`, `decimal` to `numeric`, `DateTime` to `timestamp`, `T[]` to arrays);
+  `var` takes the type of its value. Regular, verbatim (`@"..."`), raw
+  (`"""..."""`) and interpolated (`$"..."`) strings work, and an interpolated
+  string passed to `query`, `execute` and the other SQL intrinsics is a SQL
+  template whose values are bound. `+` is string concatenation when an operand
+  is known to be a string. Statements: `if`, `while`, `do`/`while`, `for`,
+  `foreach` over a query, an array or a string, `switch` and switch
+  expressions, `try`/`catch`/`finally` with exception classes and
+  `when (e.SqlState == ...)` filters, `throw`, `yield return` for
+  set-returning functions, `Console.WriteLine` as `RAISE NOTICE`, and
+  `StringBuilder` and `s += x` on the string builder, with a set of mapped
+  .NET members (`string`, `Math`, `Convert`, `DateTime`, `Guid`, ...). See
+  [doc/plxcsharp.md](doc/plxcsharp.md).
+- `make oraclecheck` runs plxlua and plxcsharp programs and compares their
+  results with what real Lua and C# print for the same programs.
+
+### Upgrading
+
+These steps are for a database administrator who upgrades plx from 3.0.0 to
+3.1.0. You need superuser access to each database that has the plx
+extension.
+
+1. Install the new build on the server.
+2. Restart the server, or start new sessions, so that they load the new build.
+3. In each database that has plx, run:
+
+   ```sql
+   ALTER EXTENSION plx UPDATE;
+   ```
+
+   The update adds the `plxlua` and `plxcsharp` languages and their handler
+   functions. It changes no existing object. From 2.0.0, the same command
+   updates through 3.0.0 to 3.1.0; read the 3.0.0 Upgrading steps first.
+
+To check the result, run
+`SELECT extversion FROM pg_extension WHERE extname = 'plx';`. It returns
+`3.1.0`.
 
 ## [3.0.0] - 2026-11-20
 

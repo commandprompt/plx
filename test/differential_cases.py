@@ -24,6 +24,8 @@ DIALECTS = {
     "plxcobol": "cob",
     "plxplsql": "pls",
     "plxtsql": "tq",
+    "plxlua": "lua",
+    "plxcsharp": "cs",
 }
 
 # Schema the cases run against. Regular tables, not TEMP: each statement the
@@ -147,6 +149,22 @@ END;
     SET @g = 'F';
   RETURN @g;
 """,
+            "plxlua": """
+if score >= 90 then
+  return "A"
+elseif score >= 80 then
+  return "B"
+else
+  return "F"
+end
+""",
+            "plxcsharp": """
+string g;
+if (score >= 90) g = "A";
+else if (score >= 80) g = "B";
+else g = "F";
+return g;
+""",
         },
     },
 
@@ -241,6 +259,21 @@ END;
   END
   RETURN @total;
 """,
+            "plxlua": """
+local total = 0 --:: bigint
+for i = 1, n do
+  total = total + i
+end
+return total
+""",
+            "plxcsharp": """
+long total = 0;
+for (int i = 1; i <= n; i++)
+{
+    total += i;
+}
+return total;
+""",
         },
     },
 
@@ -292,6 +325,12 @@ END;
             "plxtsql": """
   RETURN @a / @b;
 """,
+            "plxlua": """
+return a / b
+""",
+            "plxcsharp": """
+return a / b;
+""",
         },
     },
 
@@ -341,6 +380,12 @@ END;
 """,
             "plxtsql": """
   RETURN @a % @b;
+""",
+            "plxlua": """
+return a % b
+""",
+            "plxcsharp": """
+return a % b;
 """,
         },
     },
@@ -396,6 +441,12 @@ END;
 """,
             "plxtsql": """
   RETURN 'user ' || @nm || ' has ' || @n || ' items';
+""",
+            "plxlua": """
+return "user " .. nm .. " has " .. n .. " items"
+""",
+            "plxcsharp": """
+return $"user {nm} has {n} items";
 """,
         },
         # Interpolation propagates NULL in every dialect that has it, so the
@@ -460,6 +511,12 @@ PROCEDURE DIVISION.
 """,
             "plxtsql": """
   RETURN @a > 0 AND @b > 0;
+""",
+            "plxlua": """
+return a > 0 and b > 0
+""",
+            "plxcsharp": """
+return a > 0 && b > 0;
 """,
         },
     },
@@ -593,6 +650,26 @@ END;
   END
   RETURN @total;
 """,
+            "plxlua": """
+local total = 0
+for i = 1, n do
+  if i == 3 then goto continue end
+  if i > 7 then break end
+  total = total + i
+  ::continue::
+end
+return total
+""",
+            "plxcsharp": """
+int total = 0;
+for (int i = 1; i <= n; i++)
+{
+    if (i == 3) continue;
+    if (i > 7) break;
+    total += i;
+}
+return total;
+""",
         },
     },
 
@@ -672,6 +749,21 @@ BEGIN
   RETURN total;
 END;
 """,
+            "plxlua": """
+local total = 0 --:: bigint
+for row in query("SELECT amount FROM plxdiff_orders WHERE grp = $1", g) do
+  total = total + row.amount
+end
+return total
+""",
+            "plxcsharp": """
+long total = 0;
+foreach (var row in query($"SELECT amount FROM plxdiff_orders WHERE grp = {g}"))
+{
+    total += row.amount;
+}
+return total;
+""",
         },
     },
 
@@ -737,6 +829,18 @@ END;
     SET @r = -1;
   END CATCH
   RETURN @r;
+""",
+            "plxlua": """
+local r --:: int
+local ok = pcall(function()
+  r = a / b
+end)
+if not ok then return -1 end
+return r
+""",
+            "plxcsharp": """
+try { return a / b; }
+catch (Exception e) { return -1; }
 """,
         },
     },
@@ -831,6 +935,21 @@ BEGIN
   END LOOP;
   RETURN total;
 END;
+""",
+            "plxlua": """
+local total = 0 --:: bigint
+for _, v in ipairs(a) do
+  total = total + v
+end
+return total
+""",
+            "plxcsharp": """
+long total = 0;
+foreach (int v in a)
+{
+    total += v;
+}
+return total;
 """,
         },
     },
@@ -928,6 +1047,16 @@ END;
     RETURN 'ne';
   RETURN 'unknown';
 """,
+            "plxlua": """
+if a == b then return "eq" end
+if a ~= b then return "ne" end
+return "unknown"
+""",
+            "plxcsharp": """
+if (a == b) return "eq";
+if (a != b) return "ne";
+return "unknown";
+""",
         },
     },
 
@@ -978,18 +1107,31 @@ END;
             "plxtsql": """
   RETURN UPPER(@s);
 """,
+            "plxlua": """
+return upper(s)
+""",
+            "plxcsharp": """
+return upper(s);
+""",
         },
     },
 
     # ------------------------------------------------------- strupper_native
     # The same program written with each language's own uppercase idiom rather
     # than a SQL call. plxgo maps a subset of the Go standard library, so
-    # strings.ToUpper reaches upper() and agrees with the reference. No other
+    # strings.ToUpper reaches upper() and agrees with the reference, and plxlua
+    # maps a subset of Lua's string library, so s:upper() does too. No other
     # dialect maps its standard library: the method form is passed through and
     # fails when the function is called, which is the documented design and not
     # a defect. This case exists so that stays true on purpose. If a dialect
     # ever gains the mapping, the check reports a stale exemption and the
     # documentation gets updated with it.
+    # strings.ToUpper reaches upper() and agrees with the reference, and plxcsharp
+    # maps s.ToUpper() the same way. The other dialects do not map their standard
+    # libraries: the method form is passed through and fails when the function is
+    # called, which is the documented design and not a defect. This case exists
+    # so that stays true on purpose. If a dialect ever gains the mapping, the
+    # check reports a stale exemption and the documentation gets updated with it.
     {
         "name": "strupper_native",
         "args": "s text",
@@ -1019,13 +1161,19 @@ return s.upper()
             "plxgo": """
 	return strings.ToUpper(s)
 """,
+            "plxlua": """
+return s:upper()
+""",
+            "plxcsharp": """
+return s.ToUpper();
+""",
         },
         "documented": [
             {
                 # s.upcase reads as a column reference to a table s.
                 "dialects": ["plxruby"],
                 "calls": ["'hello'", "''", "NULL"],
-                "reason": "only plxgo maps standard-library calls; elsewhere a "
+                "reason": "only plxgo and plxlua map standard-library calls; elsewhere a "
                           "method or library call is passed through to SQL and "
                           "must name a real function (doc/LIMITATIONS.md)",
                 "outcome": '{"error" : "42P01"}',
@@ -1034,7 +1182,8 @@ return s.upper()
                 # strtoupper($s) names a function that does not exist.
                 "dialects": ["plxphp"],
                 "calls": ["'hello'", "''", "NULL"],
-                "reason": "only plxgo maps standard-library calls; elsewhere a "
+                "reason": "only plxgo and plxcsharp map standard-library calls; "
+                          "elsewhere a "
                           "method or library call is passed through to SQL and "
                           "must name a real function (doc/LIMITATIONS.md)",
                 "outcome": '{"error" : "42883"}',

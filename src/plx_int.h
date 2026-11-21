@@ -61,6 +61,25 @@ typedef struct PlxSurface
 	bool		fstrings;			/* Python f"...{expr}..." interpolation */
 	char		concat_op;			/* string concat operator char ('.' PHP), 0=none */
 	bool		ts_types;			/* TypeScript: rewrite "id: T" annotations */
+	bool		cmt_dashdash;		/* '--' line comment (Lua); with long_brackets
+									 * also the '--[[ ... ]]' long comment */
+	bool		long_brackets;		/* Lua long strings [[ ... ]] / [==[ ... ]==] */
+	bool		lua_ops;			/* Lua operator set: maximal-munch operators,
+									 * '#' and '~' operators, braces nest like
+									 * brackets, no backtick strings, '.5' and '3.'
+									 * numbers, lines counted inside strings */
+	bool		append_null_empty;	/* an append treats a NULL as an empty
+									 * string, as C# string concatenation
+									 * does: plx_sb_append, not the strict
+									 * one that gives NULL as || does */
+	bool		own_assign_check;	/* the front end rejects an assignment
+									 * inside an expression itself and hands
+									 * the engine translated text (C#), where
+									 * '=' is SQL equality */
+	bool		own_name_case;		/* the front end gives names that differ
+									 * only in case their own plpgsql names
+									 * (Lua), so the shared table need not
+									 * reject a second spelling */
 	const PlxKwSpell *kws;
 	int			nkws;
 	const PlxExcMap *excs;
@@ -76,6 +95,23 @@ typedef struct PlxSurface
 	void		(*parse_body)(struct PlxCtx *cx);
 	bool		self_contained_block;	/* dialect emits its own DECLARE/BEGIN/END
 										 * (PL/SQL); skip the shared block wrap */
+
+	/*
+	 * Optional dialect expression rewriter. When set, plx_rewrite_expr hands
+	 * every expression to it instead of the shared text rewriter, so a dialect
+	 * whose expression grammar the shared rewriter does not know (Lua) can
+	 * still reuse the shared statement emitter and intrinsics. Returns the
+	 * plpgsql expression text; boolctx asks for a condition.
+	 */
+	char	   *(*rewrite_expr) (struct PlxCtx *cx, const char *s, int len, bool boolctx);
+
+	/*
+	 * Optional string-literal decoder: the value of the string token whose
+	 * source text is [tok, tok + len). When set, the SQL-argument code takes a
+	 * literal's SQL text from it (the dialect has no interpolation) instead of
+	 * assuming one-character quotes and the shared escape rules.
+	 */
+	char	   *(*str_value) (struct PlxCtx *cx, const char *tok, int len);
 } PlxSurface;
 
 /* Transpile a dialect body to a fully assembled plpgsql function body. The

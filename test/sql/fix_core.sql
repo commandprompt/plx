@@ -308,7 +308,8 @@ INSERT INTO a4_old_comp VALUES (ROW('b')), (ROW('a')), (ROW('b'));
 CREATE TYPE a4_rng AS RANGE (subtype = plx_strbuild);
 CREATE DOMAIN a4_rdom AS plx_strbuild;
 CREATE TYPE a4_drng AS RANGE (subtype = a4_rdom);
-ALTER EXTENSION plx UPDATE TO '3.0.0';
+-- update to the default version, the one a fresh install gets
+ALTER EXTENSION plx UPDATE;
 -- objects only a fresh install has, then objects only the update has
 SELECT * FROM plx_fresh EXCEPT SELECT * FROM plx_objects;
 SELECT * FROM plx_objects EXCEPT SELECT * FROM plx_fresh;

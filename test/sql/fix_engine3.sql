@@ -493,3 +493,14 @@ r = fetch_one("SELECT 'F'::text AS s")
 return r .  s
 $$;
 SELECT r4c40_py() AS r;  -- F
+
+-- 3.1.0 review: a string builder cast by hand, (s)::int, is read as text
+-- first, as in 3.0.0. plx_strbuild has no cast to integer, so 3.1.0's first
+-- port of plxcsharp, which skipped the text cast before any )::, made this
+-- fail with "cannot cast type plx_strbuild to integer".
+CREATE FUNCTION r31_cast_js(n int) RETURNS int LANGUAGE plxjs AS $$
+let s = "";
+for (let i = 1; i <= n; i++) { s += i; }
+return (s)::int;
+$$;
+SELECT r31_cast_js(3) AS r;  -- 123

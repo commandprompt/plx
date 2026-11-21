@@ -5,8 +5,8 @@
 # plx
 
 **Write PostgreSQL functions in the language you already know.** Ruby, PHP,
-JavaScript, TypeScript, Python, Go, COBOL, Oracle PL/SQL, or Transact-SQL,
-compiled to plpgsql at `CREATE FUNCTION` time.
+JavaScript, TypeScript, Python, Go, C#, Lua, COBOL, Oracle PL/SQL, or
+Transact-SQL, compiled to plpgsql at `CREATE FUNCTION` time.
 
 plx is a PostgreSQL extension. When you run `CREATE FUNCTION ... LANGUAGE plx*`,
 plx transpiles the body to plpgsql and stores that plpgsql in `pg_proc.prosrc`.
@@ -36,6 +36,8 @@ available today:
 - [**plxts**](plxts.md): a TypeScript dialect (plxjs plus type annotations)
 - [**plxpython3**](plxpython3.md): a Python dialect
 - [**plxgo**](plxgo.md): a Go dialect
+- [**plxcsharp**](plxcsharp.md): a C# dialect
+- [**plxlua**](plxlua.md): a Lua dialect
 - [**plxcobol**](plxcobol.md): a COBOL dialect (ISO/IEC 1989:2023)
 - [**plxplsql**](plxplsql.md): an Oracle PL/SQL dialect
 - [**plxtsql**](plxtsql.md): a Transact-SQL (SQL Server) dialect
