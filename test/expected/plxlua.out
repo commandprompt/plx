@@ -1973,3 +1973,36 @@ SELECT lua_ipairs_inplace();  -- 1,2,4,|1,2,4,|1,1,2,3,|1,2,3,11,100,12,|1,2,4,
  1,2,4,|1,2,4,|1,1,2,3,|1,2,3,11,100,12,|1,2,4,
 (1 row)
 
+-- 3.1.0 review round 6: ok, t = pcall(...) assigns t as a whole too, so the
+-- loop keeps the original array. Expected values from lua5.4.
+CREATE FUNCTION lua_ipairs_pcall() RETURNS text LANGUAGE plxlua AS $$
+local t = {"a", "b", "c"}
+local s = ""
+local ok
+for i, v in ipairs(t) do
+  if i == 1 then ok, t = pcall(function() local z = 1 end) end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_pcall();  -- a,b,c,
+ lua_ipairs_pcall 
+------------------
+ a,b,c,
+(1 row)
+
+CREATE FUNCTION lua_ipairs_pcall_p(t text[]) RETURNS text LANGUAGE plxlua AS $$
+local s = ""
+local ok
+for i, v in ipairs(t) do
+  if i == 1 then ok, t = pcall(function() local z = 1 end) end
+  s = s .. v .. ","
+end
+return s
+$$;
+SELECT lua_ipairs_pcall_p(ARRAY['a', 'b', 'c']);  -- a,b,c,
+ lua_ipairs_pcall_p 
+--------------------
+ a,b,c,
+(1 row)
+

@@ -3983,12 +3983,16 @@ lua_assign(Lua *L, int a, int eq, int b, int ind)
 				if (bd->isconst)
 					plx_err(cx, line, "attempt to assign to const variable \"%s\"", bd->lname);
 				pg[i] = bd->pgname;
+				lua_note_rebind(L, pg[i]);	/* ok, t = pcall(...) assigns t */
 				lua_learn_type(bd, i == 0 ? "boolean" : "text", false);
 				if (i == 1)
 					bd->errid = lua_errvar(L, bd->pgname)->id;
 			}
 			else if (lua_param(cx, t[ta[i]].s, t[ta[i]].len) >= 0)
+			{
 				pg[i] = lua_param_ref(cx, t[ta[i]].s, t[ta[i]].len);
+				lua_note_rebind(L, pg[i]);	/* ok, t = pcall(...) assigns t */
+			}
 			else
 			{
 				imp[i] = lua_declare(L, t[ta[i]].s, t[ta[i]].len,
